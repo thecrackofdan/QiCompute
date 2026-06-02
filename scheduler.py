@@ -155,9 +155,19 @@ class Scheduler:
         return receipt
 
     def distribute_block_reward(self, block_hash: str, reward_qi: float) -> dict[str, Any]:
+        if not block_hash:
+            raise ValueError("block_hash is required")
+        if reward_qi <= 0:
+            raise ValueError("reward_qi must be positive")
+        if self.db.mining_round_for_block_hash(block_hash):
+            raise ValueError(f"block_hash has already been settled: {block_hash}")
         mining_cfg = self.config["mining"]
         pool_fee_percent = float(mining_cfg.get("pool_fee_percent", 0))
         pplns_window_shares = int(mining_cfg.get("pplns_window_shares", 1000))
+        if pool_fee_percent < 0 or pool_fee_percent >= 100:
+            raise ValueError("pool_fee_percent must be between 0 and 100")
+        if pplns_window_shares <= 0:
+            raise ValueError("pplns_window_shares must be positive")
         shares = self.db.accepted_shares_for_pplns(pplns_window_shares)
         if not shares:
             raise RuntimeError("Cannot distribute block reward without accepted mining shares")
@@ -171,6 +181,8 @@ class Scheduler:
         for share in shares:
             weights[share["worker_id"]] += float(share["difficulty"])
         total_weight = sum(weights.values())
+        if total_weight <= 0:
+            raise RuntimeError("Cannot distribute block reward without positive share weight")
 
         self.db.insert_mining_round(
             {

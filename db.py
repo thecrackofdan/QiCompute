@@ -72,6 +72,10 @@ CREATE TABLE IF NOT EXISTS mining_rounds (
     policy TEXT NOT NULL,
     metadata_json TEXT NOT NULL
 );
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_mining_rounds_block_hash
+ON mining_rounds(block_hash)
+WHERE block_hash IS NOT NULL;
 """
 
 
@@ -225,6 +229,12 @@ class WorkerDB:
                 (limit,),
             )
         )
+
+    def mining_round_for_block_hash(self, block_hash: str) -> sqlite3.Row | None:
+        return self.conn.execute(
+            "SELECT * FROM mining_rounds WHERE block_hash = ?",
+            (block_hash,),
+        ).fetchone()
 
     def get_balance(self, worker_id: str) -> float:
         row = self.conn.execute(

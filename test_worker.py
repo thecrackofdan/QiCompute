@@ -75,6 +75,17 @@ class WorkerPrototypeTest(unittest.TestCase):
             self.assertGreater(db.get_balance("test-worker"), 9)
             db.close()
 
+    def test_cannot_distribute_same_block_twice(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            scheduler, db = self._scheduler(tmp)
+            scheduler.run_once()
+
+            scheduler.distribute_block_reward("block-1", 10)
+
+            with self.assertRaises(ValueError):
+                scheduler.distribute_block_reward("block-1", 10)
+            db.close()
+
     def test_failed_mining_command_records_zero_share_receipt(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             scheduler, db = self._scheduler(tmp, mining_command="false")

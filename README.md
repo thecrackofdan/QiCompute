@@ -11,6 +11,11 @@ This MVP has no smart contracts and no real payout rail. It records local receip
 - `telemetry.py`: GPU telemetry via `nvidia-smi`, with fallback watts when unavailable.
 - `receipts.py`: local job receipt format.
 - `verifier.py`: local inference receipt validation.
+- `registry.py`: local worker registry helpers.
+- `router.py`: local inference job routing.
+- `reputation.py`: worker reputation updates.
+- `pricing.py`: local marketplace pricing estimates.
+- `market.py`: local marketplace CLI.
 - `db.py`: SQLite schema and persistence.
 - `config.yaml`: local worker configuration.
 
@@ -61,6 +66,47 @@ Run smoke tests:
 ```bash
 python3 -m unittest -v
 ```
+
+## Marketplace Prototype
+
+The local marketplace layer models:
+
+```text
+customer job -> router -> selected worker -> receipt -> verification -> reputation -> settled payout
+```
+
+Register the local worker:
+
+```bash
+python3 market.py --register-worker
+```
+
+Show online workers:
+
+```bash
+python3 market.py --workers
+```
+
+Submit a simulated customer job. Raw prompts are not stored; only a placeholder prompt hash is recorded.
+
+```bash
+python3 market.py --submit-job --model llama-3.1-8b --input-tokens 100 --output-tokens 500
+```
+
+Route queued jobs:
+
+```bash
+python3 market.py --route-jobs
+```
+
+Show queued jobs or reputation:
+
+```bash
+python3 market.py --queued-jobs
+python3 market.py --reputation
+```
+
+Routing considers online status, model support, reputation, region preference, VRAM, latency, energy efficiency, and failure rate. This is local route planning only; no network calls are made.
 
 Run continuously:
 
@@ -195,6 +241,8 @@ Accepted inference jobs are tracked by `job_id`. If the same accepted job appear
 - `receipts`: one row per mining or inference cycle.
 - `payout_events`: payable events that update worker balances.
 - `inference_jobs`: accepted inference job IDs that have already been paid.
+- `worker_registry`: local worker capability, heartbeat, and reputation records.
+- `customer_jobs`: local customer-facing job queue with prompt hashes, not raw prompts.
 - `mining_shares`: accepted/rejected share records for pool reward allocation.
 - `mining_rounds`: block reward distribution records.
 - `balances`: local estimated Qi owed by worker ID.

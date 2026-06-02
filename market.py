@@ -1,0 +1,123 @@
+from __future__ import annotations
+
+import argparse
+import hashlib
+from uuid import uuid4
+
+from db import WorkerDB
+from pricing import estimate_job_price
+from receipts import utc_now_iso
+from registry import heartbeat_local_worker, register_local_worker
+from router import route_inference_job
+from worker import load_config
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Local QiCompute marketplace prototype")
+    parser.add_argument("--config", default="config.yaml")
+    parser.add_argument("--register-worker", action="store_true")
+    parser.add_argument("--workers", action="store_true")
+    parser.add_argument("--submit-job", action="store_true")
+    parser.add_argument("--model", default="llama-3.1-8b")
+    parser.add_argument("--input-tokens", type=float, default=100)
+    parser.add_argument("--output-tokens", type=float, default=500)
+    parser.add_argument("--privacy-level", default="standard")
+    parser.add_argument("--max-price-qi", type=float, default=0.001)
+    parser.add_argument("--route-jobs", action="store_true")
+    parser.add_argument("--queued-jobs", action="store_true")
+    parser.add_argument("--reputation", action="store_true")
+    args = parser.parse_args()
+
+    config = load_config(args.config)
+    db = WorkerDB(config["worker"]["db_path"])
+    try:
+        if args.register_worker:
+            worker = register_local_worker(db, config)
+            heartbeat_local_worker(db, worker["worker_id"], {"source": "market-cli"})
+            print(f"registered worker={worker['worker_id']} models={','.join(worker['supported_models'])}")
+            return
+        if args.workers:
+            for worker in db.list_online_workers():
+                print(
+                    f"{worker['worker_id']} online={worker['online']} "
+                    f"region={worker['region']} reputation={worker['reputation_score']:.2f} "
+                    f"models={','.join(worker['supported_models'])}"
+                )
+            return
+        if args.submit_job:
+            job_id = str(uuid4())
+            price = estimate_job_price(
+                input_tokens=args.input_tokens,
+                output_tokens=args.output_tokens,
+                model=args.model,
+                privacy_level=args.privacy_level,
+                latency_target=None,
+                energy_joules=0,
+                worker_reputation=50,
+                config=config,
+            )
+            db.insert_customer_job(
+                {
+                    "job_id": job_id,
+                    "customer_id": "local-customer",
+                    "model": args.model,
+                    "prompt_hash": _placeholder_prompt_hash(job_id),
+                    "input_tokens": args.input_tokens,
+                    "expected_output_tokens": args.output_tokens,
+                    "privacy_level": args.privacy_level,
+                    "max_price_qi": args.max_price_qi,
+                    "status": "queued",
+                    "created_at": utc_now_iso(),
+                    "metadata": {"price": price.to_dict()},
+                }
+            )
+            print(f"queued job={job_id} model={args.model} estimated_price_qi={price.estimated_price_qi:.12f}")
+            return
+        if args.route_jobs:
+            _route_jobs(db)
+            return
+        if args.queued_jobs:
+            for job in db.list_queued_jobs():
+                print(f"{job['job_id']} model={job['model']} status={job['status']} max_price_qi={job['max_price_qi']}")
+            return
+        if args.reputation:
+            for worker in db.list_online_workers():
+                print(
+                    f"{worker['worker_id']} reputation={worker['reputation_score']:.2f} "
+                    f"success={worker['success_count']} failure={worker['failure_count']}"
+                )
+            return
+        parser.print_help()
+    finally:
+        db.close()
+
+
+def _route_jobs(db: WorkerDB) -> None:
+    workers = db.list_online_workers()
+    for job in db.list_queued_jobs():
+        decision = route_inference_job(
+            {
+                "job_id": job["job_id"],
+                "model": job["model"],
+                "input_tokens": job["input_tokens"],
+                "expected_output_tokens": job["expected_output_tokens"],
+                "max_price_qi": job["max_price_qi"],
+                "privacy_level": job["privacy_level"],
+                "requires_gpu": True,
+            },
+            workers,
+        )
+        if decision.accepted and decision.worker_id:
+            db.assign_customer_job(job["job_id"], decision.worker_id, decision.score)
+            print(f"routed job={job['job_id']} worker={decision.worker_id} score={decision.score:.4f}")
+        else:
+            db.update_customer_job_status(job["job_id"], "rejected", {"route_reason": decision.reason})
+            print(f"rejected job={job['job_id']} reason={decision.reason}")
+
+
+def _placeholder_prompt_hash(job_id: str) -> str:
+    return hashlib.sha256(f"placeholder:{job_id}".encode("utf-8")).hexdigest()
+
+
+if __name__ == "__main__":
+    main()

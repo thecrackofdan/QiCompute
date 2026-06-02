@@ -86,6 +86,45 @@ CREATE TABLE IF NOT EXISTS inference_jobs (
     payout_event_id TEXT
 );
 
+CREATE TABLE IF NOT EXISTS worker_registry (
+    worker_id TEXT PRIMARY KEY,
+    operator TEXT,
+    region TEXT,
+    public_key TEXT,
+    endpoint TEXT,
+    hardware_profile_json TEXT NOT NULL,
+    supported_modes_json TEXT NOT NULL,
+    supported_models_json TEXT NOT NULL,
+    gpu_count INTEGER NOT NULL DEFAULT 0,
+    total_vram_gb REAL NOT NULL DEFAULT 0,
+    total_watts_capacity REAL NOT NULL DEFAULT 0,
+    online INTEGER NOT NULL DEFAULT 0,
+    last_seen_at TEXT,
+    reputation_score REAL NOT NULL DEFAULT 50,
+    success_count INTEGER NOT NULL DEFAULT 0,
+    failure_count INTEGER NOT NULL DEFAULT 0,
+    average_latency_ms REAL NOT NULL DEFAULT 0,
+    average_energy_per_token REAL NOT NULL DEFAULT 0,
+    metadata_json TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS customer_jobs (
+    job_id TEXT PRIMARY KEY,
+    customer_id TEXT,
+    model TEXT NOT NULL,
+    prompt_hash TEXT,
+    input_tokens REAL NOT NULL,
+    expected_output_tokens REAL NOT NULL,
+    privacy_level TEXT NOT NULL,
+    max_price_qi REAL NOT NULL,
+    status TEXT NOT NULL,
+    assigned_worker_id TEXT,
+    route_score REAL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    metadata_json TEXT NOT NULL
+);
+
 CREATE UNIQUE INDEX IF NOT EXISTS idx_mining_rounds_block_hash
 ON mining_rounds(block_hash)
 WHERE block_hash IS NOT NULL;
@@ -345,3 +384,247 @@ class WorkerDB:
                 (limit,),
             )
         )
+
+    def register_worker(self, worker: dict[str, Any]) -> None:
+        existing = self.get_worker(worker["worker_id"])
+        reputation_score = existing["reputation_score"] if existing else float(worker.get("reputation_score", 50))
+        success_count = existing["success_count"] if existing else int(worker.get("success_count", 0))
+        failure_count = existing["failure_count"] if existing else int(worker.get("failure_count", 0))
+        average_latency_ms = existing["average_latency_ms"] if existing else float(worker.get("average_latency_ms", 0))
+        average_energy_per_token = (
+            existing["average_energy_per_token"] if existing else float(worker.get("average_energy_per_token", 0))
+        )
+        now = worker.get("last_seen_at")
+        self.conn.execute(
+            """
+            INSERT INTO worker_registry (
+                worker_id, operator, region, public_key, endpoint,
+                hardware_profile_json, supported_modes_json, supported_models_json,
+                gpu_count, total_vram_gb, total_watts_capacity, online, last_seen_at,
+                reputation_score, success_count, failure_count,
+                average_latency_ms, average_energy_per_token, metadata_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(worker_id) DO UPDATE SET
+                operator = excluded.operator,
+                region = excluded.region,
+                public_key = excluded.public_key,
+                endpoint = excluded.endpoint,
+                hardware_profile_json = excluded.hardware_profile_json,
+                supported_modes_json = excluded.supported_modes_json,
+                supported_models_json = excluded.supported_models_json,
+                gpu_count = excluded.gpu_count,
+                total_vram_gb = excluded.total_vram_gb,
+                total_watts_capacity = excluded.total_watts_capacity,
+                online = excluded.online,
+                last_seen_at = excluded.last_seen_at,
+                reputation_score = excluded.reputation_score,
+                success_count = excluded.success_count,
+                failure_count = excluded.failure_count,
+                average_latency_ms = excluded.average_latency_ms,
+                average_energy_per_token = excluded.average_energy_per_token,
+                metadata_json = excluded.metadata_json
+            """,
+            (
+                worker["worker_id"],
+                worker.get("operator"),
+                worker.get("region"),
+                worker.get("public_key"),
+                worker.get("endpoint"),
+                json.dumps(worker.get("hardware_profile", {}), sort_keys=True),
+                json.dumps(worker.get("supported_modes", []), sort_keys=True),
+                json.dumps(worker.get("supported_models", []), sort_keys=True),
+                int(worker.get("gpu_count", 0)),
+                float(worker.get("total_vram_gb", 0)),
+                float(worker.get("total_watts_capacity", 0)),
+                1 if worker.get("online", False) else 0,
+                now,
+                reputation_score,
+                success_count,
+                failure_count,
+                average_latency_ms,
+                average_energy_per_token,
+                json.dumps(worker.get("metadata", {}), sort_keys=True),
+            ),
+        )
+        self.conn.commit()
+
+    def update_worker_heartbeat(self, worker_id: str, telemetry: dict[str, Any]) -> None:
+        self.conn.execute(
+            """
+            UPDATE worker_registry
+            SET online = 1,
+                last_seen_at = ?,
+                metadata_json = ?
+            WHERE worker_id = ?
+            """,
+            (
+                telemetry.get("last_seen_at"),
+                json.dumps(telemetry, sort_keys=True),
+                worker_id,
+            ),
+        )
+        self.conn.commit()
+
+    def get_worker(self, worker_id: str) -> dict[str, Any] | None:
+        row = self.conn.execute(
+            "SELECT * FROM worker_registry WHERE worker_id = ?",
+            (worker_id,),
+        ).fetchone()
+        return _worker_row_to_dict(row) if row else None
+
+    def list_online_workers(self) -> list[dict[str, Any]]:
+        rows = self.conn.execute(
+            "SELECT * FROM worker_registry WHERE online = 1 ORDER BY reputation_score DESC"
+        )
+        return [_worker_row_to_dict(row) for row in rows]
+
+    def list_workers_for_model(self, model_name: str) -> list[dict[str, Any]]:
+        return [
+            worker
+            for worker in self.list_online_workers()
+            if model_name in worker.get("supported_models", [])
+        ]
+
+    def update_worker_reputation_stats(self, worker_id: str, stats: dict[str, Any]) -> None:
+        self.conn.execute(
+            """
+            UPDATE worker_registry
+            SET reputation_score = ?,
+                success_count = ?,
+                failure_count = ?,
+                average_latency_ms = ?,
+                average_energy_per_token = ?
+            WHERE worker_id = ?
+            """,
+            (
+                float(stats["reputation_score"]),
+                int(stats["success_count"]),
+                int(stats["failure_count"]),
+                float(stats["average_latency_ms"]),
+                float(stats["average_energy_per_token"]),
+                worker_id,
+            ),
+        )
+        self.conn.commit()
+
+    def insert_customer_job(self, job: dict[str, Any]) -> None:
+        now = job["created_at"]
+        metadata = dict(job.get("metadata", {}))
+        metadata.pop("prompt", None)
+        metadata.pop("raw_prompt", None)
+        self.conn.execute(
+            """
+            INSERT INTO customer_jobs (
+                job_id, customer_id, model, prompt_hash, input_tokens,
+                expected_output_tokens, privacy_level, max_price_qi, status,
+                assigned_worker_id, route_score, created_at, updated_at, metadata_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                job["job_id"],
+                job.get("customer_id"),
+                job["model"],
+                job.get("prompt_hash"),
+                float(job.get("input_tokens", 0)),
+                float(job.get("expected_output_tokens", 0)),
+                job.get("privacy_level", "standard"),
+                float(job.get("max_price_qi", 0)),
+                job.get("status", "queued"),
+                job.get("assigned_worker_id"),
+                job.get("route_score"),
+                now,
+                job.get("updated_at", now),
+                json.dumps(metadata, sort_keys=True),
+            ),
+        )
+        self.conn.commit()
+
+    def update_customer_job_status(self, job_id: str, status: str, metadata: dict[str, Any] | None = None) -> None:
+        from receipts import utc_now_iso
+
+        current = self.get_customer_job(job_id)
+        merged = current.get("metadata", {}) if current else {}
+        if metadata:
+            merged.update({k: v for k, v in metadata.items() if k not in {"prompt", "raw_prompt"}})
+        updated_at = metadata.get("updated_at") if metadata and metadata.get("updated_at") else utc_now_iso()
+        self.conn.execute(
+            """
+            UPDATE customer_jobs
+            SET status = ?, updated_at = ?, metadata_json = ?
+            WHERE job_id = ?
+            """,
+            (status, updated_at, json.dumps(merged, sort_keys=True), job_id),
+        )
+        self.conn.commit()
+
+    def assign_customer_job(self, job_id: str, worker_id: str, route_score: float) -> None:
+        from receipts import utc_now_iso
+
+        self.conn.execute(
+            """
+            UPDATE customer_jobs
+            SET status = 'routed',
+                assigned_worker_id = ?,
+                route_score = ?,
+                updated_at = ?
+            WHERE job_id = ?
+            """,
+            (worker_id, route_score, utc_now_iso(), job_id),
+        )
+        self.conn.commit()
+
+    def get_customer_job(self, job_id: str) -> dict[str, Any] | None:
+        row = self.conn.execute(
+            "SELECT * FROM customer_jobs WHERE job_id = ?",
+            (job_id,),
+        ).fetchone()
+        return _customer_job_row_to_dict(row) if row else None
+
+    def list_queued_jobs(self) -> list[dict[str, Any]]:
+        rows = self.conn.execute(
+            "SELECT * FROM customer_jobs WHERE status = 'queued' ORDER BY created_at ASC"
+        )
+        return [_customer_job_row_to_dict(row) for row in rows]
+
+
+def _worker_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "worker_id": row["worker_id"],
+        "operator": row["operator"],
+        "region": row["region"],
+        "public_key": row["public_key"],
+        "endpoint": row["endpoint"],
+        "hardware_profile": json.loads(row["hardware_profile_json"]),
+        "supported_modes": json.loads(row["supported_modes_json"]),
+        "supported_models": json.loads(row["supported_models_json"]),
+        "gpu_count": row["gpu_count"],
+        "total_vram_gb": row["total_vram_gb"],
+        "total_watts_capacity": row["total_watts_capacity"],
+        "online": bool(row["online"]),
+        "last_seen_at": row["last_seen_at"],
+        "reputation_score": row["reputation_score"],
+        "success_count": row["success_count"],
+        "failure_count": row["failure_count"],
+        "average_latency_ms": row["average_latency_ms"],
+        "average_energy_per_token": row["average_energy_per_token"],
+        "metadata": json.loads(row["metadata_json"]),
+    }
+
+
+def _customer_job_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "job_id": row["job_id"],
+        "customer_id": row["customer_id"],
+        "model": row["model"],
+        "prompt_hash": row["prompt_hash"],
+        "input_tokens": row["input_tokens"],
+        "expected_output_tokens": row["expected_output_tokens"],
+        "privacy_level": row["privacy_level"],
+        "max_price_qi": row["max_price_qi"],
+        "status": row["status"],
+        "assigned_worker_id": row["assigned_worker_id"],
+        "route_score": row["route_score"],
+        "created_at": row["created_at"],
+        "updated_at": row["updated_at"],
+        "metadata": json.loads(row["metadata_json"]),
+    }

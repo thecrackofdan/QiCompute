@@ -7,6 +7,10 @@ from pathlib import Path
 from uuid import uuid4
 
 from db import WorkerDB
+from pricing import estimate_job_price
+from registry import heartbeat_local_worker
+from reputation import update_worker_reputation
+from router import route_inference_job
 from scheduler import Scheduler
 from telemetry import GPUTelemetry
 from receipts import make_receipt, utc_now_iso, verify_receipt_hash
@@ -271,6 +275,155 @@ inference:
             self.assertGreater(receipt["energy_joules"], 0)
             db.close()
 
+    def test_registering_worker(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            _, db = self._scheduler(tmp)
+
+            db.register_worker(self._worker("worker-a", models=["llama-3.1-8b"]))
+
+            worker = db.get_worker("worker-a")
+            self.assertIsNotNone(worker)
+            self.assertEqual(worker["worker_id"], "worker-a")
+            self.assertEqual(worker["supported_models"], ["llama-3.1-8b"])
+            db.close()
+
+    def test_worker_heartbeat_updates_online_status(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            _, db = self._scheduler(tmp)
+            db.register_worker(self._worker("worker-a", online=False))
+
+            heartbeat_local_worker(db, "worker-a", {"last_seen_at": utc_now_iso(), "total_watts": 250})
+
+            worker = db.get_worker("worker-a")
+            self.assertTrue(worker["online"])
+            self.assertIsNotNone(worker["last_seen_at"])
+            db.close()
+
+    def test_register_worker_preserves_existing_reputation_stats(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            _, db = self._scheduler(tmp)
+            db.register_worker(self._worker("worker-a", reputation_score=50))
+            update_worker_reputation(
+                db,
+                worker_id="worker-a",
+                verification={"accepted": True, "reason": "receipt accepted"},
+                receipt=self._inference_receipt(),
+            )
+
+            db.register_worker(self._worker("worker-a", reputation_score=50, models=["llama-3.1-8b", "mistral"]))
+
+            worker = db.get_worker("worker-a")
+            self.assertEqual(worker["reputation_score"], 51)
+            self.assertEqual(worker["success_count"], 1)
+            self.assertIn("mistral", worker["supported_models"])
+            db.close()
+
+    def test_routing_chooses_highest_scoring_eligible_worker(self) -> None:
+        job = {
+            "job_id": "job-route",
+            "model": "llama-3.1-8b",
+            "requires_gpu": True,
+            "region_preference": "us-east",
+        }
+        workers = [
+            self._worker("low", reputation_score=40, region="us-west", models=["llama-3.1-8b"]),
+            self._worker("high", reputation_score=80, region="us-east", models=["llama-3.1-8b"]),
+        ]
+
+        decision = route_inference_job(job, workers)
+
+        self.assertTrue(decision.accepted)
+        self.assertEqual(decision.worker_id, "high")
+
+    def test_routing_rejects_when_no_worker_supports_model(self) -> None:
+        decision = route_inference_job(
+            {"job_id": "job-route", "model": "unsupported", "requires_gpu": True},
+            [self._worker("worker-a", models=["llama-3.1-8b"])],
+        )
+
+        self.assertFalse(decision.accepted)
+        self.assertIsNone(decision.worker_id)
+
+    def test_reputation_increases_after_accepted_verified_job(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            _, db = self._scheduler(tmp)
+            db.register_worker(self._worker("worker-a", reputation_score=50))
+            receipt = self._inference_receipt()
+
+            worker = update_worker_reputation(
+                db,
+                worker_id="worker-a",
+                verification={"accepted": True, "reason": "receipt accepted"},
+                receipt=receipt,
+            )
+
+            self.assertEqual(worker["success_count"], 1)
+            self.assertEqual(worker["reputation_score"], 51)
+            db.close()
+
+    def test_reputation_decreases_after_failed_job(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            _, db = self._scheduler(tmp)
+            db.register_worker(self._worker("worker-a", reputation_score=50))
+            receipt = self._inference_receipt()
+
+            worker = update_worker_reputation(
+                db,
+                worker_id="worker-a",
+                verification={"accepted": False, "reason": "job failed"},
+                receipt=receipt,
+            )
+
+            self.assertEqual(worker["failure_count"], 1)
+            self.assertEqual(worker["reputation_score"], 47)
+            db.close()
+
+    def test_pricing_returns_positive_qi_estimate(self) -> None:
+        estimate = estimate_job_price(
+            input_tokens=100,
+            output_tokens=500,
+            model="llama-3.1-8b",
+            privacy_level="private",
+            latency_target=1000,
+            energy_joules=100,
+            worker_reputation=80,
+            config={"pricing": {"energy_rate_qi_per_joule": 0.000000001}},
+        )
+
+        self.assertGreater(estimate.estimated_price_qi, 0)
+        self.assertEqual(estimate.pricing_basis, "tokens+privacy+latency+reputation+energy")
+
+    def test_customer_job_is_queued_routed_assigned_and_status_updated(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            _, db = self._scheduler(tmp)
+            db.register_worker(self._worker("worker-a", models=["llama-3.1-8b"]))
+            job = self._customer_job("customer-job-1")
+            db.insert_customer_job(job)
+
+            queued = db.list_queued_jobs()
+            decision = route_inference_job(queued[0], db.list_online_workers())
+            db.assign_customer_job(job["job_id"], decision.worker_id, decision.score)
+            db.update_customer_job_status(job["job_id"], "completed", {"result": "ok"})
+
+            stored = db.get_customer_job(job["job_id"])
+            self.assertEqual(stored["assigned_worker_id"], "worker-a")
+            self.assertEqual(stored["status"], "completed")
+            self.assertEqual(stored["metadata"]["result"], "ok")
+            db.close()
+
+    def test_raw_prompt_is_not_stored_in_customer_jobs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            _, db = self._scheduler(tmp)
+            job = self._customer_job("customer-job-privacy")
+            job["metadata"] = {"raw_prompt": "secret prompt", "safe": "value"}
+            db.insert_customer_job(job)
+
+            stored = db.get_customer_job(job["job_id"])
+            self.assertNotIn("raw_prompt", stored["metadata"])
+            self.assertNotIn("prompt", stored["metadata"])
+            self.assertEqual(stored["metadata"]["safe"], "value")
+            db.close()
+
     def _scheduler(
         self,
         tmp: str,
@@ -377,6 +530,52 @@ inference:
                 "metadata": {},
             }
         )
+
+    def _worker(
+        self,
+        worker_id: str,
+        *,
+        reputation_score: float = 50,
+        region: str = "us-east",
+        models: list[str] | None = None,
+        online: bool = True,
+    ) -> dict[str, object]:
+        return {
+            "worker_id": worker_id,
+            "operator": "operator",
+            "region": region,
+            "public_key": "placeholder",
+            "endpoint": "local",
+            "hardware_profile": {"gpu_count": 1, "total_vram_gb": 24},
+            "supported_modes": ["inference", "mining"],
+            "supported_models": models or ["llama-3.1-8b"],
+            "gpu_count": 1,
+            "total_vram_gb": 24,
+            "total_watts_capacity": 300,
+            "online": online,
+            "last_seen_at": utc_now_iso(),
+            "reputation_score": reputation_score,
+            "success_count": 0,
+            "failure_count": 0,
+            "average_latency_ms": 0,
+            "average_energy_per_token": 0,
+            "metadata": {},
+        }
+
+    def _customer_job(self, job_id: str) -> dict[str, object]:
+        return {
+            "job_id": job_id,
+            "customer_id": "customer",
+            "model": "llama-3.1-8b",
+            "prompt_hash": "placeholder-hash",
+            "input_tokens": 100,
+            "expected_output_tokens": 500,
+            "privacy_level": "standard",
+            "max_price_qi": 0.001,
+            "status": "queued",
+            "created_at": utc_now_iso(),
+            "metadata": {},
+        }
 
 
 class FixedTelemetry(GPUTelemetry):

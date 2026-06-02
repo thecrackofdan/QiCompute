@@ -12,6 +12,7 @@ from uuid import uuid4
 
 from db import WorkerDB
 from receipts import compute_receipt_hash, make_receipt, utc_now_iso
+from reputation import update_worker_reputation
 from telemetry import GPUTelemetry
 from verifier import verify_inference_receipt
 
@@ -126,6 +127,13 @@ class Scheduler:
                 accepted_at=event["created_at"],
                 payout_event_id=event["event_id"],
             )
+        update_worker_reputation(
+            self.db,
+            worker_id=self.worker_id,
+            verification=verification.to_dict(),
+            receipt=receipt,
+            duplicate_job=duplicate_job,
+        )
         return receipt
 
     def _run_mining(self) -> dict[str, Any]:

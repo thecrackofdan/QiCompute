@@ -6,6 +6,7 @@ import subprocess
 import time
 from collections import defaultdict
 from pathlib import Path
+from shutil import which
 from typing import Any
 from uuid import uuid4
 
@@ -51,7 +52,7 @@ class Scheduler:
         inference_cfg = self.config["inference"]
         started = utc_now_iso()
         start_time = time.monotonic()
-        start_watts = self.telemetry.average_watts()
+        start_watts = self.telemetry.total_watts()
         metadata: dict[str, Any] = {"job_file": str(job_path)}
 
         try:
@@ -111,7 +112,7 @@ class Scheduler:
         mining_cfg = self.config["mining"]
         started = utc_now_iso()
         start_time = time.monotonic()
-        start_watts = self.telemetry.average_watts()
+        start_watts = self.telemetry.total_watts()
         command = mining_cfg.get("command") or ""
         cycle_seconds = float(mining_cfg.get("cycle_seconds", 15))
 
@@ -129,7 +130,6 @@ class Scheduler:
         duration = time.monotonic() - start_time
         shares = 0.0 if command_failed else duration * float(mining_cfg.get("estimated_shares_per_second", 0))
         share_difficulty = float(mining_cfg.get("share_difficulty", 1))
-        estimated_qi = shares * float(mining_cfg.get("estimated_qi_per_share", 0))
         receipt = self._build_receipt(
             mode="mining",
             started_at=started,
@@ -137,21 +137,11 @@ class Scheduler:
             start_watts=start_watts,
             output_type="shares",
             output_amount=shares,
-            estimated_qi=estimated_qi,
+            estimated_qi=0.0,
             metadata=metadata,
         )
         self.db.insert_receipt(receipt)
         self._record_mining_shares(receipt, shares, share_difficulty, accepted=not command_failed)
-        if estimated_qi > 0:
-            self.db.insert_payout_event(
-                self._payout_event(
-                    event_type="mining_share",
-                    basis="provisional_valid_share",
-                    qi_amount=estimated_qi,
-                    source_id=receipt["receipt_id"],
-                    metadata={"shares": shares, "share_difficulty": share_difficulty},
-                )
-            )
         return receipt
 
     def distribute_block_reward(self, block_hash: str, reward_qi: float) -> dict[str, Any]:
@@ -163,12 +153,14 @@ class Scheduler:
             raise ValueError(f"block_hash has already been settled: {block_hash}")
         mining_cfg = self.config["mining"]
         pool_fee_percent = float(mining_cfg.get("pool_fee_percent", 0))
-        pplns_window_shares = int(mining_cfg.get("pplns_window_shares", 1000))
+        pplns_window_weight = float(
+            mining_cfg.get("pplns_window_weight", mining_cfg.get("pplns_window_shares", 1000))
+        )
         if pool_fee_percent < 0 or pool_fee_percent >= 100:
             raise ValueError("pool_fee_percent must be between 0 and 100")
-        if pplns_window_shares <= 0:
-            raise ValueError("pplns_window_shares must be positive")
-        shares = self.db.accepted_shares_for_pplns(pplns_window_shares)
+        if pplns_window_weight <= 0:
+            raise ValueError("pplns_window_weight must be positive")
+        shares = self.db.accepted_shares_for_pplns(pplns_window_weight)
         if not shares:
             raise RuntimeError("Cannot distribute block reward without accepted mining shares")
 
@@ -193,10 +185,11 @@ class Scheduler:
                 "reward_qi": reward_qi,
                 "pool_fee_qi": pool_fee_qi,
                 "net_reward_qi": net_reward_qi,
-                "policy": f"PPLNS:{pplns_window_shares}",
-                "metadata": {"eligible_shares": len(shares), "total_weight": total_weight},
+                "policy": f"PPLNS_WEIGHT:{pplns_window_weight}",
+                "metadata": {"eligible_shares": len(shares), "target_weight": pplns_window_weight, "total_weight": total_weight},
             }
         )
+        self.db.assign_mining_shares_to_round([share["share_id"] for share in shares], round_id)
         payouts = []
         for worker_id, weight in weights.items():
             qi_amount = net_reward_qi * weight / total_weight
@@ -223,6 +216,7 @@ class Scheduler:
             "reward_qi": reward_qi,
             "net_reward_qi": net_reward_qi,
             "eligible_shares": len(shares),
+            "eligible_share_weight": total_weight,
             "payouts": payouts,
         }
 
@@ -240,7 +234,7 @@ class Scheduler:
     ) -> dict[str, Any]:
         ended_at = utc_now_iso()
         duration = time.monotonic() - start_time
-        end_watts = self.telemetry.average_watts()
+        end_watts = self.telemetry.total_watts()
         average_watts = (start_watts + end_watts) / 2
         receipt = make_receipt(
             worker_id=self.worker_id,
@@ -316,8 +310,30 @@ class Scheduler:
         for sample in self.telemetry.sample():
             self.db.insert_telemetry(sample)
 
-    def _run_command(self, command: str, timeout: float) -> None:
-        subprocess.run(command, shell=True, check=True, timeout=timeout)
+    def _run_command(self, command: Any, timeout: float) -> None:
+        args = self._validated_command(command)
+        subprocess.run(args, check=True, timeout=timeout)
+
+    def _validated_command(self, command: Any) -> list[str]:
+        if isinstance(command, str):
+            raise ValueError("Commands must be configured as an argument list, not a shell string")
+        if not isinstance(command, list) or not command:
+            raise ValueError("Command must be a non-empty argument list")
+        if not isinstance(command[0], str) or not command[0]:
+            raise ValueError("Command executable must be a non-empty string")
+        if not all(isinstance(part, str) for part in command):
+            raise ValueError("Command arguments must be strings")
+
+        executable = command[0]
+        if "/" in executable:
+            executable_path = Path(executable)
+            if not executable_path.is_file():
+                raise ValueError(f"Command executable does not exist: {executable}")
+            if not executable_path.stat().st_mode & 0o111:
+                raise ValueError(f"Command executable is not executable: {executable}")
+        elif which(executable) is None:
+            raise ValueError(f"Command executable not found on PATH: {executable}")
+        return command
 
 
 def print_receipt(receipt: dict[str, Any], balance: float) -> None:

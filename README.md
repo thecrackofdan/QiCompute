@@ -90,10 +90,10 @@ Both modes support a placeholder command in `config.yaml`:
 
 ```yaml
 mining:
-  command: "bash ./start-miner.sh"
+  command: ["bash", "./start-miner.sh"]
 
 inference:
-  command: "python3 ./run_inference.py"
+  command: ["python3", "./run_inference.py"]
 ```
 
 An individual job may also specify a `command` and `timeout_seconds`.
@@ -127,10 +127,11 @@ estimated_qi_owed =
 + accepted_output_tokens * estimated_qi_per_output_token
 ```
 
-Mining share payout:
+Mining share accounting:
 
 ```text
-estimated_qi_owed = accepted_shares * estimated_qi_per_share
+accepted shares are recorded for PPLNS eligibility
+accepted shares do not increase balances directly
 ```
 
 Block reward payout:
@@ -140,7 +141,7 @@ net_reward = block_reward - pool_fee
 worker_reward = net_reward * worker_eligible_share_weight / total_eligible_share_weight
 ```
 
-The block reward path uses a simple PPLNS-style window over the last `mining.pplns_window_shares` accepted shares.
+The block reward path uses a simple PPLNS-style window over unassigned accepted shares until cumulative share difficulty reaches `mining.pplns_window_weight`.
 
 Receipts, payout events, and balances are local only. Future private Qi UTXO settlement can consume accepted payout events as the local source of payable claims.
 

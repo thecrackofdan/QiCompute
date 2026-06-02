@@ -4,6 +4,9 @@ from pathlib import Path
 from typing import Any
 
 
+BALANCE_AFFECTING_EVENT_TYPES = {"inference_job", "mining_block_reward"}
+
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS telemetry (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -139,6 +142,8 @@ class WorkerDB:
         self.conn.commit()
 
     def insert_payout_event(self, event: dict[str, Any]) -> None:
+        if event["event_type"] not in BALANCE_AFFECTING_EVENT_TYPES:
+            raise ValueError(f"Unsupported balance-affecting event type: {event['event_type']}")
         with self.conn:
             self.conn.execute(
                 """
@@ -217,18 +222,35 @@ class WorkerDB:
         )
         self.conn.commit()
 
-    def accepted_shares_for_pplns(self, limit: int) -> list[sqlite3.Row]:
-        return list(
-            self.conn.execute(
-                """
-                SELECT * FROM mining_shares
-                WHERE accepted = 1 AND stale = 0
-                ORDER BY submitted_at DESC, share_id DESC
-                LIMIT ?
-                """,
-                (limit,),
-            )
+    def accepted_shares_for_pplns(self, target_weight: float) -> list[sqlite3.Row]:
+        rows = self.conn.execute(
+            """
+            SELECT * FROM mining_shares
+            WHERE accepted = 1 AND stale = 0 AND round_id IS NULL
+            ORDER BY submitted_at DESC, share_id DESC
+            """
         )
+        shares = []
+        total_weight = 0.0
+        for row in rows:
+            shares.append(row)
+            total_weight += float(row["difficulty"])
+            if total_weight >= target_weight:
+                break
+        return shares
+
+    def assign_mining_shares_to_round(self, share_ids: list[str], round_id: str) -> None:
+        if not share_ids:
+            return
+        with self.conn:
+            self.conn.executemany(
+                """
+                UPDATE mining_shares
+                SET round_id = ?
+                WHERE share_id = ? AND round_id IS NULL
+                """,
+                [(round_id, share_id) for share_id in share_ids],
+            )
 
     def mining_round_for_block_hash(self, block_hash: str) -> sqlite3.Row | None:
         return self.conn.execute(
@@ -238,7 +260,12 @@ class WorkerDB:
 
     def get_balance(self, worker_id: str) -> float:
         row = self.conn.execute(
-            "SELECT estimated_qi_owed FROM balances WHERE worker_id = ?",
+            """
+            SELECT COALESCE(SUM(qi_amount), 0) AS estimated_qi_owed
+            FROM payout_events
+            WHERE worker_id = ?
+              AND event_type IN ('inference_job', 'mining_block_reward')
+            """,
             (worker_id,),
         ).fetchone()
         return float(row["estimated_qi_owed"]) if row else 0.0

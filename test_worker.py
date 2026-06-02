@@ -4,11 +4,13 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from uuid import uuid4
 
 from db import WorkerDB
 from scheduler import Scheduler
 from telemetry import GPUTelemetry
-from worker import load_config
+from receipts import utc_now_iso
+from worker import _minimal_yaml_load, load_config
 
 
 class WorkerPrototypeTest(unittest.TestCase):
@@ -18,6 +20,22 @@ class WorkerPrototypeTest(unittest.TestCase):
         self.assertEqual(config["worker"]["id"], "local-gpu-rig-001")
         self.assertIn("mining", config)
         self.assertIn("inference", config)
+        self.assertEqual(config["mining"]["command"], [])
+
+    def test_minimal_yaml_loader_supports_command_lists(self) -> None:
+        config = _minimal_yaml_load(
+            """
+worker:
+  id: "test"
+mining:
+  command: ["python3", "miner.py"]
+inference:
+  command: []
+"""
+        )
+
+        self.assertEqual(config["mining"]["command"], ["python3", "miner.py"])
+        self.assertEqual(config["inference"]["command"], [])
 
     def test_telemetry_falls_back_when_nvidia_smi_missing(self) -> None:
         telemetry = GPUTelemetry(nvidia_smi_path="definitely-not-nvidia-smi", fallback_watts=123)
@@ -37,8 +55,28 @@ class WorkerPrototypeTest(unittest.TestCase):
             self.assertEqual(receipt["mode"], "mining")
             self.assertEqual(receipt["output"]["type"], "shares")
             self.assertGreater(receipt["energy_joules"], 0)
-            self.assertGreater(db.get_balance("test-worker"), 0)
-            self.assertEqual(payout_events[0]["event_type"], "mining_share")
+            self.assertEqual(db.get_balance("test-worker"), 0)
+            self.assertEqual(payout_events, [])
+            db.close()
+
+    def test_db_rejects_mining_share_payout_events(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            _, db = self._scheduler(tmp)
+
+            with self.assertRaises(ValueError):
+                db.insert_payout_event(
+                    {
+                        "event_id": str(uuid4()),
+                        "worker_id": "test-worker",
+                        "event_type": "mining_share",
+                        "basis": "provisional_valid_share",
+                        "qi_amount": 1,
+                        "created_at": utc_now_iso(),
+                        "source_id": "share-1",
+                        "metadata": {},
+                    }
+                )
+            self.assertEqual(db.get_balance("test-worker"), 0)
             db.close()
 
     def test_runs_inference_when_job_available(self) -> None:
@@ -75,6 +113,34 @@ class WorkerPrototypeTest(unittest.TestCase):
             self.assertGreater(db.get_balance("test-worker"), 9)
             db.close()
 
+    def test_shares_cannot_be_reused_across_rounds(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            scheduler, db = self._scheduler(tmp)
+            scheduler.run_once()
+
+            scheduler.distribute_block_reward("block-1", 10)
+
+            with self.assertRaises(RuntimeError):
+                scheduler.distribute_block_reward("block-2", 10)
+            db.close()
+
+    def test_mixed_difficulty_pplns_payouts_are_weighted(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            scheduler, db = self._scheduler(tmp)
+            submitted_at = utc_now_iso()
+            self._insert_share(db, "worker-a", difficulty=1, submitted_at=submitted_at)
+            self._insert_share(db, "worker-b", difficulty=3, submitted_at=submitted_at)
+
+            result = scheduler.distribute_block_reward("weighted-block", 8)
+
+            payouts = {event["worker_id"]: event["qi_amount"] for event in result["payouts"]}
+            self.assertEqual(result["eligible_share_weight"], 4)
+            self.assertAlmostEqual(payouts["worker-a"], 2)
+            self.assertAlmostEqual(payouts["worker-b"], 6)
+            self.assertAlmostEqual(db.get_balance("worker-a"), 2)
+            self.assertAlmostEqual(db.get_balance("worker-b"), 6)
+            db.close()
+
     def test_cannot_distribute_same_block_twice(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             scheduler, db = self._scheduler(tmp)
@@ -98,7 +164,36 @@ class WorkerPrototypeTest(unittest.TestCase):
             self.assertEqual(db.get_balance("test-worker"), 0)
             db.close()
 
-    def _scheduler(self, tmp: str, mining_command: str = "") -> tuple[Scheduler, WorkerDB]:
+    def test_safe_command_execution_requires_argument_list(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            scheduler, db = self._scheduler(tmp)
+
+            with self.assertRaises(ValueError):
+                scheduler._run_command("echo unsafe", timeout=1)
+            scheduler._run_command(["python3", "-c", ""], timeout=1)
+            db.close()
+
+    def test_total_rig_power_is_used_for_energy_accounting(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            scheduler, db = self._scheduler(
+                tmp,
+                telemetry=FixedTelemetry([300, 250, 200]),
+                cycle_seconds=0.001,
+            )
+
+            receipt = scheduler.run_once()
+
+            self.assertEqual(receipt["average_watts"], 750)
+            self.assertGreater(receipt["energy_joules"], 0)
+            db.close()
+
+    def _scheduler(
+        self,
+        tmp: str,
+        mining_command: object = "",
+        telemetry: object | None = None,
+        cycle_seconds: float = 0.001,
+    ) -> tuple[Scheduler, WorkerDB]:
         root = Path(tmp)
         config = {
             "worker": {
@@ -116,7 +211,9 @@ class WorkerPrototypeTest(unittest.TestCase):
             "mining": {
                 "enabled": True,
                 "command": mining_command,
-                "cycle_seconds": 0.001,
+                "cycle_seconds": cycle_seconds,
+                "pplns_window_weight": 1000,
+                "pool_fee_percent": 0,
                 "estimated_shares_per_second": 10,
                 "estimated_qi_per_share": 0.5,
             },
@@ -129,11 +226,48 @@ class WorkerPrototypeTest(unittest.TestCase):
             },
         }
         db = WorkerDB(config["worker"]["db_path"])
-        telemetry = GPUTelemetry(
+        telemetry = telemetry or GPUTelemetry(
             nvidia_smi_path=config["telemetry"]["nvidia_smi_path"],
             fallback_watts=config["worker"]["fallback_watts"],
         )
         return Scheduler(config, db, telemetry), db
+
+    def _insert_share(
+        self,
+        db: WorkerDB,
+        worker_id: str,
+        difficulty: float,
+        submitted_at: str,
+    ) -> None:
+        db.insert_mining_share(
+            {
+                "share_id": str(uuid4()),
+                "worker_id": worker_id,
+                "submitted_at": submitted_at,
+                "difficulty": difficulty,
+                "accepted": True,
+                "stale": False,
+                "metadata": {},
+            }
+        )
+
+
+class FixedTelemetry(GPUTelemetry):
+    def __init__(self, watts: list[float]):
+        super().__init__(nvidia_smi_path="unused", fallback_watts=100)
+        self.watts = watts
+
+    def sample(self) -> list[dict[str, object]]:
+        return [
+            {
+                "ts": utc_now_iso(),
+                "gpu_index": index,
+                "name": f"GPU {index}",
+                "power_watts": watts,
+                "source": "test",
+            }
+            for index, watts in enumerate(self.watts)
+        ]
 
 
 if __name__ == "__main__":

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import ast
 import json
 from pathlib import Path
 from typing import Any
@@ -98,6 +99,11 @@ def _minimal_yaml_load(text: str) -> dict[str, Any]:
 def _parse_scalar(value: str) -> Any:
     if value in {"", '""', "''"}:
         return ""
+    if value.startswith("[") and value.endswith("]"):
+        parsed = ast.literal_eval(value)
+        if not isinstance(parsed, list) or not all(isinstance(item, str) for item in parsed):
+            raise ValueError("Only string lists are supported in fallback YAML parsing")
+        return parsed
     if value.lower() in {"true", "false"}:
         return value.lower() == "true"
     if value.startswith(("'", '"')) and value.endswith(("'", '"')):

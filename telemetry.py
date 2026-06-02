@@ -49,6 +49,14 @@ class GPUTelemetry:
         watts = [s["power_watts"] for s in samples if s.get("power_watts") is not None]
         return sum(watts) / len(watts) if watts else self.fallback_watts
 
+    def total_watts(self) -> float:
+        samples = self.sample()
+        fallback_samples = [s for s in samples if s.get("source") == "fallback"]
+        if fallback_samples:
+            return self.fallback_watts
+        watts = [s["power_watts"] for s in samples if s.get("power_watts") is not None]
+        return sum(watts) if watts else self.fallback_watts
+
     def _parse_nvidia_smi_line(self, line: str) -> dict[str, Any]:
         parts = [part.strip() for part in line.split(",")]
         return {

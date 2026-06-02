@@ -1,0 +1,33 @@
+worker:
+  id: "local-gpu-rig-001"
+  db_path: "worker.db"
+  loop_interval_seconds: 5
+  fallback_watts: 250
+
+telemetry:
+  poll_interval_seconds: 5
+  nvidia_smi_path: "nvidia-smi"
+
+jobs:
+  queue_dir: "jobs"
+  completed_dir: "jobs_done"
+  failed_dir: "jobs_failed"
+
+mining:
+  enabled: true
+  command: ""
+  cycle_seconds: 15
+  payout_policy: "PPLNS"
+  pplns_window_shares: 1000
+  pool_fee_percent: 2
+  share_difficulty: 1
+  estimated_shares_per_second: 0.05
+  estimated_qi_per_share: 0.000001
+
+inference:
+  enabled: true
+  command: ""
+  default_tokens: 256
+  seconds_per_job: 3
+  estimated_qi_per_input_token: 0.00000005
+  estimated_qi_per_output_token: 0.0000002

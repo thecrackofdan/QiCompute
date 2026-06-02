@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+worker.db
+jobs/
+jobs_done/
+jobs_failed/

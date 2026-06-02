@@ -10,6 +10,7 @@ from shutil import which
 from typing import Any
 from uuid import uuid4
 
+import failures
 from db import WorkerDB
 from receipts import compute_receipt_hash, make_receipt, utc_now_iso
 from reputation import update_worker_reputation
@@ -74,6 +75,7 @@ class Scheduler:
             shutil.move(str(job_path), self.completed_dir / job_path.name)
         except Exception as exc:
             metadata["error"] = str(exc)
+            metadata["failure_code"] = failures.COMMAND_FAILED
             shutil.move(str(job_path), self.failed_dir / job_path.name)
             input_tokens = 0.0
             output_tokens = 0.0
@@ -89,6 +91,7 @@ class Scheduler:
         duplicate_job = bool(job_id and self.db.inference_job_was_paid(str(job_id)))
         if duplicate_job:
             metadata["duplicate_job"] = True
+            metadata["failure_code"] = failures.DUPLICATE_JOB
 
         receipt = self._build_receipt(
             mode="inference",
@@ -154,6 +157,7 @@ class Scheduler:
         except Exception as exc:
             command_failed = True
             metadata["error"] = str(exc)
+            metadata["failure_code"] = failures.COMMAND_FAILED
 
         duration = time.monotonic() - start_time
         shares = 0.0 if command_failed else duration * float(mining_cfg.get("estimated_shares_per_second", 0))

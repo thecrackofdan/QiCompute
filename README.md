@@ -15,6 +15,11 @@ This MVP has no smart contracts and no real payout rail. It records local receip
 - `router.py`: local inference job routing.
 - `reputation.py`: worker reputation updates.
 - `pricing.py`: local marketplace pricing estimates.
+- `envelopes.py`: signed job envelope-shaped structures with placeholder signatures.
+- `capabilities.py`: worker capability claim structures.
+- `customer_receipts.py`: customer-facing job receipt structures.
+- `failures.py`: standardized local failure codes.
+- `simulation.py`: local marketplace simulation.
 - `market.py`: local marketplace CLI.
 - `db.py`: SQLite schema and persistence.
 - `config.yaml`: local worker configuration.
@@ -106,7 +111,34 @@ python3 market.py --queued-jobs
 python3 market.py --reputation
 ```
 
+Run a local marketplace simulation:
+
+```bash
+python3 market.py --simulate
+```
+
 Routing considers online status, model support, reputation, region preference, VRAM, latency, energy efficiency, and failure rate. This is local route planning only; no network calls are made.
+
+## Marketplace Protocol Shape
+
+QiCompute now models the local protocol objects needed for a future distributed marketplace:
+
+- Job envelopes: customer intent with job ID, model, prompt hash, token counts, max price, expiry, nonce, and placeholder signature. Raw prompts are not stored.
+- Worker capability claims: supported models, GPU profile, power capacity, privacy features, benchmark placeholder, and placeholder signature.
+- Routing audit logs: every route decision can be recorded with selected worker, score, alternatives, reason, failure code, and router version.
+- Customer receipts: customer-facing receipt built from the customer job, route decision, worker receipt, and verification result.
+- Failure codes: standardized rejection reasons such as `MODEL_NOT_SUPPORTED`, `INVALID_ENVELOPE`, `INVALID_CAPABILITY_CLAIM`, `VERIFICATION_FAILED`, and `DUPLICATE_JOB`.
+- Marketplace simulation: fake workers and jobs exercise routing, audit logs, and reputation updates locally.
+
+The intended protocol flow is:
+
+```text
+customer intent -> signed job envelope -> worker capability claim -> route decision
+-> audit log -> worker receipt -> verification -> customer receipt
+-> reputation update -> payout accounting
+```
+
+This is still local-only. There is no HTTP server, blockchain settlement, wallet integration, or external service dependency.
 
 Run continuously:
 
@@ -243,6 +275,7 @@ Accepted inference jobs are tracked by `job_id`. If the same accepted job appear
 - `inference_jobs`: accepted inference job IDs that have already been paid.
 - `worker_registry`: local worker capability, heartbeat, and reputation records.
 - `customer_jobs`: local customer-facing job queue with prompt hashes, not raw prompts.
+- `routing_audit_logs`: local route decision audit records.
 - `mining_shares`: accepted/rejected share records for pool reward allocation.
 - `mining_rounds`: block reward distribution records.
 - `balances`: local estimated Qi owed by worker ID.

@@ -8,7 +8,8 @@ from db import WorkerDB
 from pricing import estimate_job_price
 from receipts import utc_now_iso
 from registry import heartbeat_local_worker, register_local_worker
-from router import route_inference_job
+from router import route_and_audit_inference_job
+from simulation import run_marketplace_simulation
 from worker import load_config
 
 
@@ -26,6 +27,7 @@ def main() -> None:
     parser.add_argument("--route-jobs", action="store_true")
     parser.add_argument("--queued-jobs", action="store_true")
     parser.add_argument("--reputation", action="store_true")
+    parser.add_argument("--simulate", action="store_true")
     args = parser.parse_args()
 
     config = load_config(args.config)
@@ -87,6 +89,21 @@ def main() -> None:
                     f"success={worker['success_count']} failure={worker['failure_count']}"
                 )
             return
+        if args.simulate:
+            summary = run_marketplace_simulation(db, config)
+            print(
+                f"simulation workers={summary['workers_registered']} "
+                f"jobs={summary['jobs_submitted']} routed={summary['jobs_routed']} "
+                f"rejected={summary['jobs_rejected']} "
+                f"avg_score={summary['average_route_score']:.4f} "
+                f"audit_logs={summary['audit_logs']}"
+            )
+            for worker in summary["reputation"]:
+                print(
+                    f"worker={worker['worker_id']} reputation={worker['reputation_score']:.2f} "
+                    f"success={worker['success_count']} failure={worker['failure_count']}"
+                )
+            return
         parser.print_help()
     finally:
         db.close()
@@ -95,24 +112,26 @@ def main() -> None:
 def _route_jobs(db: WorkerDB) -> None:
     workers = db.list_online_workers()
     for job in db.list_queued_jobs():
-        decision = route_inference_job(
-            {
-                "job_id": job["job_id"],
-                "model": job["model"],
-                "input_tokens": job["input_tokens"],
-                "expected_output_tokens": job["expected_output_tokens"],
-                "max_price_qi": job["max_price_qi"],
-                "privacy_level": job["privacy_level"],
-                "requires_gpu": True,
-            },
+        route_job = {
+            "job_id": job["job_id"],
+            "model": job["model"],
+            "input_tokens": job["input_tokens"],
+            "expected_output_tokens": job["expected_output_tokens"],
+            "max_price_qi": job["max_price_qi"],
+            "privacy_level": job["privacy_level"],
+            "requires_gpu": True,
+        }
+        decision = route_and_audit_inference_job(
+            db,
+            route_job,
             workers,
         )
         if decision.accepted and decision.worker_id:
             db.assign_customer_job(job["job_id"], decision.worker_id, decision.score)
             print(f"routed job={job['job_id']} worker={decision.worker_id} score={decision.score:.4f}")
         else:
-            db.update_customer_job_status(job["job_id"], "rejected", {"route_reason": decision.reason})
-            print(f"rejected job={job['job_id']} reason={decision.reason}")
+            db.update_customer_job_status(job["job_id"], "rejected", {"route_reason": decision.reason, "failure_code": decision.failure_code})
+            print(f"rejected job={job['job_id']} reason={decision.failure_code or decision.reason}")
 
 
 def _placeholder_prompt_hash(job_id: str) -> str:

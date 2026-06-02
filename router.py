@@ -2,7 +2,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import Any
+from uuid import uuid4
 
+import failures
+from db import WorkerDB
+from receipts import utc_now_iso
 
 @dataclass(frozen=True)
 class RouteDecision:
@@ -10,6 +14,7 @@ class RouteDecision:
     worker_id: str | None
     score: float
     reason: str
+    failure_code: str | None = None
     alternatives: list[dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
@@ -18,6 +23,7 @@ class RouteDecision:
             "worker_id": self.worker_id,
             "score": self.score,
             "reason": self.reason,
+            "failure_code": self.failure_code,
             "alternatives": self.alternatives,
         }
 
@@ -35,7 +41,14 @@ def route_inference_job(job: dict[str, Any], workers: list[dict[str, Any]]) -> R
         eligible.append({"worker_id": worker["worker_id"], "score": score, "worker": worker})
 
     if not eligible:
-        return RouteDecision(False, None, 0.0, "no online worker supports requested model", [])
+        return RouteDecision(
+            False,
+            None,
+            0.0,
+            "no online worker supports requested model",
+            failures.MODEL_NOT_SUPPORTED,
+            [],
+        )
 
     eligible.sort(key=lambda item: item["score"], reverse=True)
     best = eligible[0]
@@ -44,8 +57,36 @@ def route_inference_job(job: dict[str, Any], workers: list[dict[str, Any]]) -> R
         worker_id=best["worker_id"],
         score=round(best["score"], 6),
         reason="worker selected",
+        failure_code=None,
         alternatives=[{"worker_id": item["worker_id"], "score": round(item["score"], 6)} for item in eligible[1:]],
     )
+
+
+def route_and_audit_inference_job(
+    db: WorkerDB,
+    job: dict[str, Any],
+    workers: list[dict[str, Any]],
+    *,
+    envelope_id: str | None = None,
+    router_version: str = "local-v1",
+) -> RouteDecision:
+    decision = route_inference_job(job, workers)
+    db.insert_routing_audit_log(
+        {
+            "audit_id": str(uuid4()),
+            "job_id": job["job_id"],
+            "envelope_id": envelope_id,
+            "selected_worker_id": decision.worker_id,
+            "selected_score": decision.score,
+            "accepted": decision.accepted,
+            "reason": decision.failure_code or decision.reason,
+            "alternatives": decision.alternatives,
+            "router_version": router_version,
+            "created_at": utc_now_iso(),
+            "metadata": {"reason": decision.reason, "failure_code": decision.failure_code},
+        }
+    )
+    return decision
 
 
 def _score_worker(job: dict[str, Any], worker: dict[str, Any]) -> float:

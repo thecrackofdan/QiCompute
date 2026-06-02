@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from capabilities import make_capability_claim, verify_capability_claim
 from db import WorkerDB
 from receipts import utc_now_iso
 
@@ -34,6 +35,11 @@ def worker_from_config(config: dict[str, Any]) -> dict[str, Any]:
 
 def register_local_worker(db: WorkerDB, config: dict[str, Any]) -> dict[str, Any]:
     worker = worker_from_config(config)
+    claim = make_capability_claim(worker)
+    verification = verify_capability_claim(claim)
+    worker["metadata"]["capability_claim"] = claim
+    worker["metadata"]["capability_hash"] = claim["capability_hash"]
+    worker["metadata"]["capability_verification"] = verification
     db.register_worker(worker)
     return worker
 

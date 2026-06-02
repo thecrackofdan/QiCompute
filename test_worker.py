@@ -6,12 +6,17 @@ import unittest
 from pathlib import Path
 from uuid import uuid4
 
+import failures
+from capabilities import compute_capability_hash, make_capability_claim, verify_capability_claim
+from customer_receipts import build_customer_receipt, compute_customer_receipt_hash
 from db import WorkerDB
+from envelopes import compute_envelope_hash, make_job_envelope, verify_job_envelope
 from pricing import estimate_job_price
 from registry import heartbeat_local_worker
 from reputation import update_worker_reputation
-from router import route_inference_job
+from router import route_and_audit_inference_job, route_inference_job
 from scheduler import Scheduler
+from simulation import run_marketplace_simulation
 from telemetry import GPUTelemetry
 from receipts import make_receipt, utc_now_iso, verify_receipt_hash
 from verifier import verify_inference_receipt
@@ -126,7 +131,8 @@ inference:
         result = verify_inference_receipt(receipt, job, self._config_for_verifier())
 
         self.assertFalse(result.accepted)
-        self.assertIn("job id is required", result.reason)
+        self.assertEqual(result.reason, failures.VERIFICATION_FAILED)
+        self.assertIn("job id is required", result.metadata["reason_detail"])
 
     def test_rejected_inference_receipt_negative_token_count(self) -> None:
         receipt = self._inference_receipt(input_tokens=-1)
@@ -135,7 +141,8 @@ inference:
         result = verify_inference_receipt(receipt, job, self._config_for_verifier())
 
         self.assertFalse(result.accepted)
-        self.assertIn("input token count must be non-negative", result.reason)
+        self.assertEqual(result.reason, failures.VERIFICATION_FAILED)
+        self.assertIn("input token count must be non-negative", result.metadata["reason_detail"])
 
     def test_duplicate_inference_job_does_not_double_pay(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -343,6 +350,53 @@ inference:
 
         self.assertFalse(decision.accepted)
         self.assertIsNone(decision.worker_id)
+        self.assertEqual(decision.failure_code, failures.MODEL_NOT_SUPPORTED)
+
+    def test_routing_creates_audit_log(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            _, db = self._scheduler(tmp)
+            db.register_worker(self._worker("worker-a"))
+            job = {"job_id": "audit-job", "model": "llama-3.1-8b", "requires_gpu": True}
+
+            decision = route_and_audit_inference_job(db, job, db.list_online_workers())
+
+            logs = db.routing_audit_logs_for_job("audit-job")
+            self.assertTrue(decision.accepted)
+            self.assertEqual(len(logs), 1)
+            self.assertTrue(logs[0]["accepted"])
+            db.close()
+
+    def test_rejected_route_creates_audit_log(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            _, db = self._scheduler(tmp)
+            db.register_worker(self._worker("worker-a", models=["llama-3.1-8b"]))
+
+            decision = route_and_audit_inference_job(
+                db,
+                {"job_id": "audit-reject", "model": "unsupported", "requires_gpu": True},
+                db.list_online_workers(),
+            )
+
+            logs = db.routing_audit_logs_for_job("audit-reject")
+            self.assertFalse(decision.accepted)
+            self.assertEqual(logs[0]["reason"], failures.MODEL_NOT_SUPPORTED)
+            db.close()
+
+    def test_routing_audit_stores_alternatives(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            _, db = self._scheduler(tmp)
+            db.register_worker(self._worker("worker-a", reputation_score=80))
+            db.register_worker(self._worker("worker-b", reputation_score=60))
+
+            route_and_audit_inference_job(
+                db,
+                {"job_id": "audit-alts", "model": "llama-3.1-8b", "requires_gpu": True},
+                db.list_online_workers(),
+            )
+
+            logs = db.routing_audit_logs_for_job("audit-alts")
+            self.assertEqual(logs[0]["alternatives"][0]["worker_id"], "worker-b")
+            db.close()
 
     def test_reputation_increases_after_accepted_verified_job(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -422,6 +476,126 @@ inference:
             self.assertNotIn("raw_prompt", stored["metadata"])
             self.assertNotIn("prompt", stored["metadata"])
             self.assertEqual(stored["metadata"]["safe"], "value")
+            db.close()
+
+    def test_valid_job_envelope_passes(self) -> None:
+        envelope = self._envelope()
+
+        result = verify_job_envelope(envelope)
+
+        self.assertTrue(result["accepted"])
+
+    def test_job_envelope_missing_prompt_hash_fails(self) -> None:
+        envelope = self._envelope()
+        envelope["prompt_hash"] = ""
+
+        result = verify_job_envelope(envelope)
+
+        self.assertFalse(result["accepted"])
+
+    def test_job_envelope_missing_nonce_fails(self) -> None:
+        envelope = self._envelope()
+        envelope["nonce"] = ""
+
+        result = verify_job_envelope(envelope)
+
+        self.assertFalse(result["accepted"])
+
+    def test_envelope_hash_changes_if_job_parameters_change(self) -> None:
+        envelope = self._envelope()
+        original_hash = envelope["envelope_hash"]
+        envelope["input_tokens"] += 1
+
+        self.assertNotEqual(original_hash, compute_envelope_hash(envelope))
+
+    def test_valid_capability_claim_passes(self) -> None:
+        claim = make_capability_claim(self._worker("worker-a"))
+
+        result = verify_capability_claim(claim)
+
+        self.assertTrue(result["accepted"])
+
+    def test_capability_claim_missing_worker_id_fails(self) -> None:
+        claim = make_capability_claim(self._worker("worker-a"))
+        claim["worker_id"] = ""
+
+        result = verify_capability_claim(claim)
+
+        self.assertFalse(result["accepted"])
+
+    def test_capability_claim_missing_supported_models_fails(self) -> None:
+        claim = make_capability_claim(self._worker("worker-a"))
+        claim["supported_models"] = []
+
+        result = verify_capability_claim(claim)
+
+        self.assertFalse(result["accepted"])
+
+    def test_capability_hash_changes_when_gpu_count_changes(self) -> None:
+        claim = make_capability_claim(self._worker("worker-a"))
+        original_hash = claim["capability_hash"]
+        claim["gpu_count"] += 1
+
+        self.assertNotEqual(original_hash, compute_capability_hash(claim))
+
+    def test_customer_receipt_can_be_built(self) -> None:
+        job = self._customer_job("receipt-job")
+        decision = route_inference_job({"job_id": "receipt-job", "model": "llama-3.1-8b"}, [self._worker("worker-a")])
+        worker_receipt = self._inference_receipt()
+
+        receipt = build_customer_receipt(job, decision, worker_receipt, {"accepted": True, "reason": "ok"})
+
+        self.assertEqual(receipt["job_id"], "receipt-job")
+        self.assertEqual(receipt["assigned_worker_id"], "worker-a")
+
+    def test_customer_receipt_does_not_expose_raw_prompt(self) -> None:
+        job = self._customer_job("receipt-private")
+        job["metadata"] = {"raw_prompt": "secret", "visible": "ok"}
+        decision = route_inference_job({"job_id": "receipt-private", "model": "llama-3.1-8b"}, [self._worker("worker-a")])
+
+        receipt = build_customer_receipt(job, decision, self._inference_receipt(), {"accepted": True, "reason": "ok"})
+
+        self.assertNotIn("raw_prompt", receipt["metadata"])
+        self.assertEqual(receipt["metadata"]["visible"], "ok")
+
+    def test_customer_receipt_hash_changes_if_final_price_changes(self) -> None:
+        job = self._customer_job("receipt-price")
+        decision = route_inference_job({"job_id": "receipt-price", "model": "llama-3.1-8b"}, [self._worker("worker-a")])
+        receipt = build_customer_receipt(job, decision, self._inference_receipt(), {"accepted": True, "reason": "ok"})
+        original_hash = receipt["customer_receipt_hash"]
+        receipt["final_price_qi"] += 1
+
+        self.assertNotEqual(original_hash, compute_customer_receipt_hash(receipt))
+
+    def test_failure_codes_are_used_for_major_rejection_paths(self) -> None:
+        envelope = self._envelope()
+        envelope["nonce"] = ""
+        capability = make_capability_claim(self._worker("worker-a"))
+        capability["worker_id"] = ""
+        route = route_inference_job({"job_id": "job", "model": "missing"}, [self._worker("worker-a")])
+
+        self.assertFalse(verify_job_envelope(envelope)["accepted"])
+        self.assertFalse(verify_capability_claim(capability)["accepted"])
+        self.assertEqual(route.failure_code, failures.MODEL_NOT_SUPPORTED)
+
+    def test_simulation_runs_without_error(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            _, db = self._scheduler(tmp)
+
+            summary = run_marketplace_simulation(db, {})
+
+            self.assertEqual(summary["workers_registered"], 2)
+            self.assertEqual(summary["jobs_submitted"], 2)
+            db.close()
+
+    def test_simulation_produces_routed_job_and_audit_log(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            _, db = self._scheduler(tmp)
+
+            summary = run_marketplace_simulation(db, {})
+
+            self.assertGreaterEqual(summary["jobs_routed"], 1)
+            self.assertGreaterEqual(summary["audit_logs"], 1)
             db.close()
 
     def _scheduler(
@@ -576,6 +750,18 @@ inference:
             "created_at": utc_now_iso(),
             "metadata": {},
         }
+
+    def _envelope(self) -> dict[str, object]:
+        return make_job_envelope(
+            job_id="envelope-job",
+            customer_id="customer",
+            model="llama-3.1-8b",
+            prompt_hash="placeholder-hash",
+            input_tokens=10,
+            expected_output_tokens=20,
+            privacy_level="standard",
+            max_price_qi=0.001,
+        )
 
 
 class FixedTelemetry(GPUTelemetry):

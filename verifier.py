@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+import failures
 from receipts import verify_receipt_hash
 
 
@@ -43,11 +44,12 @@ def verify_inference_receipt(
     if failed:
         return VerificationResult(
             accepted=False,
-            reason="; ".join(failed),
+            reason=failures.VERIFICATION_FAILED,
             score=0.0,
             metadata={
                 "job_id": job.get("id"),
                 "worker_id": receipt.get("worker_id"),
+                "reason_detail": "; ".join(failed),
                 "failed_checks": failed,
             },
         )

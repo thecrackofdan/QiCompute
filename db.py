@@ -125,6 +125,20 @@ CREATE TABLE IF NOT EXISTS customer_jobs (
     metadata_json TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS routing_audit_logs (
+    audit_id TEXT PRIMARY KEY,
+    job_id TEXT NOT NULL,
+    envelope_id TEXT,
+    selected_worker_id TEXT,
+    selected_score REAL NOT NULL,
+    accepted INTEGER NOT NULL,
+    reason TEXT NOT NULL,
+    alternatives_json TEXT NOT NULL,
+    router_version TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    metadata_json TEXT NOT NULL
+);
+
 CREATE UNIQUE INDEX IF NOT EXISTS idx_mining_rounds_block_hash
 ON mining_rounds(block_hash)
 WHERE block_hash IS NOT NULL;
@@ -449,6 +463,9 @@ class WorkerDB:
         self.conn.commit()
 
     def update_worker_heartbeat(self, worker_id: str, telemetry: dict[str, Any]) -> None:
+        worker = self.get_worker(worker_id)
+        metadata = worker.get("metadata", {}) if worker else {}
+        metadata.update(telemetry)
         self.conn.execute(
             """
             UPDATE worker_registry
@@ -459,7 +476,7 @@ class WorkerDB:
             """,
             (
                 telemetry.get("last_seen_at"),
-                json.dumps(telemetry, sort_keys=True),
+                json.dumps(metadata, sort_keys=True),
                 worker_id,
             ),
         )
@@ -586,6 +603,44 @@ class WorkerDB:
         )
         return [_customer_job_row_to_dict(row) for row in rows]
 
+    def insert_routing_audit_log(self, log: dict[str, Any]) -> None:
+        self.conn.execute(
+            """
+            INSERT INTO routing_audit_logs (
+                audit_id, job_id, envelope_id, selected_worker_id, selected_score,
+                accepted, reason, alternatives_json, router_version, created_at, metadata_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                log["audit_id"],
+                log["job_id"],
+                log.get("envelope_id"),
+                log.get("selected_worker_id"),
+                float(log.get("selected_score", 0)),
+                1 if log.get("accepted", False) else 0,
+                log["reason"],
+                json.dumps(log.get("alternatives", []), sort_keys=True),
+                log.get("router_version", "local-v1"),
+                log["created_at"],
+                json.dumps(log.get("metadata", {}), sort_keys=True),
+            ),
+        )
+        self.conn.commit()
+
+    def recent_routing_audit_logs(self, limit: int = 10) -> list[dict[str, Any]]:
+        rows = self.conn.execute(
+            "SELECT * FROM routing_audit_logs ORDER BY created_at DESC LIMIT ?",
+            (limit,),
+        )
+        return [_routing_audit_row_to_dict(row) for row in rows]
+
+    def routing_audit_logs_for_job(self, job_id: str) -> list[dict[str, Any]]:
+        rows = self.conn.execute(
+            "SELECT * FROM routing_audit_logs WHERE job_id = ? ORDER BY created_at ASC",
+            (job_id,),
+        )
+        return [_routing_audit_row_to_dict(row) for row in rows]
+
 
 def _worker_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
     return {
@@ -626,5 +681,21 @@ def _customer_job_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
         "route_score": row["route_score"],
         "created_at": row["created_at"],
         "updated_at": row["updated_at"],
+        "metadata": json.loads(row["metadata_json"]),
+    }
+
+
+def _routing_audit_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "audit_id": row["audit_id"],
+        "job_id": row["job_id"],
+        "envelope_id": row["envelope_id"],
+        "selected_worker_id": row["selected_worker_id"],
+        "selected_score": row["selected_score"],
+        "accepted": bool(row["accepted"]),
+        "reason": row["reason"],
+        "alternatives": json.loads(row["alternatives_json"]),
+        "router_version": row["router_version"],
+        "created_at": row["created_at"],
         "metadata": json.loads(row["metadata_json"]),
     }

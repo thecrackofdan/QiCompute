@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any
 from datetime import datetime
 
+import failures
 from db import WorkerDB
 
 
@@ -29,6 +30,9 @@ def update_worker_reputation(
     if accepted:
         reputation += 1
         success_count += 1
+    elif reason in {failures.CHALLENGE_FAILED, failures.CHALLENGE_EXPIRED, failures.CHALLENGE_DISPUTED}:
+        reputation -= 10 + _failure_streak_penalty(worker)
+        failure_count += 1
     elif "verification" in reason or "receipt" in reason:
         reputation -= 5 + _failure_streak_penalty(worker)
         failure_count += 1

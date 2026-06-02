@@ -8,6 +8,7 @@ from uuid import uuid4
 
 import failures
 from adversary import FLAKY, MALICIOUS_RECEIPT, duplicate_job, simulate_capability_claim, simulate_worker_receipt
+from challenges import create_challenge, verify_challenge_result
 from capabilities import compute_capability_hash, make_capability_claim, verify_capability_claim
 from customer_receipts import build_customer_receipt, compute_customer_receipt_hash
 from db import WorkerDB
@@ -900,12 +901,105 @@ inference:
         self.assertIn("average_final_price", summary1)
         self.assertTrue(summary1["malicious_worker_penalty_observed"])
 
+    def test_honest_worker_passes_deterministic_challenge(self) -> None:
+        job = {"id": "challenge-job", "tokens": 20}
+        challenge = create_challenge(job, "worker-a", {"challenges": {"enabled": True, "challenge_rate": 1}})
+        receipt = self._inference_receipt(output_tokens=20)
+        receipt["metadata"]["job_id"] = "challenge-job"
+        receipt["metadata"]["challenge_response_hash"] = challenge["expected_hash"]
+        receipt["receipt_hash"] = verify_receipt_hash(receipt) and receipt["receipt_hash"]
+
+        result = verify_challenge_result(challenge, receipt)
+
+        self.assertTrue(result.accepted)
+        self.assertEqual(result.reason, "challenge accepted")
+
+    def test_malformed_receipt_fails_challenge(self) -> None:
+        job = {"id": "challenge-bad", "tokens": 20}
+        challenge = create_challenge(job, "worker-a", {"challenges": {"enabled": True, "challenge_rate": 1}})
+        receipt = self._inference_receipt(output_tokens=20)
+        receipt["metadata"]["job_id"] = "challenge-bad"
+        receipt["metadata"]["challenge_response_hash"] = "wrong"
+
+        result = verify_challenge_result(challenge, receipt)
+
+        self.assertFalse(result.accepted)
+        self.assertEqual(result.reason, failures.CHALLENGE_FAILED)
+        self.assertIn("challenge response hash mismatch", result.metadata["reason_detail"])
+
+    def test_failed_challenge_reduces_reputation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            _, db = self._scheduler(tmp)
+            db.register_worker(self._worker("worker-a", reputation_score=50))
+            receipt = self._inference_receipt()
+
+            worker = update_worker_reputation(
+                db,
+                worker_id="worker-a",
+                verification={"accepted": False, "reason": failures.CHALLENGE_FAILED},
+                receipt=receipt,
+            )
+
+            self.assertEqual(worker["failure_count"], 1)
+            self.assertEqual(worker["reputation_score"], 40)
+            db.close()
+
+    def test_expired_challenge_is_handled(self) -> None:
+        job = {"id": "challenge-expired", "tokens": 20}
+        challenge = create_challenge(
+            job,
+            "worker-a",
+            {"challenges": {"enabled": True, "challenge_rate": 1, "ttl_seconds": -1}},
+        )
+        receipt = self._inference_receipt(output_tokens=20)
+        receipt["metadata"]["job_id"] = "challenge-expired"
+        receipt["metadata"]["challenge_response_hash"] = challenge["expected_hash"]
+
+        result = verify_challenge_result(challenge, receipt)
+
+        self.assertFalse(result.accepted)
+        self.assertEqual(result.reason, failures.CHALLENGE_EXPIRED)
+
+    def test_failed_challenge_prevents_payout(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            job_dir = Path(tmp) / "jobs"
+            job_dir.mkdir()
+            (job_dir / "job.json").write_text(
+                json.dumps(
+                    {
+                        "id": "challenge-payout-blocked",
+                        "input_tokens": 1,
+                        "output_tokens": 20,
+                        "seconds": 0.001,
+                        "challenge_response_hash": "wrong",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            scheduler, db = self._scheduler(
+                tmp,
+                challenges_config={"enabled": True, "challenge_rate": 1, "ttl_seconds": 300},
+            )
+            db.register_worker(self._worker("test-worker", reputation_score=50))
+
+            receipt = scheduler.run_once()
+
+            self.assertEqual(receipt["metadata"]["verification"]["reason"], failures.CHALLENGE_FAILED)
+            self.assertEqual(db.get_settled_balance("test-worker"), 0)
+            self.assertEqual(db.recent_payout_events(1), [])
+            results = db.challenge_results_for_job("challenge-payout-blocked")
+            self.assertEqual(len(results), 1)
+            self.assertFalse(results[0]["accepted"])
+            self.assertEqual(db.get_worker("test-worker")["reputation_score"], 40)
+            db.close()
+
     def _scheduler(
         self,
         tmp: str,
         mining_command: object = "",
         telemetry: object | None = None,
         cycle_seconds: float = 0.001,
+        challenges_config: dict[str, object] | None = None,
     ) -> tuple[Scheduler, WorkerDB]:
         root = Path(tmp)
         config = {
@@ -946,6 +1040,7 @@ inference:
                 "seconds_per_job": 0.001,
                 "estimated_qi_per_token": 0.25,
             },
+            "challenges": challenges_config or {"enabled": False, "challenge_rate": 0},
         }
         db = WorkerDB(config["worker"]["db_path"])
         telemetry = telemetry or GPUTelemetry(

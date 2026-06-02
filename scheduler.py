@@ -11,11 +11,17 @@ from typing import Any
 from uuid import uuid4
 
 import failures
+from challenges import (
+    build_challenge_result,
+    create_challenge,
+    should_attach_challenge,
+    verify_challenge_result,
+)
 from db import WorkerDB
 from receipts import compute_receipt_hash, make_receipt, utc_now_iso
 from reputation import update_worker_reputation
 from telemetry import GPUTelemetry
-from verifier import verify_inference_receipt
+from verifier import VerificationResult, verify_inference_receipt
 
 
 class Scheduler:
@@ -86,6 +92,15 @@ class Scheduler:
         metadata["input_tokens"] = input_tokens
         metadata["output_tokens"] = output_tokens
         metadata["worker"] = self._worker_metadata()
+        challenge = None
+        if accepted and job and should_attach_challenge(job, self.config):
+            challenge = create_challenge(job, self.worker_id, self.config)
+            self.db.insert_challenge(challenge)
+            metadata["challenge_id"] = challenge["challenge_id"]
+            metadata["challenge_response_hash"] = job.get(
+                "challenge_response_hash",
+                challenge["expected_hash"],
+            )
         estimated_qi = self._inference_payout(input_tokens, output_tokens, accepted)
         job_id = job.get("id")
         duplicate_job = bool(job_id and self.db.inference_job_was_paid(str(job_id)))
@@ -104,6 +119,24 @@ class Scheduler:
             metadata=metadata,
         )
         verification = verify_inference_receipt(receipt, job, self.config)
+        if challenge:
+            challenge_verification = verify_challenge_result(challenge, receipt)
+            self.db.record_challenge_result(
+                build_challenge_result(challenge, receipt, challenge_verification)
+            )
+            receipt["metadata"]["challenge_verification"] = challenge_verification.to_dict()
+            if not challenge_verification.accepted:
+                verification = VerificationResult(
+                    accepted=False,
+                    reason=challenge_verification.reason,
+                    score=0.0,
+                    metadata={
+                        "job_id": job.get("id"),
+                        "worker_id": receipt.get("worker_id"),
+                        "challenge": challenge_verification.to_dict(),
+                        "payout_eligible": False,
+                    },
+                )
         receipt["metadata"]["verification"] = verification.to_dict()
         receipt["receipt_hash"] = self._refresh_receipt_hash(receipt)
         self.db.insert_receipt(receipt)

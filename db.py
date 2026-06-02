@@ -150,6 +150,32 @@ CREATE TABLE IF NOT EXISTS routing_audit_logs (
     metadata_json TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS challenges (
+    challenge_id TEXT PRIMARY KEY,
+    job_id TEXT NOT NULL,
+    challenge_type TEXT NOT NULL,
+    expected_hash TEXT,
+    expected_tokens REAL NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL,
+    expires_at TEXT,
+    assigned_worker_id TEXT,
+    verifier_worker_id TEXT,
+    metadata_json TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS challenge_results (
+    result_id TEXT PRIMARY KEY,
+    challenge_id TEXT NOT NULL,
+    job_id TEXT NOT NULL,
+    receipt_id TEXT,
+    worker_id TEXT,
+    accepted INTEGER NOT NULL,
+    reason TEXT NOT NULL,
+    score REAL NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL,
+    metadata_json TEXT NOT NULL
+);
+
 CREATE UNIQUE INDEX IF NOT EXISTS idx_mining_rounds_block_hash
 ON mining_rounds(block_hash)
 WHERE block_hash IS NOT NULL;
@@ -242,6 +268,66 @@ class WorkerDB:
             ),
         )
         self.conn.commit()
+
+    def insert_challenge(self, challenge: dict[str, Any]) -> None:
+        self.conn.execute(
+            """
+            INSERT INTO challenges (
+                challenge_id, job_id, challenge_type, expected_hash, expected_tokens,
+                created_at, expires_at, assigned_worker_id, verifier_worker_id, metadata_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                challenge["challenge_id"],
+                challenge["job_id"],
+                challenge["challenge_type"],
+                challenge.get("expected_hash"),
+                float(challenge.get("expected_tokens", 0)),
+                challenge["created_at"],
+                challenge.get("expires_at"),
+                challenge.get("assigned_worker_id"),
+                challenge.get("verifier_worker_id"),
+                json.dumps(challenge.get("metadata", {}), sort_keys=True),
+            ),
+        )
+        self.conn.commit()
+
+    def record_challenge_result(self, result: dict[str, Any]) -> None:
+        self.conn.execute(
+            """
+            INSERT INTO challenge_results (
+                result_id, challenge_id, job_id, receipt_id, worker_id,
+                accepted, reason, score, created_at, metadata_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                result["result_id"],
+                result["challenge_id"],
+                result["job_id"],
+                result.get("receipt_id"),
+                result.get("worker_id"),
+                1 if result.get("accepted", False) else 0,
+                result["reason"],
+                float(result.get("score", 0)),
+                result["created_at"],
+                json.dumps(result.get("metadata", {}), sort_keys=True),
+            ),
+        )
+        self.conn.commit()
+
+    def get_challenge(self, challenge_id: str) -> dict[str, Any] | None:
+        row = self.conn.execute(
+            "SELECT * FROM challenges WHERE challenge_id = ?",
+            (challenge_id,),
+        ).fetchone()
+        return _challenge_row_to_dict(row) if row else None
+
+    def challenge_results_for_job(self, job_id: str) -> list[dict[str, Any]]:
+        rows = self.conn.execute(
+            "SELECT * FROM challenge_results WHERE job_id = ? ORDER BY created_at ASC",
+            (job_id,),
+        )
+        return [_challenge_result_row_to_dict(row) for row in rows]
 
     def inference_job_was_paid(self, job_id: str) -> bool:
         row = self.conn.execute(
@@ -818,6 +904,36 @@ def _routing_audit_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
         "reason": row["reason"],
         "alternatives": json.loads(row["alternatives_json"]),
         "router_version": row["router_version"],
+        "created_at": row["created_at"],
+        "metadata": json.loads(row["metadata_json"]),
+    }
+
+
+def _challenge_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "challenge_id": row["challenge_id"],
+        "job_id": row["job_id"],
+        "challenge_type": row["challenge_type"],
+        "expected_hash": row["expected_hash"],
+        "expected_tokens": row["expected_tokens"],
+        "created_at": row["created_at"],
+        "expires_at": row["expires_at"],
+        "assigned_worker_id": row["assigned_worker_id"],
+        "verifier_worker_id": row["verifier_worker_id"],
+        "metadata": json.loads(row["metadata_json"]),
+    }
+
+
+def _challenge_result_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "result_id": row["result_id"],
+        "challenge_id": row["challenge_id"],
+        "job_id": row["job_id"],
+        "receipt_id": row["receipt_id"],
+        "worker_id": row["worker_id"],
+        "accepted": bool(row["accepted"]),
+        "reason": row["reason"],
+        "score": row["score"],
         "created_at": row["created_at"],
         "metadata": json.loads(row["metadata_json"]),
     }

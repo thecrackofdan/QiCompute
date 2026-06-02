@@ -11,6 +11,7 @@ This MVP has no smart contracts and no real payout rail. It records local receip
 - `telemetry.py`: GPU telemetry via `nvidia-smi`, with fallback watts when unavailable.
 - `receipts.py`: local job receipt format.
 - `verifier.py`: local inference receipt validation.
+- `challenges.py`: local proof-of-useful-work challenge simulation.
 - `registry.py`: local worker registry helpers.
 - `router.py`: local inference job routing.
 - `reputation.py`: worker reputation updates.
@@ -307,6 +308,18 @@ The local verifier checks:
 - deterministic receipt hash
 
 This is not a cryptographic proof system. It is a local validation layer preparing the prototype for future network verification.
+
+## Verification Challenges
+
+QiCompute can attach local proof-of-useful-work challenges to a configurable percentage of inference jobs. Challenge types are protocol-shaped placeholders:
+
+- `deterministic_prompt`
+- `known_output`
+- `timing_challenge`
+- `duplicate_execution`
+- `partial_output_verification`
+
+Challenges record expected hashes and token counts without adding networking or cryptographic proof systems. A worker receipt must include matching challenge response metadata. Failed or expired challenges are recorded in `challenge_results`, block payout eligibility for that job, and reduce worker reputation more heavily than ordinary failures.
 
 ## Receipt Hashing
 

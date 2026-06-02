@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import copy
+import hashlib
+import json
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
@@ -29,7 +32,7 @@ class JobReceipt:
         return self.average_watts * self.duration_seconds
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        receipt = {
             "receipt_id": self.receipt_id,
             "worker_id": self.worker_id,
             "mode": self.mode,
@@ -45,6 +48,8 @@ class JobReceipt:
             "estimated_qi_owed": self.estimated_qi_owed,
             "metadata": self.metadata,
         }
+        receipt["receipt_hash"] = compute_receipt_hash(receipt)
+        return receipt
 
 
 def make_receipt(
@@ -72,3 +77,19 @@ def make_receipt(
         estimated_qi_owed=round(estimated_qi_owed, 12),
         metadata=metadata or {},
     )
+
+
+def receipt_hash_payload(receipt: dict[str, Any]) -> dict[str, Any]:
+    payload = copy.deepcopy(receipt)
+    payload.pop("receipt_hash", None)
+    return payload
+
+
+def compute_receipt_hash(receipt: dict[str, Any]) -> str:
+    encoded = json.dumps(receipt_hash_payload(receipt), sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def verify_receipt_hash(receipt: dict[str, Any]) -> bool:
+    receipt_hash = receipt.get("receipt_hash")
+    return isinstance(receipt_hash, str) and receipt_hash == compute_receipt_hash(receipt)

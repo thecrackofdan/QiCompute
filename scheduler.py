@@ -11,8 +11,9 @@ from typing import Any
 from uuid import uuid4
 
 from db import WorkerDB
-from receipts import make_receipt, utc_now_iso
+from receipts import compute_receipt_hash, make_receipt, utc_now_iso
 from telemetry import GPUTelemetry
+from verifier import verify_inference_receipt
 
 
 class Scheduler:
@@ -54,10 +55,12 @@ class Scheduler:
         start_time = time.monotonic()
         start_watts = self.telemetry.total_watts()
         metadata: dict[str, Any] = {"job_file": str(job_path)}
+        job: dict[str, Any] = {}
 
         try:
             job = json.loads(job_path.read_text(encoding="utf-8"))
             metadata["job"] = job
+            metadata["job_id"] = job.get("id")
             command = job.get("command") or inference_cfg.get("command") or ""
             if command:
                 self._run_command(command, timeout=float(job.get("timeout_seconds", 300)))
@@ -79,7 +82,12 @@ class Scheduler:
         metadata["accepted"] = accepted
         metadata["input_tokens"] = input_tokens
         metadata["output_tokens"] = output_tokens
+        metadata["worker"] = self._worker_metadata()
         estimated_qi = self._inference_payout(input_tokens, output_tokens, accepted)
+        job_id = job.get("id")
+        duplicate_job = bool(job_id and self.db.inference_job_was_paid(str(job_id)))
+        if duplicate_job:
+            metadata["duplicate_job"] = True
 
         receipt = self._build_receipt(
             mode="inference",
@@ -91,20 +99,32 @@ class Scheduler:
             estimated_qi=estimated_qi,
             metadata=metadata,
         )
+        verification = verify_inference_receipt(receipt, job, self.config)
+        receipt["metadata"]["verification"] = verification.to_dict()
+        receipt["receipt_hash"] = self._refresh_receipt_hash(receipt)
         self.db.insert_receipt(receipt)
-        if estimated_qi > 0:
-            self.db.insert_payout_event(
-                self._payout_event(
-                    event_type="inference_job",
-                    basis="accepted_tokens",
-                    qi_amount=estimated_qi,
-                    source_id=receipt["receipt_id"],
-                    metadata={
-                        "input_tokens": input_tokens,
-                        "output_tokens": output_tokens,
-                        "job_file": str(job_path),
-                    },
-                )
+        if verification.accepted and estimated_qi > 0 and job_id and not duplicate_job:
+            event = self._payout_event(
+                event_type="inference_job",
+                basis="verified_accepted_tokens",
+                qi_amount=estimated_qi,
+                source_id=receipt["receipt_id"],
+                metadata={
+                    "job_id": job_id,
+                    "input_tokens": input_tokens,
+                    "output_tokens": output_tokens,
+                    "job_file": str(job_path),
+                    "verification_score": verification.score,
+                    "verification_reason": verification.reason,
+                },
+            )
+            self.db.insert_payout_event(event)
+            self.db.record_inference_job_paid(
+                job_id=str(job_id),
+                worker_id=self.worker_id,
+                receipt_id=receipt["receipt_id"],
+                accepted_at=event["created_at"],
+                payout_event_id=event["event_id"],
             )
         return receipt
 
@@ -306,6 +326,28 @@ class Scheduler:
             "metadata": metadata,
         }
 
+    def _worker_metadata(self) -> dict[str, Any]:
+        worker_cfg = self.config.get("worker", {})
+        return {
+            "id": worker_cfg.get("id"),
+            "operator": worker_cfg.get("operator"),
+            "public_key": worker_cfg.get("public_key"),
+            "region": worker_cfg.get("region"),
+            "hardware_profile": worker_cfg.get(
+                "hardware_profile",
+                {
+                    "gpu_count": None,
+                    "gpu_names": [],
+                    "total_vram_gb": None,
+                    "fallback_watts": worker_cfg.get("fallback_watts"),
+                },
+            ),
+        }
+
+    def _refresh_receipt_hash(self, receipt: dict[str, Any]) -> str:
+        receipt.pop("receipt_hash", None)
+        return compute_receipt_hash(receipt)
+
     def _log_telemetry(self) -> None:
         for sample in self.telemetry.sample():
             self.db.insert_telemetry(sample)
@@ -342,6 +384,6 @@ def print_receipt(receipt: dict[str, Any], balance: float) -> None:
         f"{receipt['ended_at']} mode={receipt['mode']} "
         f"energy_j={receipt['energy_joules']:.2f} "
         f"{output['type']}={output['amount']:.4f} "
-        f"qi_owed={receipt['estimated_qi_owed']:.12f} "
-        f"balance={balance:.12f}"
+        f"estimated_qi={receipt['estimated_qi_owed']:.12f} "
+        f"settled_balance={balance:.12f}"
     )

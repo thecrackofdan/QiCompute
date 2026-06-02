@@ -9,7 +9,8 @@ from uuid import uuid4
 from db import WorkerDB
 from scheduler import Scheduler
 from telemetry import GPUTelemetry
-from receipts import utc_now_iso
+from receipts import make_receipt, utc_now_iso, verify_receipt_hash
+from verifier import verify_inference_receipt
 from worker import _minimal_yaml_load, load_config
 
 
@@ -21,12 +22,16 @@ class WorkerPrototypeTest(unittest.TestCase):
         self.assertIn("mining", config)
         self.assertIn("inference", config)
         self.assertEqual(config["mining"]["command"], [])
+        self.assertIn("hardware_profile", config["worker"])
 
     def test_minimal_yaml_loader_supports_command_lists(self) -> None:
         config = _minimal_yaml_load(
             """
 worker:
   id: "test"
+  hardware_profile:
+    gpu_count: null
+    gpu_names: []
 mining:
   command: ["python3", "miner.py"]
 inference:
@@ -36,6 +41,8 @@ inference:
 
         self.assertEqual(config["mining"]["command"], ["python3", "miner.py"])
         self.assertEqual(config["inference"]["command"], [])
+        self.assertEqual(config["worker"]["hardware_profile"]["gpu_count"], None)
+        self.assertEqual(config["worker"]["hardware_profile"]["gpu_names"], [])
 
     def test_telemetry_falls_back_when_nvidia_smi_missing(self) -> None:
         telemetry = GPUTelemetry(nvidia_smi_path="definitely-not-nvidia-smi", fallback_watts=123)
@@ -97,6 +104,83 @@ inference:
             self.assertEqual(payout_events[0]["event_type"], "inference_job")
             self.assertFalse((job_dir / "job.json").exists())
             self.assertTrue((Path(tmp) / "done" / "job.json").exists())
+            db.close()
+
+    def test_valid_inference_receipt_verification(self) -> None:
+        receipt = self._inference_receipt()
+        job = {"id": "job-verify-1", "input_tokens": 10, "output_tokens": 20}
+
+        result = verify_inference_receipt(receipt, job, self._config_for_verifier())
+
+        self.assertTrue(result.accepted)
+        self.assertEqual(result.score, 1.0)
+
+    def test_rejected_inference_receipt_missing_job_id(self) -> None:
+        receipt = self._inference_receipt()
+        job: dict[str, object] = {"input_tokens": 10, "output_tokens": 20}
+
+        result = verify_inference_receipt(receipt, job, self._config_for_verifier())
+
+        self.assertFalse(result.accepted)
+        self.assertIn("job id is required", result.reason)
+
+    def test_rejected_inference_receipt_negative_token_count(self) -> None:
+        receipt = self._inference_receipt(input_tokens=-1)
+        job = {"id": "job-negative", "input_tokens": -1, "output_tokens": 20}
+
+        result = verify_inference_receipt(receipt, job, self._config_for_verifier())
+
+        self.assertFalse(result.accepted)
+        self.assertIn("input token count must be non-negative", result.reason)
+
+    def test_duplicate_inference_job_does_not_double_pay(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            job_dir = Path(tmp) / "jobs"
+            job_dir.mkdir()
+            job = {"id": "same-job", "input_tokens": 10, "output_tokens": 20, "seconds": 0.001}
+            (job_dir / "a.json").write_text(json.dumps(job), encoding="utf-8")
+            scheduler, db = self._scheduler(tmp)
+
+            scheduler.run_once()
+            first_balance = db.get_settled_balance("test-worker")
+            (job_dir / "b.json").write_text(json.dumps(job), encoding="utf-8")
+            scheduler.run_once()
+
+            self.assertGreater(first_balance, 0)
+            self.assertEqual(db.get_settled_balance("test-worker"), first_balance)
+            self.assertGreater(db.get_estimated_receipt_total("test-worker"), first_balance)
+            db.close()
+
+    def test_receipt_hash_verifies_correctly(self) -> None:
+        receipt = self._inference_receipt()
+
+        self.assertTrue(verify_receipt_hash(receipt))
+
+    def test_tampered_receipt_hash_fails(self) -> None:
+        receipt = self._inference_receipt()
+        receipt["output"]["amount"] = 999
+
+        self.assertFalse(verify_receipt_hash(receipt))
+
+    def test_estimated_receipt_total_is_separate_from_settled_balance(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            scheduler, db = self._scheduler(tmp)
+
+            mining_receipt = scheduler.run_once()
+
+            self.assertEqual(mining_receipt["mode"], "mining")
+            self.assertEqual(db.get_settled_balance("test-worker"), 0)
+            self.assertEqual(db.get_estimated_receipt_total("test-worker"), 0)
+
+            job_dir = Path(tmp) / "jobs"
+            job_dir.mkdir(exist_ok=True)
+            (job_dir / "job.json").write_text(
+                json.dumps({"id": "settled-job", "input_tokens": 1, "output_tokens": 2, "seconds": 0.001}),
+                encoding="utf-8",
+            )
+            scheduler.run_once()
+
+            self.assertEqual(db.get_settled_balance("test-worker"), db.get_estimated_receipt_total("test-worker"))
             db.close()
 
     def test_distributes_block_reward_over_recent_valid_shares(self) -> None:
@@ -198,6 +282,15 @@ inference:
         config = {
             "worker": {
                 "id": "test-worker",
+                "operator": "test-operator",
+                "public_key": "placeholder-test-key",
+                "region": "test-region",
+                "hardware_profile": {
+                    "gpu_count": 1,
+                    "gpu_names": ["test-gpu"],
+                    "total_vram_gb": 24,
+                    "fallback_watts": 100,
+                },
                 "db_path": str(root / "worker.db"),
                 "fallback_watts": 100,
                 "loop_interval_seconds": 0.001,
@@ -231,6 +324,40 @@ inference:
             fallback_watts=config["worker"]["fallback_watts"],
         )
         return Scheduler(config, db, telemetry), db
+
+    def _config_for_verifier(self) -> dict[str, object]:
+        return {
+            "worker": {
+                "id": "test-worker",
+                "operator": "test-operator",
+                "public_key": "placeholder-test-key",
+                "region": "test-region",
+            }
+        }
+
+    def _inference_receipt(
+        self,
+        *,
+        input_tokens: float = 10,
+        output_tokens: float = 20,
+    ) -> dict[str, object]:
+        return make_receipt(
+            worker_id="test-worker",
+            mode="inference",
+            started_at=utc_now_iso(),
+            ended_at=utc_now_iso(),
+            duration_seconds=1,
+            average_watts=100,
+            output_type="tokens",
+            output_amount=output_tokens,
+            estimated_qi_owed=1,
+            metadata={
+                "job_id": "job-verify-1",
+                "accepted": True,
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
+            },
+        ).to_dict()
 
     def _insert_share(
         self,

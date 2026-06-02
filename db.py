@@ -22,6 +22,8 @@ CREATE TABLE IF NOT EXISTS telemetry (
 
 CREATE TABLE IF NOT EXISTS receipts (
     receipt_id TEXT PRIMARY KEY,
+    receipt_hash TEXT,
+    job_id TEXT,
     worker_id TEXT NOT NULL,
     mode TEXT NOT NULL,
     started_at TEXT NOT NULL,
@@ -76,6 +78,14 @@ CREATE TABLE IF NOT EXISTS mining_rounds (
     metadata_json TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS inference_jobs (
+    job_id TEXT PRIMARY KEY,
+    worker_id TEXT NOT NULL,
+    receipt_id TEXT NOT NULL,
+    accepted_at TEXT NOT NULL,
+    payout_event_id TEXT
+);
+
 CREATE UNIQUE INDEX IF NOT EXISTS idx_mining_rounds_block_hash
 ON mining_rounds(block_hash)
 WHERE block_hash IS NOT NULL;
@@ -89,10 +99,18 @@ class WorkerDB:
         self.conn = sqlite3.connect(self.path)
         self.conn.row_factory = sqlite3.Row
         self.conn.executescript(SCHEMA)
+        self._migrate()
         self.conn.commit()
 
     def close(self) -> None:
         self.conn.close()
+
+    def _migrate(self) -> None:
+        receipt_columns = {row["name"] for row in self.conn.execute("PRAGMA table_info(receipts)")}
+        if "receipt_hash" not in receipt_columns:
+            self.conn.execute("ALTER TABLE receipts ADD COLUMN receipt_hash TEXT")
+        if "job_id" not in receipt_columns:
+            self.conn.execute("ALTER TABLE receipts ADD COLUMN job_id TEXT")
 
     def insert_telemetry(self, sample: dict[str, Any]) -> None:
         self.conn.execute(
@@ -119,13 +137,15 @@ class WorkerDB:
         self.conn.execute(
             """
             INSERT INTO receipts (
-                receipt_id, worker_id, mode, started_at, ended_at,
+                receipt_id, receipt_hash, job_id, worker_id, mode, started_at, ended_at,
                 duration_seconds, average_watts, energy_joules,
                 output_type, output_amount, estimated_qi_owed, metadata_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 receipt["receipt_id"],
+                receipt.get("receipt_hash"),
+                receipt.get("metadata", {}).get("job_id"),
                 receipt["worker_id"],
                 receipt["mode"],
                 receipt["started_at"],
@@ -138,6 +158,32 @@ class WorkerDB:
                 receipt["estimated_qi_owed"],
                 json.dumps(receipt.get("metadata", {}), sort_keys=True),
             ),
+        )
+        self.conn.commit()
+
+    def inference_job_was_paid(self, job_id: str) -> bool:
+        row = self.conn.execute(
+            "SELECT 1 FROM inference_jobs WHERE job_id = ?",
+            (job_id,),
+        ).fetchone()
+        return row is not None
+
+    def record_inference_job_paid(
+        self,
+        *,
+        job_id: str,
+        worker_id: str,
+        receipt_id: str,
+        accepted_at: str,
+        payout_event_id: str,
+    ) -> None:
+        self.conn.execute(
+            """
+            INSERT INTO inference_jobs (
+                job_id, worker_id, receipt_id, accepted_at, payout_event_id
+            ) VALUES (?, ?, ?, ?, ?)
+            """,
+            (job_id, worker_id, receipt_id, accepted_at, payout_event_id),
         )
         self.conn.commit()
 
@@ -258,13 +304,27 @@ class WorkerDB:
             (block_hash,),
         ).fetchone()
 
-    def get_balance(self, worker_id: str) -> float:
+    def get_settled_balance(self, worker_id: str) -> float:
         row = self.conn.execute(
             """
             SELECT COALESCE(SUM(qi_amount), 0) AS estimated_qi_owed
             FROM payout_events
             WHERE worker_id = ?
               AND event_type IN ('inference_job', 'mining_block_reward')
+            """,
+            (worker_id,),
+        ).fetchone()
+        return float(row["estimated_qi_owed"]) if row else 0.0
+
+    def get_balance(self, worker_id: str) -> float:
+        return self.get_settled_balance(worker_id)
+
+    def get_estimated_receipt_total(self, worker_id: str) -> float:
+        row = self.conn.execute(
+            """
+            SELECT COALESCE(SUM(estimated_qi_owed), 0) AS estimated_qi_owed
+            FROM receipts
+            WHERE worker_id = ?
             """,
             (worker_id,),
         ).fetchone()

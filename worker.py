@@ -32,7 +32,11 @@ def main() -> None:
     try:
         worker_id = config["worker"]["id"]
         if args.balance:
-            print(f"{worker_id} estimated_qi_owed={db.get_balance(worker_id):.12f}")
+            print(
+                f"{worker_id} "
+                f"settled_qi_balance={db.get_settled_balance(worker_id):.12f} "
+                f"estimated_receipt_total={db.get_estimated_receipt_total(worker_id):.12f}"
+            )
             return
         if args.recent:
             for row in db.recent_receipts(args.recent):
@@ -60,7 +64,7 @@ def main() -> None:
             return
         if args.once:
             receipt = scheduler.run_once()
-            print_receipt(receipt, db.get_balance(worker_id))
+            print_receipt(receipt, db.get_settled_balance(worker_id))
         else:
             scheduler.run_forever()
     finally:
@@ -80,25 +84,38 @@ def load_config(path: str) -> dict[str, Any]:
 def _minimal_yaml_load(text: str) -> dict[str, Any]:
     result: dict[str, Any] = {}
     current_section: dict[str, Any] | None = None
+    current_nested: dict[str, Any] | None = None
     for raw_line in text.splitlines():
         line = raw_line.split("#", 1)[0].rstrip()
         if not line:
             continue
-        if not raw_line.startswith(" ") and line.endswith(":"):
+        indent = len(raw_line) - len(raw_line.lstrip(" "))
+        if indent == 0 and line.endswith(":"):
             key = line[:-1]
             result[key] = {}
             current_section = result[key]
+            current_nested = None
             continue
         if current_section is None or ":" not in line:
             continue
         key, value = line.strip().split(":", 1)
-        current_section[key] = _parse_scalar(value.strip())
+        value = value.strip()
+        if indent == 2 and value == "":
+            current_section[key] = {}
+            current_nested = current_section[key]
+        elif indent >= 4 and current_nested is not None:
+            current_nested[key] = _parse_scalar(value)
+        else:
+            current_section[key] = _parse_scalar(value)
+            current_nested = None
     return result
 
 
 def _parse_scalar(value: str) -> Any:
     if value in {"", '""', "''"}:
         return ""
+    if value.lower() in {"null", "none"}:
+        return None
     if value.startswith("[") and value.endswith("]"):
         parsed = ast.literal_eval(value)
         if not isinstance(parsed, list) or not all(isinstance(item, str) for item in parsed):

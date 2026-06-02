@@ -1,5 +1,12 @@
 worker:
   id: "local-gpu-rig-001"
+  operator: "local-operator"
+  public_key: "placeholder-public-key"
+  region: "local"
+  hardware_profile:
+    gpu_count: null
+    gpu_names: []
+    total_vram_gb: null
   db_path: "worker.db"
   loop_interval_seconds: 5
   fallback_watts: 250

@@ -10,6 +10,7 @@ This MVP has no smart contracts and no real payout rail. It records local receip
 - `scheduler.py`: mode selection, placeholder launchers, accounting.
 - `telemetry.py`: GPU telemetry via `nvidia-smi`, with fallback watts when unavailable.
 - `receipts.py`: local job receipt format.
+- `verifier.py`: local inference receipt validation.
 - `db.py`: SQLite schema and persistence.
 - `config.yaml`: local worker configuration.
 
@@ -34,6 +35,8 @@ Check estimated local Qi balance:
 ```bash
 python3 worker.py --balance
 ```
+
+This prints both settled payout balance and estimated receipt total. Settled balance is derived only from accepted payout events.
 
 Show recent receipts:
 
@@ -114,7 +117,8 @@ Output:
 Payout:
 
 ```text
-balance = sum(payout_events.qi_amount)
+settled_balance = sum(settled payout_events.qi_amount)
+estimated_receipt_total = sum(receipts.estimated_qi_owed)
 ```
 
 Receipts describe work. Payout events update balances. This keeps audit records separate from payable claims.
@@ -145,11 +149,52 @@ The block reward path uses a simple PPLNS-style window over unassigned accepted 
 
 Receipts, payout events, and balances are local only. Future private Qi UTXO settlement can consume accepted payout events as the local source of payable claims.
 
+## Verification
+
+Inference payout is verification-aware:
+
+```text
+execute job
+build receipt
+hash receipt
+verify receipt against job
+store receipt
+create payout event only if verification accepts and job_id has not already been paid
+```
+
+The local verifier checks:
+
+- inference mode
+- required job ID
+- non-negative input/output token counts
+- positive duration and energy
+- explicit accepted status
+- worker ID and receipt ID
+- deterministic receipt hash
+
+This is not a cryptographic proof system. It is a local validation layer preparing the prototype for future network verification.
+
+## Receipt Hashing
+
+Each new receipt includes a deterministic SHA-256 hash. The hash covers the stable receipt payload:
+
+```text
+receipt_id, worker_id, mode, timestamps, duration, watts, joules,
+output type/amount, estimated value, and metadata
+```
+
+`receipt_hash` itself is excluded from the hash payload.
+
+## Idempotency
+
+Accepted inference jobs are tracked by `job_id`. If the same accepted job appears again, the worker stores another receipt for auditability but does not create a second payout event.
+
 ## SQLite Tables
 
 - `telemetry`: timestamped GPU samples.
 - `receipts`: one row per mining or inference cycle.
 - `payout_events`: payable events that update worker balances.
+- `inference_jobs`: accepted inference job IDs that have already been paid.
 - `mining_shares`: accepted/rejected share records for pool reward allocation.
 - `mining_rounds`: block reward distribution records.
 - `balances`: local estimated Qi owed by worker ID.

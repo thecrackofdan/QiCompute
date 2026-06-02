@@ -19,7 +19,11 @@ This MVP has no smart contracts and no real payout rail. It records local receip
 - `capabilities.py`: worker capability claim structures.
 - `customer_receipts.py`: customer-facing job receipt structures.
 - `failures.py`: standardized local failure codes.
+- `lifecycle.py`: customer job state transitions.
+- `retry.py`: local retry policy helpers.
+- `adversary.py`: deterministic bad-worker behavior simulation.
 - `simulation.py`: local marketplace simulation.
+- `stress_simulation.py`: deterministic marketplace stress simulation.
 - `market.py`: local marketplace CLI.
 - `db.py`: SQLite schema and persistence.
 - `config.yaml`: local worker configuration.
@@ -117,6 +121,12 @@ Run a local marketplace simulation:
 python3 market.py --simulate
 ```
 
+Run a deterministic stress simulation:
+
+```bash
+python3 market.py --stress-sim
+```
+
 Routing considers online status, model support, reputation, region preference, VRAM, latency, energy efficiency, and failure rate. This is local route planning only; no network calls are made.
 
 ## Marketplace Protocol Shape
@@ -139,6 +149,52 @@ customer intent -> signed job envelope -> worker capability claim -> route decis
 ```
 
 This is still local-only. There is no HTTP server, blockchain settlement, wallet integration, or external service dependency.
+
+## Distributed Marketplace Simulation
+
+QiCompute can now model unreliable distributed execution before real networking exists.
+
+Lifecycle states are explicit:
+
+```text
+queued -> routed -> running -> completed
+queued -> rejected
+queued/routed/running/retrying -> expired
+running -> failed -> retrying -> routed
+```
+
+Customer jobs can include `expires_at`. Stale queued, routed, running, or retrying jobs move to `expired` and are not routed. Retry policy tracks `retry_count`, `last_failure_code`, and `last_failure_reason`; timeout and overload failures are retryable, while duplicate jobs and invalid envelopes are not.
+
+Worker registry records runtime load:
+
+```text
+current_jobs, max_concurrent_jobs, load_percent, last_heartbeat_at
+```
+
+The router skips overloaded workers and gives lower-load workers a better score. Marketplace simulation can model offline workers, latency, timeouts, slow workers, overloaded workers, and workers coming back online.
+
+Adversarial worker modes are local and deterministic:
+
+- `honest`
+- `flaky`
+- `slow`
+- `malicious_receipt`
+- `fake_capability`
+- `duplicate_submitter`
+
+Malformed receipts fail receipt-hash verification. Fake capability claims fail capability verification. Duplicate job replays do not create a second payout or reputation gain.
+
+Reputation now supports decay and stronger failure penalties. Stale workers lose routing priority over time, offline workers route lower or not at all, repeated failures compound, and scores remain capped from 0 to 100.
+
+The stress simulation creates 10 workers and 50 jobs with mixed models, privacy levels, latency targets, expirations, retries, and adversarial behavior:
+
+```bash
+python3 market.py --stress-sim
+```
+
+The summary includes completed, failed, expired, retried, rejected, average route score, average final price, best worker, worst worker, and whether the malicious worker was penalized.
+
+Product framing remains simple: private distributed AI compute from idle GPU hardware. Qi is the settlement and incentive layer; customer-facing value is private, affordable, reliable inference.
 
 Run continuously:
 

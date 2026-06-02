@@ -7,16 +7,20 @@ from pathlib import Path
 from uuid import uuid4
 
 import failures
+from adversary import FLAKY, MALICIOUS_RECEIPT, duplicate_job, simulate_capability_claim, simulate_worker_receipt
 from capabilities import compute_capability_hash, make_capability_claim, verify_capability_claim
 from customer_receipts import build_customer_receipt, compute_customer_receipt_hash
 from db import WorkerDB
 from envelopes import compute_envelope_hash, make_job_envelope, verify_job_envelope
+from lifecycle import transition_job_status
 from pricing import estimate_job_price
 from registry import heartbeat_local_worker
-from reputation import update_worker_reputation
+from reputation import apply_reputation_decay, update_worker_reputation
+from retry import next_retry_status, should_retry
 from router import route_and_audit_inference_job, route_inference_job
 from scheduler import Scheduler
 from simulation import run_marketplace_simulation
+from stress_simulation import run_stress_simulation
 from telemetry import GPUTelemetry
 from receipts import make_receipt, utc_now_iso, verify_receipt_hash
 from verifier import verify_inference_receipt
@@ -457,6 +461,7 @@ inference:
             queued = db.list_queued_jobs()
             decision = route_inference_job(queued[0], db.list_online_workers())
             db.assign_customer_job(job["job_id"], decision.worker_id, decision.score)
+            db.update_customer_job_status(job["job_id"], "running", {})
             db.update_customer_job_status(job["job_id"], "completed", {"result": "ok"})
 
             stored = db.get_customer_job(job["job_id"])
@@ -598,6 +603,303 @@ inference:
             self.assertGreaterEqual(summary["audit_logs"], 1)
             db.close()
 
+    def test_lifecycle_valid_and_invalid_transitions(self) -> None:
+        self.assertTrue(transition_job_status("queued", "routed"))
+        self.assertTrue(transition_job_status("routed", "running"))
+        self.assertTrue(transition_job_status("running", "completed"))
+        self.assertFalse(transition_job_status("queued", "completed"))
+        self.assertFalse(transition_job_status("completed", "running"))
+
+    def test_expired_queued_job_is_marked_expired(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            _, db = self._scheduler(tmp)
+            job = self._customer_job("expired-job")
+            job["expires_at"] = "2000-01-01T00:00:00+00:00"
+            db.insert_customer_job(job)
+
+            expired = db.expire_stale_customer_jobs(utc_now_iso())
+
+            stored = db.get_customer_job("expired-job")
+            self.assertEqual(expired, 1)
+            self.assertEqual(stored["status"], "expired")
+            self.assertEqual(stored["last_failure_code"], failures.JOB_EXPIRED)
+            db.close()
+
+    def test_expired_job_is_not_routed(self) -> None:
+        decision = route_inference_job(
+            {
+                "job_id": "expired-route",
+                "model": "llama-3.1-8b",
+                "requires_gpu": True,
+                "expires_at": "2000-01-01T00:00:00+00:00",
+            },
+            [self._worker("worker-a")],
+        )
+
+        self.assertFalse(decision.accepted)
+        self.assertEqual(decision.failure_code, failures.JOB_EXPIRED)
+
+    def test_non_expired_job_still_routes(self) -> None:
+        decision = route_inference_job(
+            {
+                "job_id": "fresh-route",
+                "model": "llama-3.1-8b",
+                "requires_gpu": True,
+                "expires_at": "9999-01-01T00:00:00+00:00",
+            },
+            [self._worker("worker-a")],
+        )
+
+        self.assertTrue(decision.accepted)
+
+    def test_retryable_failure_increments_retry_count(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            _, db = self._scheduler(tmp)
+            job = self._customer_job("retry-job")
+            db.insert_customer_job(job)
+            db.assign_customer_job("retry-job", "worker-a", 1)
+            db.update_customer_job_status("retry-job", "running", {})
+
+            db.mark_customer_job_failure("retry-job", failures.WORKER_TIMEOUT, "timeout", retrying=True)
+
+            stored = db.get_customer_job("retry-job")
+            self.assertEqual(stored["status"], "retrying")
+            self.assertEqual(stored["retry_count"], 1)
+            self.assertEqual(stored["last_failure_code"], failures.WORKER_TIMEOUT)
+            db.close()
+
+    def test_max_retries_and_non_retryable_failures_stop_retry(self) -> None:
+        retry_job = {"retry_count": 2}
+        duplicate_job = {"retry_count": 0}
+
+        self.assertFalse(should_retry(retry_job, failures.WORKER_TIMEOUT, {"retry": {"max_retries": 2}}))
+        self.assertFalse(should_retry(duplicate_job, failures.DUPLICATE_JOB, {"retry": {"max_retries": 2}}))
+        self.assertEqual(next_retry_status(retry_job, failures.WORKER_TIMEOUT, {"retry": {"max_retries": 2}}), "failed")
+
+    def test_retrying_job_can_be_routed_again(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            _, db = self._scheduler(tmp)
+            db.register_worker(self._worker("worker-a"))
+            job = self._customer_job("retry-route")
+            job["status"] = "retrying"
+            job["retry_count"] = 1
+            db.insert_customer_job(job)
+
+            queued = db.list_queued_jobs()
+            decision = route_inference_job(queued[0], db.list_online_workers())
+
+            self.assertEqual(queued[0]["status"], "retrying")
+            self.assertTrue(decision.accepted)
+            db.close()
+
+    def test_overloaded_worker_is_skipped(self) -> None:
+        decision = route_inference_job(
+            {"job_id": "overloaded", "model": "llama-3.1-8b", "requires_gpu": True},
+            [self._worker("busy", current_jobs=2, max_concurrent_jobs=2)],
+        )
+
+        self.assertFalse(decision.accepted)
+        self.assertEqual(decision.failure_code, failures.WORKER_OVERLOADED)
+
+    def test_lower_load_worker_wins_over_equal_higher_load_worker(self) -> None:
+        decision = route_inference_job(
+            {"job_id": "load-route", "model": "llama-3.1-8b", "requires_gpu": True},
+            [
+                self._worker("busy", reputation_score=70, current_jobs=1, max_concurrent_jobs=2, load_percent=50),
+                self._worker("idle", reputation_score=70, current_jobs=0, max_concurrent_jobs=2, load_percent=0),
+            ],
+        )
+
+        self.assertTrue(decision.accepted)
+        self.assertEqual(decision.worker_id, "idle")
+
+    def test_load_increments_and_decrements(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            _, db = self._scheduler(tmp)
+            db.register_worker(self._worker("worker-a", max_concurrent_jobs=2))
+
+            db.increment_worker_load("worker-a")
+            loaded = db.get_worker("worker-a")
+            db.decrement_worker_load("worker-a")
+            unloaded = db.get_worker("worker-a")
+
+            self.assertEqual(loaded["current_jobs"], 1)
+            self.assertEqual(loaded["load_percent"], 50)
+            self.assertEqual(unloaded["current_jobs"], 0)
+            self.assertEqual(unloaded["load_percent"], 0)
+            db.close()
+
+    def test_simulation_summary_includes_distributed_fields(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            _, db = self._scheduler(tmp)
+
+            summary = run_marketplace_simulation(db, {})
+
+            for key in {
+                "online_workers",
+                "offline_workers",
+                "jobs_completed",
+                "jobs_retried",
+                "jobs_expired",
+                "jobs_failed",
+                "average_latency",
+                "route_success_rate",
+            }:
+                self.assertIn(key, summary)
+            db.close()
+
+    def test_malicious_receipt_fails_verification(self) -> None:
+        receipt = simulate_worker_receipt(
+            "worker-a",
+            self._customer_job("malicious-job"),
+            MALICIOUS_RECEIPT,
+        )
+
+        self.assertFalse(verify_receipt_hash(receipt))
+
+    def test_fake_capability_claim_is_rejected(self) -> None:
+        claim = simulate_capability_claim(self._worker("worker-a"), "fake_capability")
+
+        self.assertFalse(verify_capability_claim(claim)["accepted"])
+
+    def test_duplicate_job_does_not_create_payout_or_reputation_gain(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            scheduler, db = self._scheduler(tmp)
+            db.register_worker(self._worker("test-worker", reputation_score=50))
+            job_dir = Path(tmp) / "jobs"
+            job_dir.mkdir(exist_ok=True)
+            job = {"id": "dupe-adversary", "input_tokens": 1, "output_tokens": 2, "seconds": 0.001}
+            (job_dir / "first.json").write_text(json.dumps(job), encoding="utf-8")
+            scheduler.run_once()
+            first_balance = db.get_settled_balance("test-worker")
+            first_reputation = db.get_worker("test-worker")["reputation_score"]
+            replay = duplicate_job(job)
+            replay["id"] = replay["job_id"] = "dupe-adversary"
+            (job_dir / "second.json").write_text(json.dumps(replay), encoding="utf-8")
+
+            scheduler.run_once()
+            update_worker_reputation(
+                db,
+                worker_id="test-worker",
+                verification={"accepted": True, "reason": "duplicate"},
+                receipt=self._inference_receipt(),
+                duplicate_job=True,
+            )
+
+            self.assertEqual(db.get_settled_balance("test-worker"), first_balance)
+            self.assertEqual(db.get_worker("test-worker")["reputation_score"], first_reputation)
+            db.close()
+
+    def test_flaky_worker_reputation_decreases_over_repeated_failures(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            _, db = self._scheduler(tmp)
+            db.register_worker(self._worker("flaky", reputation_score=50))
+
+            for i in range(3):
+                receipt = simulate_worker_receipt("flaky", self._customer_job(f"flaky-{i}"), FLAKY, attempt=0)
+                update_worker_reputation(
+                    db,
+                    worker_id="flaky",
+                    verification={"accepted": False, "reason": "job failed"},
+                    receipt=receipt,
+                )
+
+            worker = db.get_worker("flaky")
+            self.assertEqual(worker["failure_count"], 3)
+            self.assertLess(worker["reputation_score"], 41)
+            db.close()
+
+    def test_stale_worker_reputation_decays(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            _, db = self._scheduler(tmp)
+            worker = self._worker("stale", reputation_score=50)
+            worker["last_seen_at"] = "2026-05-01T00:00:00+00:00"
+            db.register_worker(worker)
+
+            updated = apply_reputation_decay(
+                db,
+                worker_id="stale",
+                now="2026-06-01T00:00:00+00:00",
+                config={"reputation": {"decay_per_day": 1, "offline_penalty": 0}},
+            )
+
+            self.assertEqual(updated["reputation_score"], 19)
+            db.close()
+
+    def test_offline_worker_routes_lower_than_online_worker(self) -> None:
+        decision = route_inference_job(
+            {"job_id": "offline-route", "model": "llama-3.1-8b", "requires_gpu": True},
+            [
+                self._worker("offline", reputation_score=100, online=False),
+                self._worker("online", reputation_score=50, online=True),
+            ],
+        )
+
+        self.assertTrue(decision.accepted)
+        self.assertEqual(decision.worker_id, "online")
+
+    def test_repeated_failures_penalize_more_than_one_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            _, db = self._scheduler(tmp)
+            db.register_worker(self._worker("worker-a", reputation_score=50))
+            receipt = self._inference_receipt()
+
+            first = update_worker_reputation(
+                db,
+                worker_id="worker-a",
+                verification={"accepted": False, "reason": "job failed"},
+                receipt=receipt,
+            )
+            second = update_worker_reputation(
+                db,
+                worker_id="worker-a",
+                verification={"accepted": False, "reason": "job failed"},
+                receipt=receipt,
+            )
+
+            self.assertLess(second["reputation_score"], first["reputation_score"] - 2.9)
+            db.close()
+
+    def test_reputation_bounds_are_enforced(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            _, db = self._scheduler(tmp)
+            db.register_worker(self._worker("low", reputation_score=1))
+            db.register_worker(self._worker("high", reputation_score=100))
+
+            for _ in range(20):
+                update_worker_reputation(
+                    db,
+                    worker_id="low",
+                    verification={"accepted": False, "reason": "verification failed"},
+                    receipt=self._inference_receipt(),
+                )
+                update_worker_reputation(
+                    db,
+                    worker_id="high",
+                    verification={"accepted": True, "reason": "ok"},
+                    receipt=self._inference_receipt(),
+                )
+
+            self.assertEqual(db.get_worker("low")["reputation_score"], 0)
+            self.assertEqual(db.get_worker("high")["reputation_score"], 100)
+            db.close()
+
+    def test_stress_simulation_runs_deterministically_and_completes_jobs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            _, db1 = self._scheduler(tmp)
+            summary1 = run_stress_simulation(db1, {}, seed=7)
+            db1.close()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            _, db2 = self._scheduler(tmp)
+            summary2 = run_stress_simulation(db2, {}, seed=7)
+            db2.close()
+
+        self.assertEqual(summary1, summary2)
+        self.assertGreater(summary1["completed"], 0)
+        self.assertIn("average_final_price", summary1)
+        self.assertTrue(summary1["malicious_worker_penalty_observed"])
+
     def _scheduler(
         self,
         tmp: str,
@@ -713,7 +1015,11 @@ inference:
         region: str = "us-east",
         models: list[str] | None = None,
         online: bool = True,
+        current_jobs: int = 0,
+        max_concurrent_jobs: int = 2,
+        load_percent: float | None = None,
     ) -> dict[str, object]:
+        now = utc_now_iso()
         return {
             "worker_id": worker_id,
             "operator": "operator",
@@ -727,12 +1033,16 @@ inference:
             "total_vram_gb": 24,
             "total_watts_capacity": 300,
             "online": online,
-            "last_seen_at": utc_now_iso(),
+            "last_seen_at": now,
             "reputation_score": reputation_score,
             "success_count": 0,
             "failure_count": 0,
             "average_latency_ms": 0,
             "average_energy_per_token": 0,
+            "current_jobs": current_jobs,
+            "max_concurrent_jobs": max_concurrent_jobs,
+            "load_percent": 100 * current_jobs / max_concurrent_jobs if load_percent is None else load_percent,
+            "last_heartbeat_at": now,
             "metadata": {},
         }
 
@@ -748,6 +1058,7 @@ inference:
             "max_price_qi": 0.001,
             "status": "queued",
             "created_at": utc_now_iso(),
+            "expires_at": "9999-01-01T00:00:00+00:00",
             "metadata": {},
         }
 

@@ -10,6 +10,7 @@ from receipts import utc_now_iso
 from registry import heartbeat_local_worker, register_local_worker
 from router import route_and_audit_inference_job
 from simulation import run_marketplace_simulation
+from stress_simulation import run_stress_simulation
 from worker import load_config
 
 
@@ -28,6 +29,7 @@ def main() -> None:
     parser.add_argument("--queued-jobs", action="store_true")
     parser.add_argument("--reputation", action="store_true")
     parser.add_argument("--simulate", action="store_true")
+    parser.add_argument("--stress-sim", action="store_true")
     args = parser.parse_args()
 
     config = load_config(args.config)
@@ -104,12 +106,24 @@ def main() -> None:
                     f"success={worker['success_count']} failure={worker['failure_count']}"
                 )
             return
+        if args.stress_sim:
+            summary = run_stress_simulation(db, config)
+            print(
+                f"stress completed={summary['completed']} failed={summary['failed']} "
+                f"expired={summary['expired']} retried={summary['retried']} "
+                f"rejected={summary['rejected']} avg_score={summary['average_route_score']:.4f} "
+                f"avg_price={summary['average_final_price']:.12f} "
+                f"best={summary['best_worker_by_completed_jobs']} worst={summary['worst_worker_by_failures']} "
+                f"malicious_penalty={summary['malicious_worker_penalty_observed']}"
+            )
+            return
         parser.print_help()
     finally:
         db.close()
 
 
 def _route_jobs(db: WorkerDB) -> None:
+    db.expire_stale_customer_jobs(utc_now_iso())
     workers = db.list_online_workers()
     for job in db.list_queued_jobs():
         route_job = {
@@ -120,6 +134,7 @@ def _route_jobs(db: WorkerDB) -> None:
             "max_price_qi": job["max_price_qi"],
             "privacy_level": job["privacy_level"],
             "requires_gpu": True,
+            "expires_at": job.get("expires_at"),
         }
         decision = route_and_audit_inference_job(
             db,
@@ -130,7 +145,14 @@ def _route_jobs(db: WorkerDB) -> None:
             db.assign_customer_job(job["job_id"], decision.worker_id, decision.score)
             print(f"routed job={job['job_id']} worker={decision.worker_id} score={decision.score:.4f}")
         else:
-            db.update_customer_job_status(job["job_id"], "rejected", {"route_reason": decision.reason, "failure_code": decision.failure_code})
+            if job["status"] == "retrying":
+                db.mark_customer_job_failure(job["job_id"], decision.failure_code or "ROUTE_FAILED", decision.reason)
+            else:
+                db.update_customer_job_status(
+                    job["job_id"],
+                    "rejected",
+                    {"route_reason": decision.reason, "failure_code": decision.failure_code},
+                )
             print(f"rejected job={job['job_id']} reason={decision.failure_code or decision.reason}")
 
 

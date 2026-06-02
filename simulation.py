@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from db import WorkerDB
+import failures
 from receipts import make_receipt, utc_now_iso
 from reputation import update_worker_reputation
 from router import route_and_audit_inference_job
@@ -19,20 +20,31 @@ def run_marketplace_simulation(db: WorkerDB, config: dict[str, Any]) -> dict[str
 
     routed = 0
     rejected = 0
+    completed = 0
+    retried = 0
+    expired = 0
+    failed = 0
+    latencies = []
     route_scores = []
     for job in db.list_queued_jobs():
         decision = route_and_audit_inference_job(db, job, db.list_online_workers())
         if decision.accepted and decision.worker_id:
             db.assign_customer_job(job["job_id"], decision.worker_id, decision.score)
+            db.update_customer_job_status(job["job_id"], "running", {})
+            db.increment_worker_load(decision.worker_id)
             routed += 1
             route_scores.append(decision.score)
             receipt = _simulated_receipt(decision.worker_id, job, accepted=True)
+            latencies.append(receipt["duration_seconds"] * 1000)
             update_worker_reputation(
                 db,
                 worker_id=decision.worker_id,
                 verification={"accepted": True, "reason": "simulation accepted"},
                 receipt=receipt,
             )
+            db.decrement_worker_load(decision.worker_id)
+            db.update_customer_job_status(job["job_id"], "completed", {})
+            completed += 1
         else:
             db.update_customer_job_status(job["job_id"], "rejected", {"failure_code": decision.failure_code})
             rejected += 1
@@ -42,7 +54,15 @@ def run_marketplace_simulation(db: WorkerDB, config: dict[str, Any]) -> dict[str
         "jobs_submitted": len(jobs),
         "jobs_routed": routed,
         "jobs_rejected": rejected,
+        "jobs_completed": completed,
+        "jobs_retried": retried,
+        "jobs_expired": expired,
+        "jobs_failed": failed,
+        "online_workers": len(db.list_online_workers()),
+        "offline_workers": 0,
+        "average_latency": sum(latencies) / len(latencies) if latencies else 0.0,
         "average_route_score": sum(route_scores) / len(route_scores) if route_scores else 0.0,
+        "route_success_rate": routed / len(jobs) if jobs else 0.0,
         "audit_logs": len(db.recent_routing_audit_logs(100)),
         "reputation": [
             {
@@ -78,6 +98,10 @@ def _fake_workers() -> list[dict[str, Any]]:
             "failure_count": 1,
             "average_latency_ms": 1200,
             "average_energy_per_token": 8,
+            "current_jobs": 0,
+            "max_concurrent_jobs": 2,
+            "load_percent": 0,
+            "last_heartbeat_at": now,
             "metadata": {},
         },
         {
@@ -99,6 +123,10 @@ def _fake_workers() -> list[dict[str, Any]]:
             "failure_count": 1,
             "average_latency_ms": 1800,
             "average_energy_per_token": 10,
+            "current_jobs": 0,
+            "max_concurrent_jobs": 2,
+            "load_percent": 0,
+            "last_heartbeat_at": now,
             "metadata": {},
         },
     ]
@@ -118,6 +146,7 @@ def _fake_jobs() -> list[dict[str, Any]]:
             "max_price_qi": 0.001,
             "status": "queued",
             "created_at": now,
+            "expires_at": "9999-01-01T00:00:00+00:00",
             "metadata": {},
         },
         {
@@ -131,6 +160,7 @@ def _fake_jobs() -> list[dict[str, Any]]:
             "max_price_qi": 0.001,
             "status": "queued",
             "created_at": now,
+            "expires_at": "9999-01-01T00:00:00+00:00",
             "metadata": {},
         },
     ]

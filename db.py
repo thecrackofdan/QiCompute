@@ -3,6 +3,9 @@ import sqlite3
 from pathlib import Path
 from typing import Any
 
+import failures
+from lifecycle import transition_job_status
+
 
 BALANCE_AFFECTING_EVENT_TYPES = {"inference_job", "mining_block_reward"}
 
@@ -105,6 +108,10 @@ CREATE TABLE IF NOT EXISTS worker_registry (
     failure_count INTEGER NOT NULL DEFAULT 0,
     average_latency_ms REAL NOT NULL DEFAULT 0,
     average_energy_per_token REAL NOT NULL DEFAULT 0,
+    current_jobs INTEGER NOT NULL DEFAULT 0,
+    max_concurrent_jobs INTEGER NOT NULL DEFAULT 1,
+    load_percent REAL NOT NULL DEFAULT 0,
+    last_heartbeat_at TEXT,
     metadata_json TEXT NOT NULL
 );
 
@@ -122,6 +129,10 @@ CREATE TABLE IF NOT EXISTS customer_jobs (
     route_score REAL,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
+    expires_at TEXT,
+    retry_count INTEGER NOT NULL DEFAULT 0,
+    last_failure_code TEXT,
+    last_failure_reason TEXT,
     metadata_json TEXT NOT NULL
 );
 
@@ -164,6 +175,24 @@ class WorkerDB:
             self.conn.execute("ALTER TABLE receipts ADD COLUMN receipt_hash TEXT")
         if "job_id" not in receipt_columns:
             self.conn.execute("ALTER TABLE receipts ADD COLUMN job_id TEXT")
+        worker_columns = {row["name"] for row in self.conn.execute("PRAGMA table_info(worker_registry)")}
+        for column, ddl in {
+            "current_jobs": "ALTER TABLE worker_registry ADD COLUMN current_jobs INTEGER NOT NULL DEFAULT 0",
+            "max_concurrent_jobs": "ALTER TABLE worker_registry ADD COLUMN max_concurrent_jobs INTEGER NOT NULL DEFAULT 1",
+            "load_percent": "ALTER TABLE worker_registry ADD COLUMN load_percent REAL NOT NULL DEFAULT 0",
+            "last_heartbeat_at": "ALTER TABLE worker_registry ADD COLUMN last_heartbeat_at TEXT",
+        }.items():
+            if column not in worker_columns:
+                self.conn.execute(ddl)
+        job_columns = {row["name"] for row in self.conn.execute("PRAGMA table_info(customer_jobs)")}
+        for column, ddl in {
+            "expires_at": "ALTER TABLE customer_jobs ADD COLUMN expires_at TEXT",
+            "retry_count": "ALTER TABLE customer_jobs ADD COLUMN retry_count INTEGER NOT NULL DEFAULT 0",
+            "last_failure_code": "ALTER TABLE customer_jobs ADD COLUMN last_failure_code TEXT",
+            "last_failure_reason": "ALTER TABLE customer_jobs ADD COLUMN last_failure_reason TEXT",
+        }.items():
+            if column not in job_columns:
+                self.conn.execute(ddl)
 
     def insert_telemetry(self, sample: dict[str, Any]) -> None:
         self.conn.execute(
@@ -416,8 +445,10 @@ class WorkerDB:
                 hardware_profile_json, supported_modes_json, supported_models_json,
                 gpu_count, total_vram_gb, total_watts_capacity, online, last_seen_at,
                 reputation_score, success_count, failure_count,
-                average_latency_ms, average_energy_per_token, metadata_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                average_latency_ms, average_energy_per_token,
+                current_jobs, max_concurrent_jobs, load_percent, last_heartbeat_at,
+                metadata_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(worker_id) DO UPDATE SET
                 operator = excluded.operator,
                 region = excluded.region,
@@ -436,6 +467,10 @@ class WorkerDB:
                 failure_count = excluded.failure_count,
                 average_latency_ms = excluded.average_latency_ms,
                 average_energy_per_token = excluded.average_energy_per_token,
+                current_jobs = excluded.current_jobs,
+                max_concurrent_jobs = excluded.max_concurrent_jobs,
+                load_percent = excluded.load_percent,
+                last_heartbeat_at = excluded.last_heartbeat_at,
                 metadata_json = excluded.metadata_json
             """,
             (
@@ -457,6 +492,10 @@ class WorkerDB:
                 failure_count,
                 average_latency_ms,
                 average_energy_per_token,
+                int(worker.get("current_jobs", 0)),
+                int(worker.get("max_concurrent_jobs", 1)),
+                float(worker.get("load_percent", 0)),
+                worker.get("last_heartbeat_at", now),
                 json.dumps(worker.get("metadata", {}), sort_keys=True),
             ),
         )
@@ -471,10 +510,12 @@ class WorkerDB:
             UPDATE worker_registry
             SET online = 1,
                 last_seen_at = ?,
+                last_heartbeat_at = ?,
                 metadata_json = ?
             WHERE worker_id = ?
             """,
             (
+                telemetry.get("last_seen_at"),
                 telemetry.get("last_seen_at"),
                 json.dumps(metadata, sort_keys=True),
                 worker_id,
@@ -534,8 +575,9 @@ class WorkerDB:
             INSERT INTO customer_jobs (
                 job_id, customer_id, model, prompt_hash, input_tokens,
                 expected_output_tokens, privacy_level, max_price_qi, status,
-                assigned_worker_id, route_score, created_at, updated_at, metadata_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                assigned_worker_id, route_score, created_at, updated_at, expires_at,
+                retry_count, last_failure_code, last_failure_reason, metadata_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 job["job_id"],
@@ -551,6 +593,10 @@ class WorkerDB:
                 job.get("route_score"),
                 now,
                 job.get("updated_at", now),
+                job.get("expires_at"),
+                int(job.get("retry_count", 0)),
+                job.get("last_failure_code"),
+                job.get("last_failure_reason"),
                 json.dumps(metadata, sort_keys=True),
             ),
         )
@@ -560,6 +606,8 @@ class WorkerDB:
         from receipts import utc_now_iso
 
         current = self.get_customer_job(job_id)
+        if current and current["status"] != status and not transition_job_status(current["status"], status):
+            raise ValueError(f"Invalid job status transition: {current['status']} -> {status}")
         merged = current.get("metadata", {}) if current else {}
         if metadata:
             merged.update({k: v for k, v in metadata.items() if k not in {"prompt", "raw_prompt"}})
@@ -590,6 +638,26 @@ class WorkerDB:
         )
         self.conn.commit()
 
+    def mark_customer_job_failure(self, job_id: str, failure_code: str, failure_reason: str, *, retrying: bool = False) -> None:
+        from receipts import utc_now_iso
+
+        current = self.get_customer_job(job_id)
+        retry_count = int(current.get("retry_count", 0) or 0) + (1 if retrying else 0)
+        status = "retrying" if retrying else "failed"
+        if current and current["status"] != status and not transition_job_status(current["status"], status):
+            if not (current["status"] == "running" and status in {"failed", "retrying"}):
+                raise ValueError(f"Invalid job status transition: {current['status']} -> {status}")
+        self.conn.execute(
+            """
+            UPDATE customer_jobs
+            SET status = ?, retry_count = ?, last_failure_code = ?,
+                last_failure_reason = ?, updated_at = ?
+            WHERE job_id = ?
+            """,
+            (status, retry_count, failure_code, failure_reason, utc_now_iso(), job_id),
+        )
+        self.conn.commit()
+
     def get_customer_job(self, job_id: str) -> dict[str, Any] | None:
         row = self.conn.execute(
             "SELECT * FROM customer_jobs WHERE job_id = ?",
@@ -599,9 +667,55 @@ class WorkerDB:
 
     def list_queued_jobs(self) -> list[dict[str, Any]]:
         rows = self.conn.execute(
-            "SELECT * FROM customer_jobs WHERE status = 'queued' ORDER BY created_at ASC"
+            "SELECT * FROM customer_jobs WHERE status IN ('queued', 'retrying') ORDER BY created_at ASC"
         )
         return [_customer_job_row_to_dict(row) for row in rows]
+
+    def expire_stale_customer_jobs(self, now: str) -> int:
+        rows = self.conn.execute(
+            """
+            SELECT * FROM customer_jobs
+            WHERE expires_at IS NOT NULL
+              AND expires_at <= ?
+              AND status IN ('queued', 'routed', 'running', 'retrying')
+            """,
+            (now,),
+        ).fetchall()
+        for row in rows:
+            self.conn.execute(
+                """
+                UPDATE customer_jobs
+                SET status = 'expired', updated_at = ?, last_failure_code = ?
+                WHERE job_id = ?
+                """,
+                (now, failures.JOB_EXPIRED, row["job_id"]),
+            )
+        self.conn.commit()
+        return len(rows)
+
+    def update_worker_load(self, worker_id: str, current_jobs: int, max_concurrent_jobs: int) -> None:
+        load_percent = 100.0 * current_jobs / max_concurrent_jobs if max_concurrent_jobs else 100.0
+        self.conn.execute(
+            """
+            UPDATE worker_registry
+            SET current_jobs = ?, max_concurrent_jobs = ?, load_percent = ?
+            WHERE worker_id = ?
+            """,
+            (current_jobs, max_concurrent_jobs, load_percent, worker_id),
+        )
+        self.conn.commit()
+
+    def increment_worker_load(self, worker_id: str) -> None:
+        worker = self.get_worker(worker_id)
+        if not worker:
+            return
+        self.update_worker_load(worker_id, int(worker["current_jobs"]) + 1, int(worker["max_concurrent_jobs"]))
+
+    def decrement_worker_load(self, worker_id: str) -> None:
+        worker = self.get_worker(worker_id)
+        if not worker:
+            return
+        self.update_worker_load(worker_id, max(0, int(worker["current_jobs"]) - 1), int(worker["max_concurrent_jobs"]))
 
     def insert_routing_audit_log(self, log: dict[str, Any]) -> None:
         self.conn.execute(
@@ -662,6 +776,10 @@ def _worker_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
         "failure_count": row["failure_count"],
         "average_latency_ms": row["average_latency_ms"],
         "average_energy_per_token": row["average_energy_per_token"],
+        "current_jobs": row["current_jobs"],
+        "max_concurrent_jobs": row["max_concurrent_jobs"],
+        "load_percent": row["load_percent"],
+        "last_heartbeat_at": row["last_heartbeat_at"],
         "metadata": json.loads(row["metadata_json"]),
     }
 
@@ -681,6 +799,10 @@ def _customer_job_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
         "route_score": row["route_score"],
         "created_at": row["created_at"],
         "updated_at": row["updated_at"],
+        "expires_at": row["expires_at"],
+        "retry_count": row["retry_count"],
+        "last_failure_code": row["last_failure_code"],
+        "last_failure_reason": row["last_failure_reason"],
         "metadata": json.loads(row["metadata_json"]),
     }
 

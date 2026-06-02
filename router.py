@@ -8,6 +8,7 @@ import failures
 from db import WorkerDB
 from receipts import utc_now_iso
 
+
 @dataclass(frozen=True)
 class RouteDecision:
     accepted: bool
@@ -29,11 +30,17 @@ class RouteDecision:
 
 
 def route_inference_job(job: dict[str, Any], workers: list[dict[str, Any]]) -> RouteDecision:
+    if job.get("expires_at") and str(job["expires_at"]) <= utc_now_iso():
+        return RouteDecision(False, None, 0.0, "job expired", failures.JOB_EXPIRED, [])
     eligible = []
+    skipped_overloaded = False
     for worker in workers:
         if not worker.get("online"):
             continue
         if job["model"] not in worker.get("supported_models", []):
+            continue
+        if int(worker.get("current_jobs", 0)) >= int(worker.get("max_concurrent_jobs", 1)):
+            skipped_overloaded = True
             continue
         if job.get("requires_gpu", True) and float(worker.get("gpu_count", 0)) <= 0:
             continue
@@ -41,12 +48,13 @@ def route_inference_job(job: dict[str, Any], workers: list[dict[str, Any]]) -> R
         eligible.append({"worker_id": worker["worker_id"], "score": score, "worker": worker})
 
     if not eligible:
+        code = failures.WORKER_OVERLOADED if skipped_overloaded else failures.MODEL_NOT_SUPPORTED
         return RouteDecision(
             False,
             None,
             0.0,
             "no online worker supports requested model",
-            failures.MODEL_NOT_SUPPORTED,
+            code,
             [],
         )
 
@@ -109,6 +117,8 @@ def _score_worker(job: dict[str, Any], worker: dict[str, Any]) -> float:
     successes = float(worker.get("success_count", 0))
     if failures + successes:
         score -= 20 * failures / (failures + successes)
+    load_percent = float(worker.get("load_percent", 0) or 0)
+    score += max(0, 20 - load_percent / 5)
     return score
 
 

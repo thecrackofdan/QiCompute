@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 from typing import Any
 
+from privacy import make_private_job_payload
 from receipts import utc_now_iso
 
 
@@ -26,11 +27,17 @@ def demo_prompt(mode: str) -> str:
 
 def demo_job(mode: str) -> dict[str, Any]:
     prompt = demo_prompt(mode)
+    private_payload = make_private_job_payload(prompt, {"demo_mode": mode}, None)
     return {
         "job_id": f"demo-job-{mode}",
         "customer_id": DEMO_CUSTOMER_ID,
         "model": DEMO_MODEL,
         "prompt_hash": prompt_hash(prompt),
+        "encrypted_payload": private_payload["encrypted_payload"],
+        "payload_nonce": private_payload["payload_nonce"],
+        "payload_hash": private_payload["payload_hash"],
+        "privacy_mode": private_payload["privacy_mode"],
+        "payload_key": private_payload["payload_key"],
         "input_tokens": float(len(prompt.split())),
         "expected_output_tokens": 32.0,
         "privacy_level": "verified",

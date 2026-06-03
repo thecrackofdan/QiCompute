@@ -61,9 +61,11 @@ Cluster receipts follow the same rule: controller-accepted receipts create local
 
 ## Privacy Model
 
-Raw prompts are not stored in customer jobs, receipts, logs, or summaries. The local Ollama runtime may receive a prompt for execution, but QiCompute stores prompt hashes, output hashes, token counts, timing, and verification metadata. Raw model output is not persisted.
+Strict mode is the default. Raw prompts are not stored in customer jobs, receipts, logs, audit trails, snapshots, or summaries. The local Ollama runtime may receive a prompt transiently for execution, but QiCompute stores prompt hashes, output hashes, byte counts, token counts, timing, energy estimates, and verification metadata. Raw model output is not persisted.
 
-Cluster transport preserves the same default. Worker receipts contain output hashes and accounting metadata, not raw model output. Prompt transfer is intentionally constrained to local test payloads until a stronger privacy design exists.
+Private job payloads use a local prototype envelope with `encrypted_payload`, `payload_nonce`, and `payload_hash`. This is not audited cryptography and is not production E2E encryption. It exists to shape the controller/worker boundary before stronger cryptography is added.
+
+Cluster transport preserves controller-blind prompt handling where practical. The controller routes by metadata and hashes, while worker runtimes decrypt only inside the local execution path and submit receipts with hashes and accounting metadata.
 
 ## Local LAN Transport
 

@@ -54,7 +54,7 @@ def run_demo(
             db.update_customer_job_status(job["job_id"], "rejected", {"failure_code": decision.failure_code})
         else:
             db.assign_customer_job(job["job_id"], decision.worker_id, decision.score)
-            job_override = {"prompt": demo_prompt(mode)}
+            job_override = {"payload_key": job.get("payload_key")}
             if mode == "malicious":
                 job_override["challenge_response_hash"] = "malicious-demo-response"
             overrides = {job["job_id"]: job_override}

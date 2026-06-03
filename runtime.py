@@ -11,6 +11,7 @@ from dataclasses import asdict, dataclass, field
 from typing import Any
 
 import failures
+from privacy import extract_runtime_prompt, redact_sensitive_fields
 from receipts import utc_now_iso
 
 
@@ -83,6 +84,7 @@ class SubprocessRuntime(BaseRuntime):
 
     def run(self, job: dict[str, Any], config: dict[str, Any]) -> RuntimeResult:
         runtime_cfg = config.get("runtime", {})
+        privacy_cfg = config.get("privacy", {})
         command = job.get("runtime_command") or runtime_cfg.get("command")
         if isinstance(command, str):
             raise ValueError("Runtime command must be an argument list, not a shell string")
@@ -107,13 +109,18 @@ class SubprocessRuntime(BaseRuntime):
             stderr = completed.stderr or ""
             accepted = completed.returncode == 0
             error_code = None if accepted else failures.COMMAND_FAILED
-            error_message = None if accepted else _redact_text(stderr or f"exit code {completed.returncode}")
+            zero_retention = bool(privacy_cfg.get("zero_retention_runtime", True))
+            error_message = None if accepted else f"command exited with code {completed.returncode}"
+            if not zero_retention and not accepted:
+                error_message = _redact_text(stderr or f"exit code {completed.returncode}")
             output_hash = _hash_text(stdout)
             output_tokens = float(job.get("expected_output_tokens", _count_tokens(stdout)))
             exit_code = completed.returncode
             metadata = {
                 "stdout_bytes": len(stdout.encode("utf-8")),
                 "stderr_bytes": len(stderr.encode("utf-8")),
+                "stdout_hash": output_hash,
+                "stderr_hash": _hash_text(stderr),
             }
         except subprocess.TimeoutExpired as exc:
             accepted = False
@@ -150,7 +157,7 @@ class OllamaRuntime(BaseRuntime):
         runtime_cfg = config.get("runtime", {})
         url = runtime_cfg.get("ollama_url", "http://127.0.0.1:11434/api/generate")
         model = runtime_cfg.get("ollama_model") or job.get("model")
-        prompt = job.get("prompt", "")
+        prompt = extract_runtime_prompt(job, config)
         timeout = float(job.get("timeout_seconds", runtime_cfg.get("timeout_seconds", 300)))
         started = utc_now_iso()
         start_time = time.monotonic()
@@ -315,7 +322,7 @@ def _runtime_result(
     input_tokens = float(job.get("input_tokens", 0) or 0)
     tokens_per_second = output_tokens / duration_seconds if duration_seconds > 0 else 0.0
     enriched = {
-        **metadata,
+        **redact_sensitive_fields(metadata),
         "total_watts": total_watts,
         "energy_joules": energy_joules,
         "tokens_per_second": tokens_per_second,

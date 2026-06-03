@@ -51,6 +51,15 @@ runtime:
   ollama_url: "http://127.0.0.1:11434/api/generate"
   ollama_model: "llama3.1:8b"
 
+privacy:
+  mode: "strict"
+  store_raw_prompts: false
+  store_raw_outputs: false
+  encrypt_job_payloads: true
+  controller_blind_prompts: true
+  zero_retention_runtime: true
+  allow_debug_prompt_logging: false
+
 pricing:
   base_input_token_rate_qi: 0.00000005
   base_output_token_rate_qi: 0.0000002

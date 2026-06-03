@@ -8,6 +8,7 @@ from typing import Any
 from uuid import uuid4
 
 from receipts import utc_now_iso
+from privacy import redact_sensitive_fields
 
 
 @dataclass(frozen=True)
@@ -56,9 +57,7 @@ def build_customer_receipt(
     worker_receipt: dict[str, Any],
     verification_result: dict[str, Any],
 ) -> dict[str, Any]:
-    metadata = dict(customer_job.get("metadata", {}))
-    metadata.pop("prompt", None)
-    metadata.pop("raw_prompt", None)
+    metadata = redact_sensitive_fields(dict(customer_job.get("metadata", {})))
     quoted = float(customer_job.get("max_price_qi", 0))
     final = float(worker_receipt.get("estimated_qi_owed", 0)) if verification_result.get("accepted") else 0.0
     return CustomerReceipt(

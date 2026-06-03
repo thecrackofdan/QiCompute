@@ -5,6 +5,7 @@ from typing import Any
 
 import failures
 from lifecycle import transition_job_status
+from privacy import redact_sensitive_fields
 
 
 BALANCE_AFFECTING_EVENT_TYPES = {"inference_job", "mining_block_reward"}
@@ -121,6 +122,10 @@ CREATE TABLE IF NOT EXISTS customer_jobs (
     customer_id TEXT,
     model TEXT NOT NULL,
     prompt_hash TEXT,
+    encrypted_payload TEXT,
+    payload_nonce TEXT,
+    payload_hash TEXT,
+    privacy_mode TEXT NOT NULL DEFAULT 'strict',
     input_tokens REAL NOT NULL,
     expected_output_tokens REAL NOT NULL,
     privacy_level TEXT NOT NULL,
@@ -292,6 +297,10 @@ class WorkerDB:
             "retry_count": "ALTER TABLE customer_jobs ADD COLUMN retry_count INTEGER NOT NULL DEFAULT 0",
             "last_failure_code": "ALTER TABLE customer_jobs ADD COLUMN last_failure_code TEXT",
             "last_failure_reason": "ALTER TABLE customer_jobs ADD COLUMN last_failure_reason TEXT",
+            "encrypted_payload": "ALTER TABLE customer_jobs ADD COLUMN encrypted_payload TEXT",
+            "payload_nonce": "ALTER TABLE customer_jobs ADD COLUMN payload_nonce TEXT",
+            "payload_hash": "ALTER TABLE customer_jobs ADD COLUMN payload_hash TEXT",
+            "privacy_mode": "ALTER TABLE customer_jobs ADD COLUMN privacy_mode TEXT NOT NULL DEFAULT 'strict'",
         }.items():
             if column not in job_columns:
                 self.conn.execute(ddl)
@@ -340,7 +349,7 @@ class WorkerDB:
                 receipt["output"]["type"],
                 receipt["output"]["amount"],
                 receipt["estimated_qi_owed"],
-                json.dumps(receipt.get("metadata", {}), sort_keys=True),
+                json.dumps(redact_sensitive_fields(receipt.get("metadata", {})), sort_keys=True),
             ),
         )
         self.conn.commit()
@@ -363,7 +372,7 @@ class WorkerDB:
                 challenge.get("expires_at"),
                 challenge.get("assigned_worker_id"),
                 challenge.get("verifier_worker_id"),
-                json.dumps(challenge.get("metadata", {}), sort_keys=True),
+                json.dumps(redact_sensitive_fields(challenge.get("metadata", {})), sort_keys=True),
             ),
         )
         self.conn.commit()
@@ -386,7 +395,7 @@ class WorkerDB:
                 result["reason"],
                 float(result.get("score", 0)),
                 result["created_at"],
-                json.dumps(result.get("metadata", {}), sort_keys=True),
+                json.dumps(redact_sensitive_fields(result.get("metadata", {})), sort_keys=True),
             ),
         )
         self.conn.commit()
@@ -451,7 +460,7 @@ class WorkerDB:
                     event["created_at"],
                     event.get("source_id"),
                     event.get("epoch_id"),
-                    json.dumps(event.get("metadata", {}), sort_keys=True),
+                    json.dumps(redact_sensitive_fields(event.get("metadata", {})), sort_keys=True),
                 ),
             )
             self.conn.execute(
@@ -491,7 +500,7 @@ class WorkerDB:
                 float(epoch.get("total_settled_qi", 0)),
                 int(epoch.get("total_verified_jobs", 0)),
                 int(epoch.get("total_failed_jobs", 0)),
-                json.dumps(epoch.get("metadata", {}), sort_keys=True),
+                json.dumps(redact_sensitive_fields(epoch.get("metadata", {})), sort_keys=True),
             ),
         )
         self.conn.commit()
@@ -524,7 +533,7 @@ class WorkerDB:
                 float(epoch["total_settled_qi"]),
                 int(epoch["total_verified_jobs"]),
                 int(epoch["total_failed_jobs"]),
-                json.dumps(epoch.get("metadata", {}), sort_keys=True),
+                json.dumps(redact_sensitive_fields(epoch.get("metadata", {})), sort_keys=True),
                 epoch["epoch_id"],
             ),
         )
@@ -566,7 +575,7 @@ class WorkerDB:
                 committee["created_at"],
                 committee.get("finalized_at"),
                 committee.get("result"),
-                json.dumps(committee.get("metadata", {}), sort_keys=True),
+                json.dumps(redact_sensitive_fields(committee.get("metadata", {})), sort_keys=True),
             ),
         )
         self.conn.commit()
@@ -586,7 +595,7 @@ class WorkerDB:
                 vote["vote"],
                 vote["reason"],
                 vote["created_at"],
-                json.dumps(vote.get("metadata", {}), sort_keys=True),
+                json.dumps(redact_sensitive_fields(vote.get("metadata", {})), sort_keys=True),
             ),
         )
         self.conn.commit()
@@ -598,7 +607,7 @@ class WorkerDB:
             SET result = ?, finalized_at = ?, metadata_json = ?
             WHERE committee_id = ?
             """,
-            (result, finalized_at, json.dumps(metadata, sort_keys=True), committee_id),
+            (result, finalized_at, json.dumps(redact_sensitive_fields(metadata), sort_keys=True), committee_id),
         )
         self.conn.commit()
 
@@ -633,7 +642,7 @@ class WorkerDB:
                 1 if share.get("stale", False) else 0,
                 share.get("round_id"),
                 share.get("receipt_id"),
-                json.dumps(share.get("metadata", {}), sort_keys=True),
+                json.dumps(redact_sensitive_fields(share.get("metadata", {})), sort_keys=True),
             ),
         )
         self.conn.commit()
@@ -655,7 +664,7 @@ class WorkerDB:
                 round_data["pool_fee_qi"],
                 round_data["net_reward_qi"],
                 round_data["policy"],
-                json.dumps(round_data.get("metadata", {}), sort_keys=True),
+                json.dumps(redact_sensitive_fields(round_data.get("metadata", {})), sort_keys=True),
             ),
         )
         self.conn.commit()
@@ -806,7 +815,7 @@ class WorkerDB:
                 int(worker.get("max_concurrent_jobs", 1)),
                 float(worker.get("load_percent", 0)),
                 worker.get("last_heartbeat_at", now),
-                json.dumps(worker.get("metadata", {}), sort_keys=True),
+                json.dumps(redact_sensitive_fields(worker.get("metadata", {})), sort_keys=True),
             ),
         )
         self.conn.commit()
@@ -827,7 +836,7 @@ class WorkerDB:
             (
                 telemetry.get("last_seen_at"),
                 telemetry.get("last_seen_at"),
-                json.dumps(metadata, sort_keys=True),
+                json.dumps(redact_sensitive_fields(metadata), sort_keys=True),
                 worker_id,
             ),
         )
@@ -883,18 +892,23 @@ class WorkerDB:
         self.conn.execute(
             """
             INSERT INTO customer_jobs (
-                job_id, customer_id, model, prompt_hash, input_tokens,
+                job_id, customer_id, model, prompt_hash, encrypted_payload,
+                payload_nonce, payload_hash, privacy_mode, input_tokens,
                 expected_output_tokens, privacy_level, max_price_qi, status,
                 assigned_worker_id, route_score, created_at, updated_at, expires_at,
                 lease_id, lease_expires_at, assigned_at,
                 retry_count, last_failure_code, last_failure_reason, metadata_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 job["job_id"],
                 job.get("customer_id"),
                 job["model"],
                 job.get("prompt_hash"),
+                job.get("encrypted_payload"),
+                job.get("payload_nonce"),
+                job.get("payload_hash"),
+                job.get("privacy_mode", "strict"),
                 float(job.get("input_tokens", 0)),
                 float(job.get("expected_output_tokens", 0)),
                 job.get("privacy_level", "standard"),
@@ -911,7 +925,7 @@ class WorkerDB:
                 int(job.get("retry_count", 0)),
                 job.get("last_failure_code"),
                 job.get("last_failure_reason"),
-                json.dumps(metadata, sort_keys=True),
+                json.dumps(redact_sensitive_fields(metadata), sort_keys=True),
             ),
         )
         self.conn.commit()
@@ -925,6 +939,7 @@ class WorkerDB:
         merged = current.get("metadata", {}) if current else {}
         if metadata:
             merged.update({k: v for k, v in metadata.items() if k not in {"prompt", "raw_prompt"}})
+            merged = redact_sensitive_fields(merged)
         updated_at = metadata.get("updated_at") if metadata and metadata.get("updated_at") else utc_now_iso()
         self.conn.execute(
             """
@@ -932,7 +947,7 @@ class WorkerDB:
             SET status = ?, updated_at = ?, metadata_json = ?
             WHERE job_id = ?
             """,
-            (status, updated_at, json.dumps(merged, sort_keys=True), job_id),
+            (status, updated_at, json.dumps(redact_sensitive_fields(merged), sort_keys=True), job_id),
         )
         self.conn.commit()
 
@@ -1126,7 +1141,7 @@ class WorkerDB:
                 json.dumps(log.get("alternatives", []), sort_keys=True),
                 log.get("router_version", "local-v1"),
                 log["created_at"],
-                json.dumps(log.get("metadata", {}), sort_keys=True),
+                json.dumps(redact_sensitive_fields(log.get("metadata", {})), sort_keys=True),
             ),
         )
         self.conn.commit()
@@ -1161,7 +1176,7 @@ class WorkerDB:
                 event["created_at"],
                 1 if event.get("accepted", False) else 0,
                 event.get("failure_code"),
-                json.dumps(event.get("metadata", {}), sort_keys=True),
+                json.dumps(redact_sensitive_fields(event.get("metadata", {})), sort_keys=True),
             ),
         )
         self.conn.commit()
@@ -1180,7 +1195,7 @@ class WorkerDB:
                 nonce, created_at, expires_at, source_worker_id, metadata_json
             ) VALUES (?, ?, ?, ?, ?)
             """,
-            (nonce, created_at, expires_at, source_worker_id, json.dumps(metadata or {}, sort_keys=True)),
+            (nonce, created_at, expires_at, source_worker_id, json.dumps(redact_sensitive_fields(metadata or {}), sort_keys=True)),
         )
         self.conn.commit()
 
@@ -1217,7 +1232,7 @@ class WorkerDB:
                 enrollment["created_at"],
                 enrollment.get("activated_at"),
                 enrollment.get("revoked_at"),
-                json.dumps(enrollment.get("metadata", {}), sort_keys=True),
+                json.dumps(redact_sensitive_fields(enrollment.get("metadata", {})), sort_keys=True),
             ),
         )
         self.conn.commit()
@@ -1264,6 +1279,10 @@ def _customer_job_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
         "customer_id": row["customer_id"],
         "model": row["model"],
         "prompt_hash": row["prompt_hash"],
+        "encrypted_payload": row["encrypted_payload"],
+        "payload_nonce": row["payload_nonce"],
+        "payload_hash": row["payload_hash"],
+        "privacy_mode": row["privacy_mode"],
         "input_tokens": row["input_tokens"],
         "expected_output_tokens": row["expected_output_tokens"],
         "privacy_level": row["privacy_level"],

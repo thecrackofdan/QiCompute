@@ -13,6 +13,7 @@ from committees import ACCEPTED, create_verification_committee, run_verification
 from db import WorkerDB
 from epochs import active_epoch
 from logging_config import configure_logging, log_event
+from privacy import redact_sensitive_fields
 from receipts import compute_receipt_hash, make_receipt, utc_now_iso
 from registry import heartbeat_local_worker, register_local_worker, worker_from_config
 from reputation import update_worker_reputation
@@ -403,10 +404,7 @@ def receipt_from_runtime_result(config: dict[str, Any], worker_id: str, job: dic
 
 
 def _redact_receipt_for_cluster(receipt: dict[str, Any]) -> dict[str, Any]:
-    clone = {**receipt, "metadata": dict(receipt.get("metadata", {}))}
-    for key in ("prompt", "raw_prompt", "output", "raw_output", "response", "raw_response"):
-        clone["metadata"].pop(key, None)
-    return clone
+    return redact_sensitive_fields(receipt)
 
 
 if __name__ == "__main__":

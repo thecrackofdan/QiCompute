@@ -3,8 +3,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-
-RAW_FIELD_NAMES = {"prompt", "raw_prompt", "output", "raw_output", "response", "raw_response"}
+from privacy import redact_sensitive_fields
 
 
 def configure_logging(*, verbose: bool = False, quiet: bool = False) -> logging.Logger:
@@ -14,14 +13,7 @@ def configure_logging(*, verbose: bool = False, quiet: bool = False) -> logging.
 
 
 def redact_payload(payload: Any) -> Any:
-    if isinstance(payload, dict):
-        return {
-            key: "[REDACTED]" if key in RAW_FIELD_NAMES else redact_payload(value)
-            for key, value in payload.items()
-        }
-    if isinstance(payload, list):
-        return [redact_payload(value) for value in payload]
-    return payload
+    return redact_sensitive_fields(payload)
 
 
 def log_event(logger: logging.Logger, event: str, **metadata: Any) -> None:

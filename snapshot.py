@@ -7,6 +7,7 @@ from typing import Any
 
 from db import WorkerDB
 from epochs import active_epoch
+from privacy import redact_sensitive_fields
 
 
 def export_controller_snapshot(db: WorkerDB) -> dict[str, Any]:
@@ -18,8 +19,9 @@ def export_controller_snapshot(db: WorkerDB) -> dict[str, Any]:
         "routing_audit_logs": db.recent_routing_audit_logs(20),
         "outstanding_leases": _leases(db),
     }
-    snapshot["snapshot_hash"] = compute_snapshot_hash(snapshot)
-    return snapshot
+    redacted = redact_sensitive_fields(snapshot)
+    redacted["snapshot_hash"] = compute_snapshot_hash(redacted)
+    return redacted
 
 
 def compute_snapshot_hash(snapshot: dict[str, Any]) -> str:

@@ -73,4 +73,19 @@ python3 lan_smoke_test.py
 
 ## Privacy Defaults
 
-Do not store raw prompts or raw model outputs. Cluster receipts carry hashes, token counts, timing, energy, and verification metadata. Keep cluster mode on a trusted LAN.
+Strict mode is enabled by default:
+
+```yaml
+privacy:
+  mode: "strict"
+  store_raw_prompts: false
+  store_raw_outputs: false
+  encrypt_job_payloads: true
+  controller_blind_prompts: true
+  zero_retention_runtime: true
+  allow_debug_prompt_logging: false
+```
+
+Do not store raw prompts or raw model outputs. Cluster receipts carry hashes, byte counts, token counts, timing, energy, and verification metadata. The local runtime may receive a prompt transiently for execution, but logs, receipts, audits, snapshots, and summaries should not retain it.
+
+The encrypted job payload support is a local prototype boundary, not audited production cryptography. Keep cluster mode on a trusted LAN.

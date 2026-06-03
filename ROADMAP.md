@@ -53,10 +53,13 @@ QiCompute is currently:
 
 ## Privacy Roadmap
 
-- Prompt minimization by default
-- Stronger redaction tests
-- Private job metadata policies
+- Strict privacy mode by default
+- Prototype private payload envelopes with hashes
+- Controller-blind prompt handling for LAN jobs
+- Zero-retention runtime metadata for subprocess and Ollama
+- Stronger redaction tests for prompts, outputs, keys, and worker secrets
 - Future private settlement integration
+- Replace local prototype encryption with audited production cryptography before WAN use
 
 ## Economic Simulation Roadmap
 

@@ -248,6 +248,29 @@ python3 lan_smoke_test.py
 
 Cluster transport uses standard-library HTTP plus shared-secret HMAC request signing with timestamp, nonce, and body hash. This is for local LAN development only. There is no public networking, blockchain integration, wallet integration, or cloud dependency.
 
+## Privacy Model
+
+QiCompute defaults to strict privacy mode:
+
+```yaml
+privacy:
+  mode: "strict"
+  store_raw_prompts: false
+  store_raw_outputs: false
+  encrypt_job_payloads: true
+  controller_blind_prompts: true
+  zero_retention_runtime: true
+  allow_debug_prompt_logging: false
+```
+
+Strict mode keeps raw prompts and raw model outputs out of SQLite, receipts, routing audit logs, cluster events, controller snapshots, summaries, and normal logs. Runtimes store hashes, byte counts, token counts, timing, energy estimates, and failure codes.
+
+`privacy.py` adds a local prototype private payload envelope with `encrypted_payload`, `payload_nonce`, `payload_hash`, and `privacy_mode`. This is standard-library-only placeholder encryption for LAN architecture testing. It is not audited cryptography and is not production end-to-end encryption.
+
+With zero-retention runtime enabled, subprocess and Ollama execution avoid persisting raw stdout, stderr, prompts, or model responses. The local runtime may receive the prompt transiently for execution, but receipts carry output hashes and counts only.
+
+With controller-blind prompt handling enabled, the controller routes by model, token estimates, price limits, privacy level, hashes, and worker capability. It does not need raw prompts. Worker job payloads carry the private payload envelope and hashes, not raw prompt text or transient keys.
+
 ## Marketplace Prototype
 
 The local marketplace layer models:

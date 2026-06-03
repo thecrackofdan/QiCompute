@@ -13,6 +13,7 @@ from capabilities import verify_capability_claim
 from db import WorkerDB
 from enrollment import activate_worker_enrollment, get_active_worker_secret
 from epochs import active_epoch
+from privacy import redact_sensitive_fields
 from receipts import compute_receipt_hash, utc_now_iso
 from reputation import update_worker_reputation
 from router import route_and_audit_inference_job
@@ -301,8 +302,10 @@ def _minimal_worker(worker_id: str, payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def _job_payload_for_worker(job: dict[str, Any]) -> dict[str, Any]:
-    metadata = {key: value for key, value in job.get("metadata", {}).items() if key not in {"prompt", "raw_prompt", "output", "raw_output"}}
-    return {**job, "metadata": metadata}
+    metadata = redact_sensitive_fields(job.get("metadata", {}))
+    payload = {**job, "metadata": metadata}
+    payload.pop("payload_key", None)
+    return redact_sensitive_fields(payload)
 
 
 def _job_for_verifier(job: dict[str, Any]) -> dict[str, Any]:

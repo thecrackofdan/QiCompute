@@ -43,6 +43,14 @@ from lan_smoke_test import run_lan_smoke_test
 from logging_config import redact_payload
 from cluster_health import cluster_health
 from pricing import estimate_job_price
+from privacy import (
+    decrypt_private_job_payload,
+    effective_privacy_config,
+    make_private_job_payload,
+    payload_hash,
+    redact_private_payload,
+    redact_sensitive_fields,
+)
 from registry import heartbeat_local_worker
 from reputation import apply_reputation_decay, update_worker_reputation
 from retry import next_retry_status, should_retry
@@ -105,6 +113,45 @@ class WorkerPrototypeTest(unittest.TestCase):
         self.assertNotIn("private prompt", serialized)
         self.assertNotIn("private output", serialized)
         self.assertIn("output_hash", serialized)
+
+    def test_strict_privacy_defaults(self) -> None:
+        cfg = effective_privacy_config({})
+
+        self.assertEqual(cfg["mode"], "strict")
+        self.assertFalse(cfg["store_raw_prompts"])
+        self.assertFalse(cfg["store_raw_outputs"])
+        self.assertTrue(cfg["encrypt_job_payloads"])
+        self.assertTrue(cfg["controller_blind_prompts"])
+        self.assertTrue(cfg["zero_retention_runtime"])
+        self.assertFalse(cfg["allow_debug_prompt_logging"])
+
+    def test_private_payload_encrypts_decrypts_hashes_and_redacts(self) -> None:
+        payload = make_private_job_payload("private payload prompt", {"safe": "ok", "raw_output": "secret"}, {})
+
+        serialized = json.dumps(payload, sort_keys=True)
+        self.assertNotIn("private payload prompt", serialized)
+        decrypted = decrypt_private_job_payload(payload, payload["payload_key"], {})
+        self.assertEqual(decrypted["prompt"], "private payload prompt")
+        self.assertEqual(decrypted["metadata"]["safe"], "ok")
+        self.assertEqual(payload_hash(payload), payload_hash(payload))
+
+        redacted = redact_private_payload(payload)
+        self.assertNotIn("payload_key", redacted)
+        self.assertNotIn("private payload prompt", json.dumps(redacted, sort_keys=True))
+
+    def test_redact_sensitive_fields_removes_secret_names(self) -> None:
+        redacted = redact_sensitive_fields(
+            {
+                "shared_secret": "secret-a",
+                "worker_secret": "secret-b",
+                "private_key": "secret-c",
+                "nested": {"ephemeral_key": "secret-d", "response": "secret-e"},
+            }
+        )
+
+        serialized = json.dumps(redacted, sort_keys=True)
+        for secret in ("secret-a", "secret-b", "secret-c", "secret-d", "secret-e"):
+            self.assertNotIn(secret, serialized)
 
     def test_github_workflow_file_exists(self) -> None:
         workflow = Path(".github/workflows/tests.yml")
@@ -311,6 +358,39 @@ class WorkerPrototypeTest(unittest.TestCase):
             self.assertIsNotNone(db.get_customer_job("cluster-job-a")["lease_id"])
             db.close()
 
+    def test_controller_blind_job_payload_contains_only_private_envelope(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            db = WorkerDB(str(Path(tmp) / "cluster.db"))
+            config = self._cluster_config(tmp)
+            controller = ClusterController(db, config)
+            worker = self._cluster_worker("privacy-worker")
+            controller.handle_capability({"worker_id": worker["worker_id"], "worker": worker, "capability_claim": make_capability_claim(worker)})
+            controller.handle_heartbeat({"worker_id": worker["worker_id"], "telemetry": {}})
+            private = make_private_job_payload("controller blind prompt", {"safe": "ok"}, config)
+            db.insert_customer_job(
+                {
+                    **self._customer_job("controller-blind-job"),
+                    "encrypted_payload": private["encrypted_payload"],
+                    "payload_nonce": private["payload_nonce"],
+                    "payload_hash": private["payload_hash"],
+                    "privacy_mode": private["privacy_mode"],
+                    "metadata": {"payload_key": private["payload_key"], "safe": "ok"},
+                }
+            )
+
+            result = controller.handle_next_job(worker["worker_id"])
+            serialized_db = json.dumps(db.get_customer_job("controller-blind-job"), sort_keys=True)
+            serialized_payload = json.dumps(result["job"], sort_keys=True)
+
+            self.assertTrue(result["accepted"])
+            self.assertIn("encrypted_payload", result["job"])
+            self.assertIn("payload_hash", result["job"])
+            self.assertNotIn("controller blind prompt", serialized_db)
+            self.assertNotIn("controller blind prompt", serialized_payload)
+            self.assertNotIn(private["payload_key"], serialized_db)
+            self.assertNotIn(private["payload_key"], serialized_payload)
+            db.close()
+
     def test_receipt_with_wrong_lease_rejected_and_expired_lease_requeues(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             db = WorkerDB(str(Path(tmp) / "cluster.db"))
@@ -514,7 +594,17 @@ class WorkerPrototypeTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             db = WorkerDB(str(Path(tmp) / "cluster.db"))
             db.register_worker(self._cluster_worker("worker-snapshot"))
-            db.insert_customer_job({**self._customer_job("snapshot-job"), "metadata": {"prompt": "raw secret prompt"}})
+            private = make_private_job_payload("raw secret prompt", {"worker_secret": "worker-secret-value"}, {})
+            db.insert_customer_job(
+                {
+                    **self._customer_job("snapshot-job"),
+                    "encrypted_payload": private["encrypted_payload"],
+                    "payload_nonce": private["payload_nonce"],
+                    "payload_hash": private["payload_hash"],
+                    "privacy_mode": private["privacy_mode"],
+                    "metadata": {"prompt": "raw secret prompt", "worker_secret": "worker-secret-value"},
+                }
+            )
 
             snapshot = export_controller_snapshot(db)
             snapshot_hash = compute_snapshot_hash(snapshot)
@@ -522,6 +612,7 @@ class WorkerPrototypeTest(unittest.TestCase):
             self.assertEqual(snapshot["snapshot_hash"], snapshot_hash)
             serialized = json.dumps(snapshot, sort_keys=True)
             self.assertNotIn("raw secret prompt", serialized)
+            self.assertNotIn("worker-secret-value", serialized)
             self.assertNotIn("raw_output", serialized)
             db.close()
 
@@ -989,12 +1080,26 @@ inference:
         with tempfile.TemporaryDirectory() as tmp:
             _, db = self._scheduler(tmp)
             job = self._customer_job("customer-job-privacy")
-            job["metadata"] = {"raw_prompt": "secret prompt", "safe": "value"}
+            private = make_private_job_payload("secret prompt", {"safe": "value"}, {})
+            job.update(
+                {
+                    "encrypted_payload": private["encrypted_payload"],
+                    "payload_nonce": private["payload_nonce"],
+                    "payload_hash": private["payload_hash"],
+                    "privacy_mode": private["privacy_mode"],
+                }
+            )
+            job["metadata"] = {"raw_prompt": "secret prompt", "safe": "value", "payload_key": private["payload_key"]}
             db.insert_customer_job(job)
 
             stored = db.get_customer_job(job["job_id"])
             self.assertNotIn("raw_prompt", stored["metadata"])
             self.assertNotIn("prompt", stored["metadata"])
+            self.assertNotIn("payload_key", json.dumps(stored, sort_keys=True))
+            self.assertEqual(stored["encrypted_payload"], private["encrypted_payload"])
+            self.assertEqual(stored["payload_hash"], private["payload_hash"])
+            self.assertEqual(stored["privacy_mode"], "strict")
+            self.assertNotIn("secret prompt", json.dumps(stored, sort_keys=True))
             self.assertEqual(stored["metadata"]["safe"], "value")
             db.close()
 
@@ -1827,6 +1932,70 @@ inference:
         self.assertNotIn("secret prompt", metadata_json)
         self.assertNotIn("secret output", metadata_json)
         self.assertEqual(result.output_hash, output_hash("secret output"))
+
+    def test_ollama_runtime_decrypts_private_payload_only_for_local_call(self) -> None:
+        runtime = OllamaRuntime()
+        config = self._daemon_config(Path(tempfile.mkdtemp()))
+        config["runtime"]["type"] = "ollama"
+        private = make_private_job_payload("transient ollama prompt", {"safe": "ok"}, config)
+        job = {
+            **self._assigned_job("ollama-private-payload"),
+            "encrypted_payload": private["encrypted_payload"],
+            "payload_nonce": private["payload_nonce"],
+            "payload_hash": private["payload_hash"],
+            "payload_key": private["payload_key"],
+        }
+        captured: list[dict[str, object]] = []
+        original = urllib.request.urlopen
+
+        def fake_urlopen(request: object, timeout: object = None) -> MockHTTPResponse:
+            captured.append(json.loads(getattr(request, "data").decode("utf-8")))
+            return MockHTTPResponse(json.dumps({"response": "safe output", "eval_count": 2}).encode("utf-8"))
+
+        urllib.request.urlopen = fake_urlopen
+        try:
+            result = runtime.run(job, config)
+        finally:
+            urllib.request.urlopen = original
+
+        self.assertTrue(result.accepted)
+        self.assertEqual(captured[0]["prompt"], "transient ollama prompt")
+        self.assertNotIn("transient ollama prompt", json.dumps(result.metadata, sort_keys=True))
+        self.assertNotIn("safe output", json.dumps(result.metadata, sort_keys=True))
+
+    def test_zero_retention_subprocess_keeps_hashes_and_counts_only(self) -> None:
+        runtime = SubprocessRuntime()
+        config = self._daemon_config(Path(tempfile.mkdtemp()))
+        config["runtime"]["type"] = "subprocess"
+        config["runtime"]["command"] = [
+            "python3",
+            "-c",
+            "import sys; print('private stdout'); print('private stderr', file=sys.stderr)",
+        ]
+
+        result = runtime.run(self._assigned_job("subprocess-zero-retention"), config)
+
+        serialized = json.dumps(result.metadata, sort_keys=True)
+        self.assertTrue(result.accepted)
+        self.assertNotIn("private stdout", serialized)
+        self.assertNotIn("private stderr", serialized)
+        self.assertIn("stdout_hash", result.metadata)
+        self.assertIn("stderr_hash", result.metadata)
+        self.assertIn("stdout_bytes", result.metadata)
+        self.assertIn("stderr_bytes", result.metadata)
+
+    def test_zero_retention_subprocess_nonzero_does_not_persist_stderr(self) -> None:
+        runtime = SubprocessRuntime()
+        config = self._daemon_config(Path(tempfile.mkdtemp()))
+        config["runtime"]["type"] = "subprocess"
+        config["runtime"]["command"] = ["python3", "-c", "import sys; print('secret failure', file=sys.stderr); sys.exit(2)"]
+
+        result = runtime.run(self._assigned_job("subprocess-zero-retention-fail"), config)
+
+        self.assertFalse(result.accepted)
+        self.assertEqual(result.error_code, failures.COMMAND_FAILED)
+        self.assertNotIn("secret failure", result.error_message or "")
+        self.assertNotIn("secret failure", json.dumps(result.metadata, sort_keys=True))
 
     def test_daemon_processes_one_assigned_job_and_creates_receipt(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

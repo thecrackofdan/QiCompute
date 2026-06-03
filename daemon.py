@@ -6,16 +6,18 @@ from typing import Any
 from uuid import uuid4
 
 import failures
+from capabilities import make_capability_claim
 from challenges import build_challenge_result, create_challenge, should_attach_challenge, verify_challenge_result
 from committees import ACCEPTED, create_verification_committee, run_verification_committee
 from db import WorkerDB
 from epochs import active_epoch
 from logging_config import configure_logging, log_event
 from receipts import compute_receipt_hash, make_receipt, utc_now_iso
-from registry import heartbeat_local_worker, register_local_worker
+from registry import heartbeat_local_worker, register_local_worker, worker_from_config
 from reputation import update_worker_reputation
 from runners import runner_for_type
 from telemetry import GPUTelemetry
+from transport import get_json, post_json
 from verifier import verify_inference_receipt
 from worker import load_config
 
@@ -179,39 +181,71 @@ class WorkerDaemon:
             time.sleep(interval)
 
     def _receipt_from_result(self, job: dict[str, Any], result: Any) -> dict[str, Any]:
-        estimated_qi = _estimated_qi(job, result, self.config) if result.accepted else 0.0
-        metadata = {
-            "job_id": result.job_id,
-            "accepted": result.accepted,
-            "input_tokens": result.input_tokens,
-            "output_tokens": result.output_tokens,
-            "output_hash": result.output_hash,
-            "runtime": {
-                "type": result.metadata.get("runtime_type"),
-                "exit_code": result.exit_code,
-                "error_code": result.error_code,
-                "error_message": result.error_message,
-            },
-            "telemetry": {
-                "total_watts": result.metadata.get("total_watts"),
-                "energy_joules": result.metadata.get("energy_joules"),
-                "tokens_per_second": result.metadata.get("tokens_per_second"),
-                "model_load_cold_start": result.metadata.get("model_load_cold_start"),
-                "cache_hit": result.metadata.get("cache_hit"),
-            },
-        }
-        return make_receipt(
-            worker_id=self.worker_id,
-            mode="inference",
-            started_at=result.started_at,
-            ended_at=result.ended_at,
-            duration_seconds=max(result.duration_seconds, 0.001),
-            average_watts=float(result.metadata.get("total_watts") or self.config["worker"].get("fallback_watts", 0)),
-            output_type="tokens",
-            output_amount=result.output_tokens,
-            estimated_qi_owed=estimated_qi,
-            metadata=metadata,
-        ).to_dict()
+        return receipt_from_runtime_result(self.config, self.worker_id, job, result)
+
+
+class ClusterWorkerClient:
+    def __init__(self, config: dict[str, Any], telemetry: GPUTelemetry | None = None):
+        self.config = config
+        self.worker_id = config["worker"]["id"]
+        cluster_cfg = config.get("cluster", {})
+        self.controller_url = cluster_cfg.get("controller_url", "http://127.0.0.1:8080").rstrip("/")
+        self.secret = cluster_cfg.get("shared_secret", "dev-local-secret")
+        self.timeout = float(cluster_cfg.get("request_timeout_seconds", 5))
+        self.telemetry = telemetry or GPUTelemetry(
+            nvidia_smi_path=config.get("telemetry", {}).get("nvidia_smi_path", "nvidia-smi"),
+            fallback_watts=float(config["worker"].get("fallback_watts", 0)),
+        )
+
+    def register_capability(self) -> dict[str, Any]:
+        worker = worker_from_config(self.config)
+        claim = make_capability_claim(worker)
+        return post_json(
+            f"{self.controller_url}/capability",
+            {"worker_id": self.worker_id, "worker": worker, "capability_claim": claim},
+            self.secret,
+            timeout=self.timeout,
+        )
+
+    def heartbeat(self) -> dict[str, Any]:
+        return post_json(
+            f"{self.controller_url}/heartbeat",
+            {"worker_id": self.worker_id, "telemetry": {"last_seen_at": utc_now_iso(), "total_watts": self.telemetry.total_watts()}},
+            self.secret,
+            timeout=self.timeout,
+        )
+
+    def next_job(self) -> dict[str, Any]:
+        return get_json(
+            f"{self.controller_url}/job/next?worker_id={self.worker_id}",
+            {"worker_id": self.worker_id},
+            self.secret,
+            timeout=self.timeout,
+        )
+
+    def submit_receipt(self, receipt: dict[str, Any]) -> dict[str, Any]:
+        return post_json(
+            f"{self.controller_url}/receipt",
+            {"worker_id": self.worker_id, "job_id": receipt.get("metadata", {}).get("job_id"), "receipt": _redact_receipt_for_cluster(receipt)},
+            self.secret,
+            timeout=self.timeout,
+        )
+
+    def run_once(self, runtime_type: str | None = None) -> dict[str, Any]:
+        capability = self.register_capability()
+        heartbeat = self.heartbeat()
+        next_job = self.next_job()
+        job = next_job.get("job")
+        if not job:
+            return {"accepted": True, "status": "no_job", "capability": capability, "heartbeat": heartbeat, "next_job": next_job}
+        runtime_cfg = dict(self.config.get("runtime", {}))
+        selected_runtime_type = runtime_type or runtime_cfg.get("type", "simulated")
+        self.config["runtime"] = {**runtime_cfg, "type": selected_runtime_type}
+        runtime = runner_for_type(selected_runtime_type)
+        result = runtime.run(job, self.config)
+        receipt = receipt_from_runtime_result(self.config, self.worker_id, job, result)
+        submission = self.submit_receipt(receipt)
+        return {"accepted": bool(submission.get("accepted")), "status": "submitted", "job": job, "receipt": receipt, "submission": submission}
 
 
 def main() -> None:
@@ -219,6 +253,7 @@ def main() -> None:
     parser.add_argument("--config", default="config.yaml")
     parser.add_argument("--once", action="store_true")
     parser.add_argument("--loop", action="store_true")
+    parser.add_argument("--cluster-worker", action="store_true")
     parser.add_argument("--runtime", choices=["simulated", "subprocess", "ollama", "ollama_placeholder", "llama_cpp_placeholder"])
     parser.add_argument("--verbose", action="store_true")
     parser.add_argument("--quiet", action="store_true")
@@ -228,6 +263,11 @@ def main() -> None:
     config = load_config(args.config)
     if args.runtime:
         config["runtime"] = {**config.get("runtime", {}), "type": args.runtime}
+    if args.cluster_worker:
+        client = ClusterWorkerClient(config)
+        result = client.run_once(runtime_type=args.runtime)
+        log_event(logger, "cluster_worker.once.complete", worker_id=config["worker"]["id"], status=result.get("status"), accepted=result.get("accepted"))
+        return
     db = WorkerDB(config["worker"]["db_path"])
     try:
         daemon = WorkerDaemon(config, db)
@@ -291,6 +331,49 @@ def _estimated_qi(job: dict[str, Any], result: Any, config: dict[str, Any]) -> f
 def _refresh_receipt_hash(receipt: dict[str, Any]) -> str:
     receipt.pop("receipt_hash", None)
     return compute_receipt_hash(receipt)
+
+
+def receipt_from_runtime_result(config: dict[str, Any], worker_id: str, job: dict[str, Any], result: Any) -> dict[str, Any]:
+    estimated_qi = _estimated_qi(job, result, config) if result.accepted else 0.0
+    metadata = {
+        "job_id": result.job_id,
+        "accepted": result.accepted,
+        "input_tokens": result.input_tokens,
+        "output_tokens": result.output_tokens,
+        "output_hash": result.output_hash,
+        "runtime": {
+            "type": result.metadata.get("runtime_type"),
+            "exit_code": result.exit_code,
+            "error_code": result.error_code,
+            "error_message": result.error_message,
+        },
+        "telemetry": {
+            "total_watts": result.metadata.get("total_watts"),
+            "energy_joules": result.metadata.get("energy_joules"),
+            "tokens_per_second": result.metadata.get("tokens_per_second"),
+            "model_load_cold_start": result.metadata.get("model_load_cold_start"),
+            "cache_hit": result.metadata.get("cache_hit"),
+        },
+    }
+    return make_receipt(
+        worker_id=worker_id,
+        mode="inference",
+        started_at=result.started_at,
+        ended_at=result.ended_at,
+        duration_seconds=max(result.duration_seconds, 0.001),
+        average_watts=float(result.metadata.get("total_watts") or config["worker"].get("fallback_watts", 0)),
+        output_type="tokens",
+        output_amount=result.output_tokens,
+        estimated_qi_owed=estimated_qi,
+        metadata=metadata,
+    ).to_dict()
+
+
+def _redact_receipt_for_cluster(receipt: dict[str, Any]) -> dict[str, Any]:
+    clone = {**receipt, "metadata": dict(receipt.get("metadata", {}))}
+    for key in ("prompt", "raw_prompt", "output", "raw_output", "response", "raw_response"):
+        clone["metadata"].pop(key, None)
+    return clone
 
 
 if __name__ == "__main__":

@@ -12,6 +12,7 @@ QiCompute is currently:
 
 - Local worker registry and job routing
 - Runtime daemon with simulated, subprocess, and local Ollama support
+- Local LAN controller/worker skeleton with signed messages
 - Receipt hashing, validation, challenge verification, and committee simulation
 - Reputation updates, retries, expiration, stress simulation, and settlement epochs
 - Mining fallback accounting with share and block reward separation
@@ -32,10 +33,11 @@ QiCompute is currently:
 
 ## Networking Roadmap
 
-- Local API boundary after protocol objects stabilize
-- Worker-to-router transport
+- Harden local LAN controller/worker transport
+- Add safer prompt transfer policies
+- Add worker-to-router transport
 - Authenticated job envelope exchange
-- No networking is implemented in the current prototype.
+- Current networking is limited to local/LAN HTTP skeletons with shared-secret HMAC. There is no public networking.
 
 ## Privacy Roadmap
 

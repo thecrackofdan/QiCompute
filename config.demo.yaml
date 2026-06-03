@@ -51,3 +51,13 @@ pricing:
 
 demo:
   seed: 7
+
+cluster:
+  enabled: false
+  node_role: "controller"
+  controller_url: "http://127.0.0.1:8080"
+  worker_bind_host: "127.0.0.1"
+  worker_bind_port: 8081
+  shared_secret: "dev-local-secret"
+  heartbeat_interval_seconds: 10
+  request_timeout_seconds: 5

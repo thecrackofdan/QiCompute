@@ -1,0 +1,270 @@
+from __future__ import annotations
+
+import argparse
+import json
+import urllib.parse
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from typing import Any
+from uuid import uuid4
+
+import failures
+from capabilities import verify_capability_claim
+from db import WorkerDB
+from epochs import active_epoch
+from receipts import compute_receipt_hash, utc_now_iso
+from reputation import update_worker_reputation
+from router import route_and_audit_inference_job
+from transport import verify_request_signature
+from verifier import VerificationResult, verify_inference_receipt
+from worker import load_config
+
+
+class ClusterController:
+    def __init__(self, db: WorkerDB, config: dict[str, Any]):
+        self.db = db
+        self.config = config
+        self.secret = config.get("cluster", {}).get("shared_secret", "dev-local-secret")
+        self.nonce_cache: set[str] = set()
+
+    def handle_heartbeat(self, payload: dict[str, Any]) -> dict[str, Any]:
+        worker_id = payload.get("worker_id")
+        if not worker_id:
+            self._event("heartbeat", None, None, False, failures.AUTH_FAILED, {"reason": "missing worker_id"})
+            return {"accepted": False, "failure_code": failures.AUTH_FAILED, "reason": "missing worker_id"}
+        if not self.db.get_worker(worker_id):
+            self.db.register_worker(_minimal_worker(worker_id, payload))
+        telemetry = dict(payload.get("telemetry", {}))
+        telemetry["last_seen_at"] = telemetry.get("last_seen_at") or utc_now_iso()
+        self.db.update_worker_heartbeat(worker_id, telemetry)
+        self._event("heartbeat", worker_id, None, True, None, {"telemetry": telemetry})
+        return {"accepted": True, "worker_id": worker_id}
+
+    def handle_capability(self, payload: dict[str, Any]) -> dict[str, Any]:
+        worker = dict(payload.get("worker", {}))
+        claim = dict(payload.get("capability_claim", {}))
+        verification = verify_capability_claim(claim)
+        worker_id = worker.get("worker_id") or claim.get("worker_id")
+        if not verification.get("accepted"):
+            self._event("capability", worker_id, None, False, failures.INVALID_CAPABILITY_CLAIM, verification)
+            return {"accepted": False, "failure_code": failures.INVALID_CAPABILITY_CLAIM, "reason": verification["reason"]}
+        worker.setdefault("worker_id", claim["worker_id"])
+        worker.setdefault("operator", "cluster-worker")
+        worker.setdefault("region", claim.get("region", "local"))
+        worker.setdefault("public_key", "placeholder-public-key")
+        worker.setdefault("endpoint", "cluster")
+        worker.setdefault("hardware_profile", {"gpu_count": claim.get("gpu_count", 0), "gpu_names": claim.get("gpu_names", [])})
+        worker.setdefault("supported_modes", ["inference", "mining"])
+        worker.setdefault("supported_models", claim.get("supported_models", []))
+        worker.setdefault("gpu_count", claim.get("gpu_count", 0))
+        worker.setdefault("total_vram_gb", claim.get("total_vram_gb", 0))
+        worker.setdefault("total_watts_capacity", claim.get("total_watts_capacity", 0))
+        worker.setdefault("online", True)
+        worker.setdefault("last_seen_at", utc_now_iso())
+        worker.setdefault("metadata", {})
+        worker["metadata"] = {**worker.get("metadata", {}), "capability_claim": claim, "capability_hash": claim.get("capability_hash")}
+        self.db.register_worker(worker)
+        self._event("capability", worker["worker_id"], None, True, None, {"capability_hash": claim.get("capability_hash")})
+        return {"accepted": True, "worker_id": worker["worker_id"]}
+
+    def handle_next_job(self, worker_id: str) -> dict[str, Any]:
+        worker = self.db.get_worker(worker_id)
+        if not worker or not worker.get("online"):
+            self._event("job_next", worker_id, None, False, failures.WORKER_OFFLINE, {})
+            return {"accepted": True, "job": None, "reason": "worker offline or unknown"}
+        for job in self.db.list_queued_jobs():
+            decision = route_and_audit_inference_job(self.db, {**job, "requires_gpu": True}, [worker])
+            if decision.accepted and decision.worker_id:
+                self.db.assign_customer_job(job["job_id"], worker_id, decision.score)
+                assigned = self.db.get_customer_job(job["job_id"])
+                self._event("job_assigned", worker_id, job["job_id"], True, None, {"route_score": decision.score})
+                return {"accepted": True, "job": _job_payload_for_worker(assigned)}
+        self._event("job_next", worker_id, None, True, None, {"job": None})
+        return {"accepted": True, "job": None, "reason": "no eligible job"}
+
+    def handle_receipt(self, payload: dict[str, Any]) -> dict[str, Any]:
+        receipt = dict(payload.get("receipt", {}))
+        job_id = receipt.get("metadata", {}).get("job_id") or payload.get("job_id")
+        job = self.db.get_customer_job(job_id) if job_id else None
+        if not receipt or not job:
+            self._event("receipt", receipt.get("worker_id"), job_id, False, failures.VERIFICATION_FAILED, {"reason": "missing receipt or job"})
+            return {"accepted": False, "failure_code": failures.VERIFICATION_FAILED, "reason": "missing receipt or job"}
+        receipt["receipt_hash"] = receipt.get("receipt_hash") or compute_receipt_hash(receipt)
+        verification = verify_inference_receipt(receipt, _job_for_verifier(job), self.config)
+        receipt.setdefault("metadata", {})["verification"] = verification.to_dict()
+        receipt["receipt_hash"] = _refresh_receipt_hash(receipt)
+        self.db.insert_receipt(receipt)
+        update_worker_reputation(self.db, worker_id=receipt["worker_id"], verification=verification.to_dict(), receipt=receipt)
+        if job["status"] == "routed":
+            self.db.update_customer_job_status(job["job_id"], "running", {"source": "cluster-controller"})
+        if not verification.accepted or self.db.inference_job_was_paid(job["job_id"]):
+            failure_code = verification.reason if not verification.accepted else failures.DUPLICATE_JOB
+            self.db.mark_customer_job_failure(job["job_id"], failure_code, "cluster receipt rejected")
+            self._event("receipt", receipt["worker_id"], job["job_id"], False, failure_code, verification.to_dict())
+            return {"accepted": False, "failure_code": failure_code, "verification": verification.to_dict()}
+        epoch = active_epoch(self.db)
+        payout_event = {
+            "event_id": str(uuid4()),
+            "worker_id": receipt["worker_id"],
+            "event_type": "inference_job",
+            "basis": "cluster_verified_runtime",
+            "qi_amount": receipt["estimated_qi_owed"],
+            "created_at": utc_now_iso(),
+            "source_id": receipt["receipt_id"],
+            "epoch_id": epoch["epoch_id"],
+            "metadata": {"job_id": job["job_id"], "verification_reason": verification.reason},
+        }
+        self.db.insert_payout_event(payout_event)
+        self.db.record_inference_job_paid(
+            job_id=job["job_id"],
+            worker_id=receipt["worker_id"],
+            receipt_id=receipt["receipt_id"],
+            accepted_at=payout_event["created_at"],
+            payout_event_id=payout_event["event_id"],
+        )
+        self.db.update_customer_job_status(job["job_id"], "completed", {"receipt_id": receipt["receipt_id"]})
+        self._event("receipt", receipt["worker_id"], job["job_id"], True, None, {"epoch_id": epoch["epoch_id"]})
+        return {"accepted": True, "job_id": job["job_id"], "receipt_id": receipt["receipt_id"], "epoch_id": epoch["epoch_id"]}
+
+    def handle_challenge_result(self, payload: dict[str, Any]) -> dict[str, Any]:
+        result = dict(payload.get("challenge_result", {}))
+        if not result:
+            self._event("challenge_result", payload.get("worker_id"), payload.get("job_id"), False, failures.CHALLENGE_FAILED, {})
+            return {"accepted": False, "failure_code": failures.CHALLENGE_FAILED}
+        self.db.record_challenge_result(result)
+        self._event("challenge_result", result.get("worker_id"), result.get("job_id"), bool(result.get("accepted")), None if result.get("accepted") else result.get("reason"), {})
+        return {"accepted": True}
+
+    def verify_headers(self, payload: dict[str, Any], headers: dict[str, str]) -> dict[str, Any]:
+        return verify_request_signature(
+            payload,
+            headers,
+            self.secret,
+            max_age_seconds=int(self.config.get("cluster", {}).get("request_timeout_seconds", 5)) + 300,
+            nonce_cache=self.nonce_cache,
+        )
+
+    def _event(self, event_type: str, worker_id: str | None, job_id: str | None, accepted: bool, failure_code: str | None, metadata: dict[str, Any]) -> None:
+        self.db.insert_cluster_event(
+            {
+                "event_id": str(uuid4()),
+                "event_type": event_type,
+                "worker_id": worker_id,
+                "job_id": job_id,
+                "created_at": utc_now_iso(),
+                "accepted": accepted,
+                "failure_code": failure_code,
+                "metadata": metadata,
+            }
+        )
+
+
+def run_server(host: str, port: int, config: dict[str, Any], db: WorkerDB) -> None:
+    controller = ClusterController(db, config)
+    server = ThreadingHTTPServer((host, port), _handler(controller))
+    server.serve_forever()
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="QiCompute local LAN controller")
+    parser.add_argument("--config", default="config.yaml")
+    parser.add_argument("--host", default="127.0.0.1")
+    parser.add_argument("--port", type=int, default=8080)
+    args = parser.parse_args()
+    config = load_config(args.config)
+    db = WorkerDB(config["worker"]["db_path"])
+    try:
+        run_server(args.host, args.port, config, db)
+    finally:
+        db.close()
+
+
+def _handler(controller: ClusterController) -> type[BaseHTTPRequestHandler]:
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self) -> None:
+            payload = self._read_json()
+            auth = controller.verify_headers(payload, dict(self.headers))
+            if not auth["accepted"]:
+                controller._event("auth_failure", payload.get("worker_id"), payload.get("job_id"), False, auth["failure_code"], auth)
+                self._json({"accepted": False, "failure_code": auth["failure_code"], "reason": auth["reason"]}, status=401)
+                return
+            if self.path == "/heartbeat":
+                self._json(controller.handle_heartbeat(payload))
+            elif self.path == "/capability":
+                self._json(controller.handle_capability(payload))
+            elif self.path == "/receipt":
+                self._json(controller.handle_receipt(payload))
+            elif self.path == "/challenge-result":
+                self._json(controller.handle_challenge_result(payload))
+            else:
+                self._json({"accepted": False, "failure_code": failures.TRANSPORT_ERROR, "reason": "not found"}, status=404)
+
+        def do_GET(self) -> None:
+            parsed = urllib.parse.urlparse(self.path)
+            if parsed.path != "/job/next":
+                self._json({"accepted": False, "failure_code": failures.TRANSPORT_ERROR, "reason": "not found"}, status=404)
+                return
+            query = urllib.parse.parse_qs(parsed.query)
+            worker_id = query.get("worker_id", [""])[0]
+            payload = {"worker_id": worker_id}
+            auth = controller.verify_headers(payload, dict(self.headers))
+            if not auth["accepted"]:
+                controller._event("auth_failure", worker_id, None, False, auth["failure_code"], auth)
+                self._json({"accepted": False, "failure_code": auth["failure_code"], "reason": auth["reason"]}, status=401)
+                return
+            self._json(controller.handle_next_job(worker_id))
+
+        def log_message(self, format: str, *args: Any) -> None:
+            return
+
+        def _read_json(self) -> dict[str, Any]:
+            length = int(self.headers.get("Content-Length", "0"))
+            if length <= 0:
+                return {}
+            return json.loads(self.rfile.read(length).decode("utf-8"))
+
+        def _json(self, payload: dict[str, Any], status: int = 200) -> None:
+            body = json.dumps(payload, sort_keys=True).encode("utf-8")
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+    return Handler
+
+
+def _minimal_worker(worker_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "worker_id": worker_id,
+        "operator": payload.get("operator", "cluster-worker"),
+        "region": payload.get("region", "local"),
+        "public_key": payload.get("public_key", "placeholder-public-key"),
+        "endpoint": payload.get("endpoint", "cluster"),
+        "hardware_profile": payload.get("hardware_profile", {}),
+        "supported_modes": payload.get("supported_modes", ["inference", "mining"]),
+        "supported_models": payload.get("supported_models", ["llama-3.1-8b"]),
+        "gpu_count": payload.get("gpu_count", 0),
+        "total_vram_gb": payload.get("total_vram_gb", 0),
+        "total_watts_capacity": payload.get("total_watts_capacity", 0),
+        "online": True,
+        "last_seen_at": utc_now_iso(),
+        "metadata": {"source": "cluster-heartbeat"},
+    }
+
+
+def _job_payload_for_worker(job: dict[str, Any]) -> dict[str, Any]:
+    metadata = {key: value for key, value in job.get("metadata", {}).items() if key not in {"prompt", "raw_prompt", "output", "raw_output"}}
+    return {**job, "metadata": metadata}
+
+
+def _job_for_verifier(job: dict[str, Any]) -> dict[str, Any]:
+    return {"id": job["job_id"], "input_tokens": job.get("input_tokens", 0), "output_tokens": job.get("expected_output_tokens", 0)}
+
+
+def _refresh_receipt_hash(receipt: dict[str, Any]) -> str:
+    receipt.pop("receipt_hash", None)
+    return compute_receipt_hash(receipt)
+
+
+if __name__ == "__main__":
+    main()

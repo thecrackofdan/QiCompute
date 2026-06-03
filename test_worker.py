@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import socket
 import tempfile
+import time
 import unittest
 import urllib.error
 import urllib.request
@@ -12,9 +13,11 @@ from pathlib import Path
 from uuid import uuid4
 
 import failures
+import daemon as daemon_module
 from adversary import FLAKY, MALICIOUS_RECEIPT, duplicate_job, simulate_capability_claim, simulate_worker_receipt
 from challenges import create_challenge, verify_challenge_result
 from capabilities import compute_capability_hash, make_capability_claim, verify_capability_claim
+from cluster_demo import run_cluster_demo
 from committees import (
     ACCEPTED,
     DISPUTED,
@@ -23,8 +26,9 @@ from committees import (
     run_verification_committee,
     select_verifier_workers,
 )
+from controller import ClusterController
 from customer_receipts import build_customer_receipt, compute_customer_receipt_hash
-from daemon import WorkerDaemon
+from daemon import ClusterWorkerClient, WorkerDaemon
 from doctor import run_checks
 from demo import run_demo
 from demo_data import demo_prompt
@@ -43,6 +47,7 @@ from scheduler import Scheduler
 from simulation import run_marketplace_simulation
 from stress_simulation import run_stress_simulation
 from telemetry import GPUTelemetry
+from transport import clear_nonce_cache, sign_request, verify_request_signature
 from receipts import make_receipt, utc_now_iso, verify_receipt_hash
 from verifier import verify_inference_receipt
 from worker import _minimal_yaml_load, load_config
@@ -108,6 +113,156 @@ class WorkerPrototypeTest(unittest.TestCase):
         self.assertIn("subprocess", results)
         self.assertGreater(results["simulated"]["jobs_per_second"], 0)
         self.assertGreaterEqual(results["subprocess"]["tokens_per_second"], 0)
+
+    def test_hmac_signing_verifies_valid_payload(self) -> None:
+        clear_nonce_cache()
+        payload = {"worker_id": "worker-a", "status": "ok"}
+        headers = sign_request(payload, "secret")
+
+        result = verify_request_signature(payload, headers, "secret")
+
+        self.assertTrue(result["accepted"])
+
+    def test_tampered_payload_fails_signature_verification(self) -> None:
+        clear_nonce_cache()
+        payload = {"worker_id": "worker-a", "status": "ok"}
+        headers = sign_request(payload, "secret")
+
+        result = verify_request_signature({**payload, "status": "tampered"}, headers, "secret")
+
+        self.assertFalse(result["accepted"])
+        self.assertEqual(result["failure_code"], failures.AUTH_FAILED)
+
+    def test_expired_timestamp_fails_signature_verification(self) -> None:
+        clear_nonce_cache()
+        payload = {"worker_id": "worker-a"}
+        headers = sign_request(payload, "secret", timestamp=str(int(time.time()) - 1000))
+
+        result = verify_request_signature(payload, headers, "secret", max_age_seconds=1)
+
+        self.assertFalse(result["accepted"])
+        self.assertEqual(result["failure_code"], failures.REQUEST_EXPIRED)
+
+    def test_duplicate_nonce_fails_signature_verification(self) -> None:
+        clear_nonce_cache()
+        payload = {"worker_id": "worker-a"}
+        headers = sign_request(payload, "secret", nonce="fixed-nonce")
+
+        first = verify_request_signature(payload, headers, "secret")
+        second = verify_request_signature(payload, headers, "secret")
+
+        self.assertTrue(first["accepted"])
+        self.assertFalse(second["accepted"])
+        self.assertEqual(second["failure_code"], failures.INVALID_NONCE)
+
+    def test_controller_accepts_heartbeat(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            db = WorkerDB(str(Path(tmp) / "cluster.db"))
+            controller = ClusterController(db, self._cluster_config(tmp))
+
+            result = controller.handle_heartbeat({"worker_id": "cluster-worker-a", "telemetry": {"total_watts": 100}})
+
+            self.assertTrue(result["accepted"])
+            self.assertTrue(db.get_worker("cluster-worker-a")["online"])
+            self.assertEqual(db.recent_cluster_events(1)[0]["event_type"], "heartbeat")
+            db.close()
+
+    def test_controller_rejects_bad_auth(self) -> None:
+        clear_nonce_cache()
+        with tempfile.TemporaryDirectory() as tmp:
+            db = WorkerDB(str(Path(tmp) / "cluster.db"))
+            controller = ClusterController(db, self._cluster_config(tmp))
+            payload = {"worker_id": "cluster-worker-a"}
+            headers = sign_request(payload, "wrong-secret")
+
+            result = controller.verify_headers(payload, headers)
+
+            self.assertFalse(result["accepted"])
+            self.assertEqual(result["failure_code"], failures.AUTH_FAILED)
+            db.close()
+
+    def test_controller_assigns_eligible_job(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            db = WorkerDB(str(Path(tmp) / "cluster.db"))
+            config = self._cluster_config(tmp)
+            controller = ClusterController(db, config)
+            worker = self._cluster_worker("cluster-worker-a")
+            controller.handle_capability({"worker_id": worker["worker_id"], "worker": worker, "capability_claim": make_capability_claim(worker)})
+            controller.handle_heartbeat({"worker_id": worker["worker_id"], "telemetry": {}})
+            db.insert_customer_job(self._customer_job("cluster-job-a"))
+
+            result = controller.handle_next_job(worker["worker_id"])
+
+            self.assertTrue(result["accepted"])
+            self.assertEqual(result["job"]["assigned_worker_id"], worker["worker_id"])
+            self.assertEqual(db.get_customer_job("cluster-job-a")["status"], "routed")
+            db.close()
+
+    def test_worker_client_handles_no_job(self) -> None:
+        config = self._cluster_config("/tmp")
+        calls = []
+        original_post = daemon_module.post_json
+        original_get = daemon_module.get_json
+        try:
+            daemon_module.post_json = lambda url, payload, secret, timeout=5: {"accepted": True, "url": url}
+            daemon_module.get_json = lambda url, payload, secret, timeout=5: {"accepted": True, "job": None}
+
+            result = ClusterWorkerClient(config).run_once(runtime_type="simulated")
+            calls.append(result)
+        finally:
+            daemon_module.post_json = original_post
+            daemon_module.get_json = original_get
+
+        self.assertEqual(calls[0]["status"], "no_job")
+
+    def test_worker_client_submits_receipt(self) -> None:
+        config = self._cluster_config("/tmp")
+        submitted = []
+        original_post = daemon_module.post_json
+        original_get = daemon_module.get_json
+        job = {
+            "job_id": "cluster-client-job",
+            "model": "llama-3.1-8b",
+            "input_tokens": 4,
+            "expected_output_tokens": 8,
+            "assigned_worker_id": config["worker"]["id"],
+        }
+        try:
+            def fake_post(url: str, payload: dict[str, object], secret: str, timeout: float = 5) -> dict[str, object]:
+                submitted.append((url, payload))
+                return {"accepted": True, "url": url}
+
+            daemon_module.post_json = fake_post
+            daemon_module.get_json = lambda url, payload, secret, timeout=5: {"accepted": True, "job": job}
+
+            result = ClusterWorkerClient(config).run_once(runtime_type="simulated")
+        finally:
+            daemon_module.post_json = original_post
+            daemon_module.get_json = original_get
+
+        self.assertTrue(result["accepted"])
+        receipt_posts = [payload for url, payload in submitted if url.endswith("/receipt")]
+        self.assertEqual(len(receipt_posts), 1)
+        serialized = json.dumps(receipt_posts[0], sort_keys=True)
+        self.assertIn("output_hash", serialized)
+        self.assertNotIn("raw_prompt", serialized)
+        self.assertNotIn("raw_output", serialized)
+
+    def test_cluster_demo_runs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            result = run_cluster_demo(db_path=str(Path(tmp) / "cluster-demo.db"))
+
+            self.assertEqual(result["job"]["status"], "completed")
+            self.assertGreater(result["epoch"]["total_settled_qi"], 0)
+            self.assertTrue(any(event["event_type"] == "receipt" for event in result["events"]))
+
+    def test_cluster_demo_does_not_persist_raw_prompt_or_output(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            result = run_cluster_demo(db_path=str(Path(tmp) / "cluster-demo.db"))
+
+            serialized = json.dumps(result, sort_keys=True)
+            self.assertNotIn(demo_prompt("honest"), serialized)
+            self.assertNotIn("raw_output", serialized)
 
     def test_load_config_without_pyyaml_shape(self) -> None:
         config = load_config("config.yaml")
@@ -1737,6 +1892,54 @@ inference:
                 "redact_outputs": True,
                 "store_output_hash_only": True,
             },
+        }
+
+    def _cluster_config(self, root: object) -> dict[str, object]:
+        root_path = Path(root)
+        config = self._daemon_config(root_path)
+        config["cluster"] = {
+            "enabled": True,
+            "node_role": "controller",
+            "controller_url": "http://127.0.0.1:8080",
+            "worker_bind_host": "127.0.0.1",
+            "worker_bind_port": 8081,
+            "shared_secret": "dev-local-secret",
+            "heartbeat_interval_seconds": 10,
+            "request_timeout_seconds": 5,
+        }
+        return config
+
+    def _cluster_worker(self, worker_id: str) -> dict[str, object]:
+        return {
+            "worker_id": worker_id,
+            "operator": "cluster-operator",
+            "region": "local",
+            "public_key": "placeholder-public-key",
+            "endpoint": "cluster",
+            "hardware_profile": {"gpu_count": 1, "gpu_names": ["test-gpu"], "total_vram_gb": 24, "total_watts_capacity": 100},
+            "supported_modes": ["inference", "mining"],
+            "supported_models": ["llama-3.1-8b"],
+            "gpu_count": 1,
+            "total_vram_gb": 24,
+            "total_watts_capacity": 100,
+            "online": True,
+            "last_seen_at": utc_now_iso(),
+            "metadata": {"source": "test"},
+        }
+
+    def _customer_job(self, job_id: str) -> dict[str, object]:
+        return {
+            "job_id": job_id,
+            "customer_id": "cluster-customer",
+            "model": "llama-3.1-8b",
+            "prompt_hash": "cluster-prompt-hash",
+            "input_tokens": 4,
+            "expected_output_tokens": 8,
+            "privacy_level": "standard",
+            "max_price_qi": 1,
+            "status": "queued",
+            "created_at": utc_now_iso(),
+            "metadata": {},
         }
 
     def _envelope(self) -> dict[str, object]:

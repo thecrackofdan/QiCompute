@@ -32,6 +32,9 @@ This MVP has no smart contracts and no real payout rail. It records local receip
 - `stress_simulation.py`: deterministic marketplace stress simulation.
 - `market.py`: local marketplace CLI.
 - `demo.py`: end-to-end local inference settlement demo.
+- `controller.py`: local LAN controller HTTP skeleton.
+- `cluster_demo.py`: deterministic local cluster demo.
+- `transport.py`: signed JSON transport helpers.
 - `doctor.py`: local environment validation.
 - `benchmarks.py`: lightweight runtime benchmark stubs.
 - `logging_config.py`: privacy-preserving logging helpers.
@@ -153,6 +156,46 @@ runtime:
 ```
 
 Raw prompts are sent only to the local Ollama process for inference. QiCompute does not store raw prompts or raw model outputs; it stores hashes, counts, timing, energy, and verification metadata.
+
+## Local LAN Cluster Prototype
+
+QiCompute includes a minimal controller/worker cluster skeleton for trusted LAN experimentation. It is disabled by default:
+
+```yaml
+cluster:
+  enabled: false
+  node_role: "controller"
+  controller_url: "http://127.0.0.1:8080"
+  worker_bind_host: "127.0.0.1"
+  worker_bind_port: 8081
+  shared_secret: "dev-local-secret"
+  heartbeat_interval_seconds: 10
+  request_timeout_seconds: 5
+```
+
+The controller accepts signed worker heartbeats, capability claims, receipt submissions, and challenge results. It assigns queued jobs to eligible workers, runs local receipt verification, attaches accepted payouts to active settlement epochs, and writes `cluster_events` audit logs.
+
+The worker sends heartbeat/capability messages, polls for the next job, executes locally through the selected runtime, and submits a receipt with hashes, token counts, timing, energy, and verification metadata. Raw prompts and raw model outputs are not sent back by default.
+
+Run a controller:
+
+```bash
+python3 controller.py --host 127.0.0.1 --port 8080
+```
+
+Run a worker in cluster mode:
+
+```bash
+python3 daemon.py --cluster-worker
+```
+
+Run the deterministic single-process cluster demo:
+
+```bash
+python3 cluster_demo.py
+```
+
+Cluster transport uses standard-library HTTP plus shared-secret HMAC request signing with timestamp, nonce, and body hash. This is for local LAN development only. There is no public networking, blockchain integration, wallet integration, or cloud dependency.
 
 ## Marketplace Prototype
 

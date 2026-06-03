@@ -213,6 +213,17 @@ CREATE TABLE IF NOT EXISTS committee_votes (
     metadata_json TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS cluster_events (
+    event_id TEXT PRIMARY KEY,
+    event_type TEXT NOT NULL,
+    worker_id TEXT,
+    job_id TEXT,
+    created_at TEXT NOT NULL,
+    accepted INTEGER NOT NULL,
+    failure_code TEXT,
+    metadata_json TEXT NOT NULL
+);
+
 CREATE UNIQUE INDEX IF NOT EXISTS idx_mining_rounds_block_hash
 ON mining_rounds(block_hash)
 WHERE block_hash IS NOT NULL;
@@ -1042,6 +1053,34 @@ class WorkerDB:
         )
         return [_routing_audit_row_to_dict(row) for row in rows]
 
+    def insert_cluster_event(self, event: dict[str, Any]) -> None:
+        self.conn.execute(
+            """
+            INSERT INTO cluster_events (
+                event_id, event_type, worker_id, job_id, created_at,
+                accepted, failure_code, metadata_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                event["event_id"],
+                event["event_type"],
+                event.get("worker_id"),
+                event.get("job_id"),
+                event["created_at"],
+                1 if event.get("accepted", False) else 0,
+                event.get("failure_code"),
+                json.dumps(event.get("metadata", {}), sort_keys=True),
+            ),
+        )
+        self.conn.commit()
+
+    def recent_cluster_events(self, limit: int = 10) -> list[dict[str, Any]]:
+        rows = self.conn.execute(
+            "SELECT * FROM cluster_events ORDER BY created_at DESC LIMIT ?",
+            (limit,),
+        )
+        return [_cluster_event_row_to_dict(row) for row in rows]
+
 
 def _worker_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
     return {
@@ -1106,6 +1145,19 @@ def _routing_audit_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
         "alternatives": json.loads(row["alternatives_json"]),
         "router_version": row["router_version"],
         "created_at": row["created_at"],
+        "metadata": json.loads(row["metadata_json"]),
+    }
+
+
+def _cluster_event_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "event_id": row["event_id"],
+        "event_type": row["event_type"],
+        "worker_id": row["worker_id"],
+        "job_id": row["job_id"],
+        "created_at": row["created_at"],
+        "accepted": bool(row["accepted"]),
+        "failure_code": row["failure_code"],
         "metadata": json.loads(row["metadata_json"]),
     }
 

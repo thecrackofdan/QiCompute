@@ -6,7 +6,10 @@ from typing import Any
 from uuid import uuid4
 
 import failures
+from challenges import build_challenge_result, create_challenge, should_attach_challenge, verify_challenge_result
+from committees import ACCEPTED, create_verification_committee, run_verification_committee
 from db import WorkerDB
+from epochs import active_epoch
 from receipts import compute_receipt_hash, make_receipt, utc_now_iso
 from registry import heartbeat_local_worker, register_local_worker
 from reputation import update_worker_reputation
@@ -17,10 +20,17 @@ from worker import load_config
 
 
 class WorkerDaemon:
-    def __init__(self, config: dict[str, Any], db: WorkerDB, telemetry: GPUTelemetry | None = None):
+    def __init__(
+        self,
+        config: dict[str, Any],
+        db: WorkerDB,
+        telemetry: GPUTelemetry | None = None,
+        job_overrides: dict[str, dict[str, Any]] | None = None,
+    ):
         self.config = config
         self.db = db
         self.worker_id = config["worker"]["id"]
+        self.job_overrides = job_overrides or {}
         self.telemetry = telemetry or GPUTelemetry(
             nvidia_smi_path=config.get("telemetry", {}).get("nvidia_smi_path", "nvidia-smi"),
             fallback_watts=float(config["worker"].get("fallback_watts", 0)),
@@ -33,8 +43,9 @@ class WorkerDaemon:
         jobs = self.db.list_assigned_jobs(self.worker_id, limit=1)
         if not jobs:
             return None
-        job = jobs[0]
-        self.db.update_customer_job_status(job["job_id"], "running", {})
+        stored_job = jobs[0]
+        job = {**stored_job, **self.job_overrides.get(stored_job["job_id"], {})}
+        self.db.update_customer_job_status(stored_job["job_id"], "running", {})
         self.db.increment_worker_load(self.worker_id)
         try:
             runtime_cfg = dict(self.config.get("runtime", {}))
@@ -42,8 +53,75 @@ class WorkerDaemon:
             self.config["runtime"] = {**runtime_cfg, "type": selected_runtime_type}
             runtime = runner_for_type(selected_runtime_type)
             result = runtime.run(job, self.config)
+            challenge = None
+            challenge_result = None
             receipt = self._receipt_from_result(job, result)
+            if result.accepted and should_attach_challenge(_job_for_challenge(job), self.config):
+                challenge = create_challenge(_job_for_challenge(job), self.worker_id, self.config)
+                self.db.insert_challenge(challenge)
+                receipt["metadata"]["challenge_id"] = challenge["challenge_id"]
+                receipt["metadata"]["challenge_response_hash"] = job.get("challenge_response_hash") or challenge[
+                    "expected_hash"
+                ]
+                receipt["receipt_hash"] = _refresh_receipt_hash(receipt)
             verification = verify_inference_receipt(receipt, _job_for_verifier(job), self.config)
+            if not result.accepted:
+                verification = _verification_failure(
+                    result.error_code or failures.COMMAND_FAILED,
+                    job,
+                    receipt,
+                    {
+                        "runtime": receipt["metadata"].get("runtime", {}),
+                        "payout_eligible": False,
+                    },
+                )
+            if challenge:
+                challenge_verification = verify_challenge_result(challenge, receipt)
+                challenge_result = build_challenge_result(challenge, receipt, challenge_verification)
+                self.db.record_challenge_result(challenge_result)
+                receipt["metadata"]["challenge_verification"] = challenge_verification.to_dict()
+                if not challenge_verification.accepted:
+                    verification = _verification_failure(
+                        failures.CHALLENGE_FAILED
+                        if challenge_verification.reason != failures.CHALLENGE_EXPIRED
+                        else failures.CHALLENGE_EXPIRED,
+                        job,
+                        receipt,
+                        {"challenge": challenge_verification.to_dict(), "payout_eligible": False},
+                    )
+            if result.accepted and verification.accepted and self.config.get("committees", {}).get("enabled", False):
+                receipt["receipt_hash"] = _refresh_receipt_hash(receipt)
+                committee_cfg = self.config.get("committees", {})
+                epoch = active_epoch(self.db)
+                committee = create_verification_committee(
+                    self.db,
+                    challenge_id=challenge["challenge_id"] if challenge else None,
+                    assigned_worker_id=self.worker_id,
+                    committee_size=int(committee_cfg.get("committee_size", 3)),
+                    quorum_threshold=int(committee_cfg.get("quorum_threshold", 2)),
+                    metadata={"job_id": job["job_id"], "epoch_id": epoch["epoch_id"]},
+                )
+                committee_result = run_verification_committee(
+                    self.db,
+                    committee,
+                    receipt=receipt,
+                    challenge_result=challenge_result,
+                    forced_votes=committee_cfg.get("forced_votes"),
+                )
+                receipt["metadata"]["committee_verification"] = {
+                    "committee_id": committee_result["committee_id"],
+                    "result": committee_result["result"],
+                    "vote_counts": committee_result["metadata"].get("vote_counts", {}),
+                }
+                if committee_result["result"] != ACCEPTED:
+                    verification = _verification_failure(
+                        failures.COMMITTEE_REJECTED
+                        if committee_result["result"] == "rejected"
+                        else failures.COMMITTEE_DISPUTED,
+                        job,
+                        receipt,
+                        {"committee": receipt["metadata"]["committee_verification"], "payout_eligible": False},
+                    )
             receipt["metadata"]["verification"] = verification.to_dict()
             receipt["receipt_hash"] = _refresh_receipt_hash(receipt)
             self.db.insert_receipt(receipt)
@@ -53,7 +131,34 @@ class WorkerDaemon:
                 verification=verification.to_dict(),
                 receipt=receipt,
             )
-            if result.accepted and verification.accepted:
+            payout_eligible = result.accepted and verification.accepted
+            if payout_eligible:
+                epoch = active_epoch(self.db)
+                payout_event = {
+                    "event_id": str(uuid4()),
+                    "worker_id": self.worker_id,
+                    "event_type": "inference_job",
+                    "basis": "daemon_verified_runtime",
+                    "qi_amount": receipt["estimated_qi_owed"],
+                    "created_at": utc_now_iso(),
+                    "source_id": receipt["receipt_id"],
+                    "epoch_id": epoch["epoch_id"],
+                    "metadata": {
+                        "job_id": job["job_id"],
+                        "runtime_type": result.metadata.get("runtime_type"),
+                        "verification_reason": verification.reason,
+                        "challenge_id": receipt["metadata"].get("challenge_id"),
+                        "committee_id": receipt["metadata"].get("committee_verification", {}).get("committee_id"),
+                    },
+                }
+                self.db.insert_payout_event(payout_event)
+                self.db.record_inference_job_paid(
+                    job_id=job["job_id"],
+                    worker_id=self.worker_id,
+                    receipt_id=receipt["receipt_id"],
+                    accepted_at=payout_event["created_at"],
+                    payout_event_id=payout_event["event_id"],
+                )
                 self.db.update_customer_job_status(job["job_id"], "completed", {"receipt_id": receipt["receipt_id"]})
             else:
                 self.db.mark_customer_job_failure(
@@ -99,7 +204,7 @@ class WorkerDaemon:
             mode="inference",
             started_at=result.started_at,
             ended_at=result.ended_at,
-            duration_seconds=max(result.duration_seconds, 0.000001),
+            duration_seconds=max(result.duration_seconds, 0.001),
             average_watts=float(result.metadata.get("total_watts") or self.config["worker"].get("fallback_watts", 0)),
             output_type="tokens",
             output_amount=result.output_tokens,
@@ -136,6 +241,31 @@ def _job_for_verifier(job: dict[str, Any]) -> dict[str, Any]:
         "input_tokens": job.get("input_tokens", 0),
         "output_tokens": job.get("expected_output_tokens", 0),
     }
+
+
+def _job_for_challenge(job: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "id": job["job_id"],
+        "input_tokens": job.get("input_tokens", 0),
+        "output_tokens": job.get("expected_output_tokens", 0),
+        "tokens": job.get("expected_output_tokens", 0),
+        "challenge_response_hash": job.get("challenge_response_hash"),
+    }
+
+
+def _verification_failure(reason: str, job: dict[str, Any], receipt: dict[str, Any], metadata: dict[str, Any]) -> Any:
+    from verifier import VerificationResult
+
+    return VerificationResult(
+        accepted=False,
+        reason=reason,
+        score=0.0,
+        metadata={
+            "job_id": job.get("job_id"),
+            "worker_id": receipt.get("worker_id"),
+            **metadata,
+        },
+    )
 
 
 def _estimated_qi(job: dict[str, Any], result: Any, config: dict[str, Any]) -> float:

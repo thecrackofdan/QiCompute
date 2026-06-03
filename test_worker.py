@@ -6,6 +6,8 @@ import tempfile
 import unittest
 import urllib.error
 import urllib.request
+from contextlib import redirect_stdout
+from io import StringIO
 from pathlib import Path
 from uuid import uuid4
 
@@ -23,6 +25,8 @@ from committees import (
 )
 from customer_receipts import build_customer_receipt, compute_customer_receipt_hash
 from daemon import WorkerDaemon
+from demo import run_demo
+from demo_data import demo_prompt
 from db import WorkerDB
 from envelopes import compute_envelope_hash, make_job_envelope, verify_job_envelope
 from epochs import active_epoch, finalize_epoch
@@ -1388,6 +1392,75 @@ inference:
     def test_output_hash_is_deterministic(self) -> None:
         self.assertEqual(output_hash("same output"), output_hash("same output"))
         self.assertNotEqual(output_hash("same output"), output_hash("different output"))
+
+    def test_full_demo_runs_successfully(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with patched_urlopen({"response": "demo useful output", "eval_count": 32}):
+                result = run_demo(db_path=str(Path(tmp) / "demo.db"))
+
+            self.assertEqual(result["job"]["status"], "completed")
+            self.assertGreater(result["epoch"]["total_settled_qi"], 0)
+            self.assertEqual(result["committee"]["result"], "accepted")
+
+    def test_honest_demo_produces_settled_payout(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with patched_urlopen({"response": "honest useful output", "eval_count": 32}):
+                result = run_demo(mode="honest", db_path=str(Path(tmp) / "demo.db"))
+
+            self.assertEqual(result["metrics"]["jobs_completed"], 1)
+            self.assertGreater(result["metrics"]["settled_qi_total"], 0)
+            self.assertEqual(result["metrics"]["committee_acceptance_rate"], 1.0)
+
+    def test_malicious_demo_blocks_payout(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with patched_urlopen({"response": "malicious output", "eval_count": 32}):
+                result = run_demo(mode="malicious", db_path=str(Path(tmp) / "demo.db"))
+
+            self.assertEqual(result["job"]["status"], "failed")
+            self.assertEqual(result["metrics"]["settled_qi_total"], 0)
+            self.assertEqual(result["receipt"]["metadata"]["verification"]["reason"], failures.CHALLENGE_FAILED)
+
+    def test_flaky_demo_reduces_reputation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with patched_urlopen_error(urllib.error.URLError("refused")):
+                result = run_demo(mode="flaky", db_path=str(Path(tmp) / "demo.db"))
+
+            self.assertEqual(result["job"]["status"], "failed")
+            self.assertLess(result["worker"]["reputation_score"], 50)
+            self.assertEqual(result["metrics"]["jobs_rejected"], 1)
+
+    def test_demo_epoch_finalizes_correctly(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with patched_urlopen({"response": "epoch output", "eval_count": 32}):
+                result = run_demo(mode="honest", db_path=str(Path(tmp) / "demo.db"))
+
+            self.assertEqual(result["epoch"]["status"], "finalized")
+            self.assertEqual(result["epoch"]["receipt_count"], 1)
+            self.assertIn("accepted_committee_count", result["epoch"]["metadata"])
+
+    def test_demo_summary_output_contains_expected_fields(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            output = StringIO()
+            with patched_urlopen({"response": "summary output", "eval_count": 32}):
+                with redirect_stdout(output):
+                    run_demo(mode="honest", db_path=str(Path(tmp) / "demo.db"))
+
+            text = output.getvalue()
+            self.assertIn("Settlement Epoch", text)
+            self.assertIn("Marketplace Metrics", text)
+            self.assertIn("committee_acceptance_rate", text)
+            self.assertIn("payout eligibility", text)
+
+    def test_demo_does_not_persist_raw_prompt_or_output(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            raw_output = "private demo output"
+            with patched_urlopen({"response": raw_output, "eval_count": 32}):
+                result = run_demo(mode="honest", db_path=str(Path(tmp) / "demo.db"))
+
+            serialized = json.dumps(result, sort_keys=True)
+            self.assertNotIn(demo_prompt("honest"), serialized)
+            self.assertNotIn(raw_output, serialized)
+            self.assertIn("output_hash", serialized)
 
     def _scheduler(
         self,

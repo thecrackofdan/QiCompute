@@ -285,6 +285,38 @@ The Ollama runtime calls a local Ollama endpoint with the Python standard librar
 
 The Ollama placeholder and llama.cpp adapter remain placeholders shaped for future local integrations. They do not import SDKs or start servers.
 
+## Local End-to-End Demo
+
+`demo.py` runs a complete local useful-compute settlement path:
+
+```text
+submit job -> route job -> daemon executes Ollama inference -> runtime result
+-> worker receipt -> challenge verification -> committee verification
+-> payout eligibility -> epoch finalization -> settlement summary
+```
+
+Run the honest local demo:
+
+```bash
+python3 demo.py
+```
+
+The demo uses `config.demo.yaml`, defaults to local Ollama at `http://127.0.0.1:11434/api/generate`, and requests model `llama3.1:8b`. The prompt is sent only to local Ollama for execution. Raw prompts and raw model outputs are not stored; QiCompute stores prompt hashes, output hashes, token counts, timing, energy, verification metadata, and settlement summaries.
+
+Demo modes:
+
+```bash
+python3 demo.py --mode honest
+python3 demo.py --mode flaky
+python3 demo.py --mode malicious
+```
+
+- `honest`: executes the job, passes challenge verification, reaches committee acceptance, creates a payout event, and finalizes the epoch with settled Qi.
+- `flaky`: simulates local runtime unavailability, marks the job failed, and reduces worker reputation.
+- `malicious`: tampers challenge response metadata, fails useful-work verification, blocks payout, and records the rejection path.
+
+The printed settlement summary includes epoch totals, worker reputation, job outcome, committee outcome, challenge pass rate, committee acceptance rate, settled Qi, rejected Qi, latency, energy per token, and runtime type distribution.
+
 ## Accounting Model
 
 Energy:

@@ -1,0 +1,53 @@
+worker:
+  id: "demo-worker-local"
+  operator: "demo-operator"
+  public_key: "placeholder-demo-public-key"
+  region: "local"
+  hardware_profile:
+    gpu_count: 1
+    gpu_names: ["local-demo-gpu"]
+    total_vram_gb: 24
+    total_watts_capacity: 250
+  supported_modes: ["inference", "mining"]
+  supported_models: ["llama-3.1-8b"]
+  db_path: "demo_worker.db"
+  loop_interval_seconds: 1
+  fallback_watts: 250
+
+telemetry:
+  poll_interval_seconds: 5
+  nvidia_smi_path: "nvidia-smi"
+
+inference:
+  enabled: true
+  estimated_qi_per_input_token: 0.00000005
+  estimated_qi_per_output_token: 0.0000002
+
+runtime:
+  type: "ollama"
+  timeout_seconds: 300
+  max_concurrent_jobs: 1
+  command: []
+  redact_outputs: true
+  store_output_hash_only: true
+  ollama_url: "http://127.0.0.1:11434/api/generate"
+  ollama_model: "llama3.1:8b"
+
+challenges:
+  enabled: true
+  challenge_rate: 1
+  challenge_type: "deterministic_prompt"
+  ttl_seconds: 300
+
+committees:
+  enabled: true
+  committee_size: 3
+  quorum_threshold: 2
+
+pricing:
+  base_input_token_rate_qi: 0.00000005
+  base_output_token_rate_qi: 0.0000002
+  energy_rate_qi_per_joule: 0.0
+
+demo:
+  seed: 7

@@ -12,6 +12,8 @@ This MVP has no smart contracts and no real payout rail. It records local receip
 - `receipts.py`: local job receipt format.
 - `verifier.py`: local inference receipt validation.
 - `challenges.py`: local proof-of-useful-work challenge simulation.
+- `committees.py`: local verification committee consensus simulation.
+- `epochs.py`: settlement epoch batching and summaries.
 - `registry.py`: local worker registry helpers.
 - `router.py`: local inference job routing.
 - `reputation.py`: worker reputation updates.
@@ -320,6 +322,44 @@ QiCompute can attach local proof-of-useful-work challenges to a configurable per
 - `partial_output_verification`
 
 Challenges record expected hashes and token counts without adding networking or cryptographic proof systems. A worker receipt must include matching challenge response metadata. Failed or expired challenges are recorded in `challenge_results`, block payout eligibility for that job, and reduce worker reputation more heavily than ordinary failures.
+
+## Verification Committees
+
+Verification committees simulate decentralized useful-work review without networking. A committee selects online verifier workers from the local registry and excludes the worker that performed the job. Each verifier independently checks:
+
+- receipt hash integrity
+- challenge result status
+- capability claim hash validity
+
+Votes aggregate into `accepted`, `rejected`, or `disputed` using a configurable quorum threshold. Rejected or disputed committee results block payout eligibility and are persisted with vote metadata for auditability.
+
+## Settlement Epochs
+
+Settlement epochs batch verified payout events into deterministic local settlement windows. Payout events reference an `epoch_id`; finalizing an epoch summarizes:
+
+- receipt count
+- energy and token totals
+- estimated and settled Qi totals
+- verified and failed job counts
+- worker totals
+- challenge pass/fail counts
+- committee accepted/rejected/disputed counts
+
+Balances still derive only from settled payout events. Epochs are summary artifacts for future settlement batching, not a wallet or chain integration.
+
+## Committee Consensus
+
+Committee consensus gives QiCompute a local model for distributed trust. Accepted committees make work settlement-eligible. Rejected committees mark the job as failed verification. Disputed committees block payout until a future resolution path exists. If not enough verifiers are available to satisfy quorum, the result is treated as unresolved with `QUORUM_NOT_REACHED` metadata.
+
+## Useful-Work Settlement
+
+The local settlement path is now:
+
+```text
+energy -> inference work -> receipt -> challenge -> committee -> payout event -> epoch summary
+```
+
+QiCompute is evolving toward useful-work verification, batched settlement, distributed trust, and private distributed inference markets. Qi remains the settlement and incentive layer beneath the compute marketplace.
 
 ## Receipt Hashing
 

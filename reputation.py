@@ -33,6 +33,9 @@ def update_worker_reputation(
     elif reason in {failures.CHALLENGE_FAILED, failures.CHALLENGE_EXPIRED, failures.CHALLENGE_DISPUTED}:
         reputation -= 10 + _failure_streak_penalty(worker)
         failure_count += 1
+    elif reason in {failures.COMMITTEE_REJECTED, failures.COMMITTEE_DISPUTED, failures.QUORUM_NOT_REACHED}:
+        reputation -= 7 + _failure_streak_penalty(worker)
+        failure_count += 1
     elif "verification" in reason or "receipt" in reason:
         reputation -= 5 + _failure_streak_penalty(worker)
         failure_count += 1

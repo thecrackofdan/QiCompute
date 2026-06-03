@@ -54,6 +54,7 @@ CREATE TABLE IF NOT EXISTS payout_events (
     qi_amount REAL NOT NULL,
     created_at TEXT NOT NULL,
     source_id TEXT,
+    epoch_id TEXT,
     metadata_json TEXT NOT NULL
 );
 
@@ -176,6 +177,42 @@ CREATE TABLE IF NOT EXISTS challenge_results (
     metadata_json TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS settlement_epochs (
+    epoch_id TEXT PRIMARY KEY,
+    started_at TEXT NOT NULL,
+    ended_at TEXT,
+    status TEXT NOT NULL,
+    receipt_count INTEGER NOT NULL DEFAULT 0,
+    total_energy_joules REAL NOT NULL DEFAULT 0,
+    total_tokens REAL NOT NULL DEFAULT 0,
+    total_estimated_qi REAL NOT NULL DEFAULT 0,
+    total_settled_qi REAL NOT NULL DEFAULT 0,
+    total_verified_jobs INTEGER NOT NULL DEFAULT 0,
+    total_failed_jobs INTEGER NOT NULL DEFAULT 0,
+    metadata_json TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS verification_committees (
+    committee_id TEXT PRIMARY KEY,
+    challenge_id TEXT,
+    verifier_worker_ids_json TEXT NOT NULL,
+    quorum_threshold INTEGER NOT NULL,
+    created_at TEXT NOT NULL,
+    finalized_at TEXT,
+    result TEXT,
+    metadata_json TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS committee_votes (
+    vote_id TEXT PRIMARY KEY,
+    committee_id TEXT NOT NULL,
+    verifier_worker_id TEXT NOT NULL,
+    vote TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    metadata_json TEXT NOT NULL
+);
+
 CREATE UNIQUE INDEX IF NOT EXISTS idx_mining_rounds_block_hash
 ON mining_rounds(block_hash)
 WHERE block_hash IS NOT NULL;
@@ -201,6 +238,9 @@ class WorkerDB:
             self.conn.execute("ALTER TABLE receipts ADD COLUMN receipt_hash TEXT")
         if "job_id" not in receipt_columns:
             self.conn.execute("ALTER TABLE receipts ADD COLUMN job_id TEXT")
+        payout_columns = {row["name"] for row in self.conn.execute("PRAGMA table_info(payout_events)")}
+        if "epoch_id" not in payout_columns:
+            self.conn.execute("ALTER TABLE payout_events ADD COLUMN epoch_id TEXT")
         worker_columns = {row["name"] for row in self.conn.execute("PRAGMA table_info(worker_registry)")}
         for column, ddl in {
             "current_jobs": "ALTER TABLE worker_registry ADD COLUMN current_jobs INTEGER NOT NULL DEFAULT 0",
@@ -363,8 +403,8 @@ class WorkerDB:
                 """
                 INSERT INTO payout_events (
                     event_id, worker_id, event_type, basis, qi_amount,
-                    created_at, source_id, metadata_json
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    created_at, source_id, epoch_id, metadata_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     event["event_id"],
@@ -374,6 +414,7 @@ class WorkerDB:
                     event["qi_amount"],
                     event["created_at"],
                     event.get("source_id"),
+                    event.get("epoch_id"),
                     json.dumps(event.get("metadata", {}), sort_keys=True),
                 ),
             )
@@ -391,6 +432,153 @@ class WorkerDB:
                     event["created_at"],
                 ),
             )
+
+    def create_epoch(self, epoch: dict[str, Any]) -> None:
+        self.conn.execute(
+            """
+            INSERT INTO settlement_epochs (
+                epoch_id, started_at, ended_at, status, receipt_count,
+                total_energy_joules, total_tokens, total_estimated_qi,
+                total_settled_qi, total_verified_jobs, total_failed_jobs,
+                metadata_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                epoch["epoch_id"],
+                epoch["started_at"],
+                epoch.get("ended_at"),
+                epoch.get("status", "active"),
+                int(epoch.get("receipt_count", 0)),
+                float(epoch.get("total_energy_joules", 0)),
+                float(epoch.get("total_tokens", 0)),
+                float(epoch.get("total_estimated_qi", 0)),
+                float(epoch.get("total_settled_qi", 0)),
+                int(epoch.get("total_verified_jobs", 0)),
+                int(epoch.get("total_failed_jobs", 0)),
+                json.dumps(epoch.get("metadata", {}), sort_keys=True),
+            ),
+        )
+        self.conn.commit()
+
+    def active_epoch(self) -> dict[str, Any] | None:
+        row = self.conn.execute(
+            "SELECT * FROM settlement_epochs WHERE status = 'active' ORDER BY started_at ASC LIMIT 1"
+        ).fetchone()
+        return _epoch_row_to_dict(row) if row else None
+
+    def finalize_epoch(self, epoch: dict[str, Any]) -> None:
+        current = self.epoch_summary(epoch["epoch_id"])
+        if current and current["status"] == "finalized":
+            raise ValueError(f"Epoch is already finalized: {epoch['epoch_id']}")
+        self.conn.execute(
+            """
+            UPDATE settlement_epochs
+            SET ended_at = ?, status = 'finalized', receipt_count = ?,
+                total_energy_joules = ?, total_tokens = ?, total_estimated_qi = ?,
+                total_settled_qi = ?, total_verified_jobs = ?, total_failed_jobs = ?,
+                metadata_json = ?
+            WHERE epoch_id = ?
+            """,
+            (
+                epoch["ended_at"],
+                int(epoch["receipt_count"]),
+                float(epoch["total_energy_joules"]),
+                float(epoch["total_tokens"]),
+                float(epoch["total_estimated_qi"]),
+                float(epoch["total_settled_qi"]),
+                int(epoch["total_verified_jobs"]),
+                int(epoch["total_failed_jobs"]),
+                json.dumps(epoch.get("metadata", {}), sort_keys=True),
+                epoch["epoch_id"],
+            ),
+        )
+        self.conn.commit()
+
+    def epoch_summary(self, epoch_id: str) -> dict[str, Any] | None:
+        row = self.conn.execute(
+            "SELECT * FROM settlement_epochs WHERE epoch_id = ?",
+            (epoch_id,),
+        ).fetchone()
+        return _epoch_row_to_dict(row) if row else None
+
+    def receipts_for_epoch(self, epoch_id: str) -> list[dict[str, Any]]:
+        rows = self.conn.execute(
+            """
+            SELECT DISTINCT r.*
+            FROM receipts r
+            JOIN payout_events p ON p.source_id = r.receipt_id
+            WHERE p.epoch_id = ?
+            ORDER BY r.ended_at ASC, r.receipt_id ASC
+            """,
+            (epoch_id,),
+        )
+        return [_receipt_row_to_dict(row) for row in rows]
+
+    def insert_verification_committee(self, committee: dict[str, Any]) -> None:
+        self.conn.execute(
+            """
+            INSERT INTO verification_committees (
+                committee_id, challenge_id, verifier_worker_ids_json,
+                quorum_threshold, created_at, finalized_at, result, metadata_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                committee["committee_id"],
+                committee.get("challenge_id"),
+                json.dumps(committee.get("verifier_worker_ids", []), sort_keys=True),
+                int(committee["quorum_threshold"]),
+                committee["created_at"],
+                committee.get("finalized_at"),
+                committee.get("result"),
+                json.dumps(committee.get("metadata", {}), sort_keys=True),
+            ),
+        )
+        self.conn.commit()
+
+    def insert_committee_vote(self, vote: dict[str, Any]) -> None:
+        self.conn.execute(
+            """
+            INSERT INTO committee_votes (
+                vote_id, committee_id, verifier_worker_id, vote,
+                reason, created_at, metadata_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                vote["vote_id"],
+                vote["committee_id"],
+                vote["verifier_worker_id"],
+                vote["vote"],
+                vote["reason"],
+                vote["created_at"],
+                json.dumps(vote.get("metadata", {}), sort_keys=True),
+            ),
+        )
+        self.conn.commit()
+
+    def finalize_verification_committee(self, committee_id: str, result: str, finalized_at: str, metadata: dict[str, Any]) -> None:
+        self.conn.execute(
+            """
+            UPDATE verification_committees
+            SET result = ?, finalized_at = ?, metadata_json = ?
+            WHERE committee_id = ?
+            """,
+            (result, finalized_at, json.dumps(metadata, sort_keys=True), committee_id),
+        )
+        self.conn.commit()
+
+    def committee_votes(self, committee_id: str) -> list[dict[str, Any]]:
+        rows = self.conn.execute(
+            "SELECT * FROM committee_votes WHERE committee_id = ? ORDER BY created_at ASC, verifier_worker_id ASC",
+            (committee_id,),
+        )
+        return [_committee_vote_row_to_dict(row) for row in rows]
+
+    def verification_committee(self, committee_id: str) -> dict[str, Any] | None:
+        row = self.conn.execute(
+            "SELECT * FROM verification_committees WHERE committee_id = ?",
+            (committee_id,),
+        ).fetchone()
+        return _committee_row_to_dict(row) if row else None
 
     def insert_mining_share(self, share: dict[str, Any]) -> None:
         self.conn.execute(
@@ -934,6 +1122,65 @@ def _challenge_result_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
         "accepted": bool(row["accepted"]),
         "reason": row["reason"],
         "score": row["score"],
+        "created_at": row["created_at"],
+        "metadata": json.loads(row["metadata_json"]),
+    }
+
+
+def _receipt_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "receipt_id": row["receipt_id"],
+        "receipt_hash": row["receipt_hash"],
+        "worker_id": row["worker_id"],
+        "mode": row["mode"],
+        "started_at": row["started_at"],
+        "ended_at": row["ended_at"],
+        "duration_seconds": row["duration_seconds"],
+        "average_watts": row["average_watts"],
+        "energy_joules": row["energy_joules"],
+        "output": {"type": row["output_type"], "amount": row["output_amount"]},
+        "estimated_qi_owed": row["estimated_qi_owed"],
+        "metadata": json.loads(row["metadata_json"]),
+    }
+
+
+def _epoch_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "epoch_id": row["epoch_id"],
+        "started_at": row["started_at"],
+        "ended_at": row["ended_at"],
+        "status": row["status"],
+        "receipt_count": row["receipt_count"],
+        "total_energy_joules": row["total_energy_joules"],
+        "total_tokens": row["total_tokens"],
+        "total_estimated_qi": row["total_estimated_qi"],
+        "total_settled_qi": row["total_settled_qi"],
+        "total_verified_jobs": row["total_verified_jobs"],
+        "total_failed_jobs": row["total_failed_jobs"],
+        "metadata": json.loads(row["metadata_json"]),
+    }
+
+
+def _committee_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "committee_id": row["committee_id"],
+        "challenge_id": row["challenge_id"],
+        "verifier_worker_ids": json.loads(row["verifier_worker_ids_json"]),
+        "quorum_threshold": row["quorum_threshold"],
+        "created_at": row["created_at"],
+        "finalized_at": row["finalized_at"],
+        "result": row["result"],
+        "metadata": json.loads(row["metadata_json"]),
+    }
+
+
+def _committee_vote_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "vote_id": row["vote_id"],
+        "committee_id": row["committee_id"],
+        "verifier_worker_id": row["verifier_worker_id"],
+        "vote": row["vote"],
+        "reason": row["reason"],
         "created_at": row["created_at"],
         "metadata": json.loads(row["metadata_json"]),
     }

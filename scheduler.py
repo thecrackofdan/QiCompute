@@ -17,7 +17,9 @@ from challenges import (
     should_attach_challenge,
     verify_challenge_result,
 )
+from committees import ACCEPTED, create_verification_committee, run_verification_committee
 from db import WorkerDB
+from epochs import active_epoch
 from receipts import compute_receipt_hash, make_receipt, utc_now_iso
 from reputation import update_worker_reputation
 from telemetry import GPUTelemetry
@@ -119,11 +121,11 @@ class Scheduler:
             metadata=metadata,
         )
         verification = verify_inference_receipt(receipt, job, self.config)
+        challenge_result = None
         if challenge:
             challenge_verification = verify_challenge_result(challenge, receipt)
-            self.db.record_challenge_result(
-                build_challenge_result(challenge, receipt, challenge_verification)
-            )
+            challenge_result = build_challenge_result(challenge, receipt, challenge_verification)
+            self.db.record_challenge_result(challenge_result)
             receipt["metadata"]["challenge_verification"] = challenge_verification.to_dict()
             if not challenge_verification.accepted:
                 verification = VerificationResult(
@@ -134,6 +136,44 @@ class Scheduler:
                         "job_id": job.get("id"),
                         "worker_id": receipt.get("worker_id"),
                         "challenge": challenge_verification.to_dict(),
+                        "payout_eligible": False,
+                    },
+                )
+        if verification.accepted and self.config.get("committees", {}).get("enabled", False):
+            receipt["receipt_hash"] = self._refresh_receipt_hash(receipt)
+            committee_cfg = self.config.get("committees", {})
+            epoch = active_epoch(self.db)
+            committee = create_verification_committee(
+                self.db,
+                challenge_id=challenge["challenge_id"] if challenge else None,
+                assigned_worker_id=self.worker_id,
+                committee_size=int(committee_cfg.get("committee_size", 3)),
+                quorum_threshold=int(committee_cfg.get("quorum_threshold", 2)),
+                metadata={"job_id": job.get("id"), "epoch_id": epoch["epoch_id"]},
+            )
+            committee_result = run_verification_committee(
+                self.db,
+                committee,
+                receipt=receipt,
+                challenge_result=challenge_result,
+                forced_votes=committee_cfg.get("forced_votes"),
+            )
+            receipt["metadata"]["committee_verification"] = {
+                "committee_id": committee_result["committee_id"],
+                "result": committee_result["result"],
+                "vote_counts": committee_result["metadata"].get("vote_counts", {}),
+            }
+            if committee_result["result"] != ACCEPTED:
+                verification = VerificationResult(
+                    accepted=False,
+                    reason=failures.COMMITTEE_REJECTED
+                    if committee_result["result"] == "rejected"
+                    else failures.COMMITTEE_DISPUTED,
+                    score=0.0,
+                    metadata={
+                        "job_id": job.get("id"),
+                        "worker_id": receipt.get("worker_id"),
+                        "committee": receipt["metadata"]["committee_verification"],
                         "payout_eligible": False,
                     },
                 )
@@ -154,6 +194,7 @@ class Scheduler:
                     "verification_score": verification.score,
                     "verification_reason": verification.reason,
                 },
+                epoch_id=active_epoch(self.db)["epoch_id"],
             )
             self.db.insert_payout_event(event)
             self.db.record_inference_job_paid(
@@ -271,6 +312,7 @@ class Scheduler:
                     "pool_fee_percent": pool_fee_percent,
                 },
                 worker_id=worker_id,
+                epoch_id=active_epoch(self.db)["epoch_id"],
             )
             self.db.insert_payout_event(event)
             payouts.append(event)
@@ -359,6 +401,7 @@ class Scheduler:
         source_id: str,
         metadata: dict[str, Any],
         worker_id: str | None = None,
+        epoch_id: str | None = None,
     ) -> dict[str, Any]:
         return {
             "event_id": str(uuid4()),
@@ -368,6 +411,7 @@ class Scheduler:
             "qi_amount": round(qi_amount, 12),
             "created_at": utc_now_iso(),
             "source_id": source_id,
+            "epoch_id": epoch_id,
             "metadata": metadata,
         }
 

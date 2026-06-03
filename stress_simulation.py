@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 from typing import Any
+from uuid import uuid4
 
 import failures
 from adversary import FLAKY, HONEST, MALICIOUS_RECEIPT, SLOW, simulate_worker_receipt
+from committees import ACCEPTED, create_verification_committee, run_verification_committee
 from db import WorkerDB
+from epochs import active_epoch, finalize_epoch
 from receipts import verify_receipt_hash, utc_now_iso
 from reputation import update_worker_reputation
 from router import route_and_audit_inference_job
@@ -19,10 +22,14 @@ def run_stress_simulation(db: WorkerDB, config: dict[str, Any], *, seed: int = 7
         db.insert_customer_job(job)
 
     completed = failed = expired = retried = rejected = 0
+    committee_accepted = committee_rejected = committee_disputed = 0
+    verifier_disagreements = 0
+    settled_qi = rejected_qi = 0.0
     route_scores = []
     prices = []
     behaviors = {worker["worker_id"]: worker["metadata"]["behavior"] for worker in workers}
     initial_reputations = {worker["worker_id"]: worker["reputation_score"] for worker in workers}
+    epoch = active_epoch(db)
     for index, job in enumerate(db.list_queued_jobs()):
         if job.get("expires_at") and job["expires_at"] <= utc_now_iso():
             db.expire_stale_customer_jobs(utc_now_iso())
@@ -39,24 +46,73 @@ def run_stress_simulation(db: WorkerDB, config: dict[str, Any], *, seed: int = 7
         db.increment_worker_load(decision.worker_id)
         behavior = behaviors.get(decision.worker_id, HONEST)
         receipt = simulate_worker_receipt(decision.worker_id, job, behavior, attempt=index)
-        verification = {"accepted": verify_receipt_hash(receipt) and receipt["metadata"].get("accepted"), "reason": "stress"}
+        db.insert_receipt(receipt)
+        committee = create_verification_committee(
+            db,
+            challenge_id=None,
+            assigned_worker_id=decision.worker_id,
+            committee_size=3,
+            quorum_threshold=2,
+            metadata={"epoch_id": epoch["epoch_id"], "job_id": job["job_id"]},
+        )
+        committee_result = run_verification_committee(
+            db,
+            committee,
+            receipt=receipt,
+            challenge_result={"accepted": bool(receipt["metadata"].get("accepted")), "reason": "stress"},
+        )
+        vote_counts = committee_result["metadata"].get("vote_counts", {})
+        if len([count for count in vote_counts.values() if count]) > 1:
+            verifier_disagreements += 1
+        if committee_result["result"] == ACCEPTED:
+            committee_accepted += 1
+        elif committee_result["result"] == "rejected":
+            committee_rejected += 1
+        else:
+            committee_disputed += 1
+        verification = {
+            "accepted": (
+                verify_receipt_hash(receipt)
+                and receipt["metadata"].get("accepted")
+                and committee_result["result"] == ACCEPTED
+            ),
+            "reason": "stress" if committee_result["result"] == ACCEPTED else committee_result["metadata"].get("failure_code"),
+        }
         update_worker_reputation(db, worker_id=decision.worker_id, verification=verification, receipt=receipt)
         db.decrement_worker_load(decision.worker_id)
         if verification["accepted"] and behavior != SLOW:
+            db.insert_payout_event(
+                {
+                    "event_id": str(uuid4()),
+                    "worker_id": decision.worker_id,
+                    "event_type": "inference_job",
+                    "basis": "stress_committee_accepted",
+                    "qi_amount": receipt["estimated_qi_owed"],
+                    "created_at": utc_now_iso(),
+                    "source_id": receipt["receipt_id"],
+                    "epoch_id": epoch["epoch_id"],
+                    "metadata": {"job_id": job["job_id"], "committee_id": committee_result["committee_id"]},
+                }
+            )
             db.update_customer_job_status(job["job_id"], "completed", {})
             completed += 1
             prices.append(receipt["estimated_qi_owed"])
+            settled_qi += float(receipt["estimated_qi_owed"])
         elif job["retry_count"] < 1 and behavior in {FLAKY, SLOW}:
             db.mark_customer_job_failure(job["job_id"], failures.WORKER_TIMEOUT, "simulated timeout", retrying=True)
             retried += 1
+            rejected_qi += float(receipt["estimated_qi_owed"])
         else:
-            db.mark_customer_job_failure(job["job_id"], failures.VERIFICATION_FAILED, "simulated failure")
+            db.mark_customer_job_failure(job["job_id"], verification["reason"] or failures.VERIFICATION_FAILED, "simulated failure")
             failed += 1
+            rejected_qi += float(receipt["estimated_qi_owed"])
 
+    epoch_summary = finalize_epoch(db, epoch["epoch_id"])
     all_workers = [db.get_worker(worker["worker_id"]) for worker in workers]
     best = max(all_workers, key=lambda worker: worker["success_count"])
     worst = max(all_workers, key=lambda worker: worker["failure_count"])
     malicious = db.get_worker("stress-worker-malicious")
+    total_committees = committee_accepted + committee_rejected + committee_disputed
     return {
         "completed": completed,
         "failed": failed,
@@ -68,6 +124,20 @@ def run_stress_simulation(db: WorkerDB, config: dict[str, Any], *, seed: int = 7
         "best_worker_by_completed_jobs": best["worker_id"],
         "worst_worker_by_failures": worst["worker_id"],
         "malicious_worker_penalty_observed": malicious["reputation_score"] < initial_reputations["stress-worker-malicious"],
+        "total_epochs": 1,
+        "committee_acceptance_rate": committee_accepted / total_committees if total_committees else 0.0,
+        "dispute_rate": committee_disputed / total_committees if total_committees else 0.0,
+        "verifier_disagreement_rate": verifier_disagreements / total_committees if total_committees else 0.0,
+        "settled_qi_total": round(settled_qi, 12),
+        "rejected_qi_total": round(rejected_qi, 12),
+        "malicious_verifier_penalties": 0,
+        "epoch_totals": {
+            "receipt_count": epoch_summary["receipt_count"],
+            "total_settled_qi": epoch_summary["total_settled_qi"],
+            "accepted_committee_count": epoch_summary["metadata"]["accepted_committee_count"],
+            "rejected_committee_count": epoch_summary["metadata"]["rejected_committee_count"],
+            "disputed_committee_count": epoch_summary["metadata"]["disputed_committee_count"],
+        },
     }
 
 
@@ -105,7 +175,10 @@ def _stress_workers() -> list[dict[str, Any]]:
             "average_energy_per_token": 8,
             "current_jobs": 0,
             "max_concurrent_jobs": 2,
-            "metadata": {"behavior": behavior},
+            "metadata": {
+                "behavior": behavior,
+                "malicious_verifier_vote": ACCEPTED if wid == "stress-worker-flaky" else None,
+            },
         }
         for i, (wid, behavior, models, rep) in enumerate(specs)
     ]

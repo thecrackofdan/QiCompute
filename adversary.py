@@ -16,7 +16,7 @@ DUPLICATE_SUBMITTER = "duplicate_submitter"
 
 def simulate_worker_receipt(worker_id: str, job: dict[str, Any], behavior: str, *, attempt: int = 0) -> dict[str, Any]:
     accepted = behavior not in {FLAKY, MALICIOUS_RECEIPT}
-    duration = 10 if behavior == SLOW else 1
+    duration = 10.0 if behavior == SLOW else 1.0
     if behavior == FLAKY and attempt % 2 == 0:
         accepted = False
     receipt = make_receipt(
@@ -25,9 +25,9 @@ def simulate_worker_receipt(worker_id: str, job: dict[str, Any], behavior: str, 
         started_at=utc_now_iso(),
         ended_at=utc_now_iso(),
         duration_seconds=duration,
-        average_watts=250,
+        average_watts=250.0,
         output_type="tokens",
-        output_amount=job.get("expected_output_tokens", 100),
+        output_amount=float(job.get("expected_output_tokens", 100)),
         estimated_qi_owed=0.0001 if accepted else 0,
         metadata={
             "job_id": job["job_id"],

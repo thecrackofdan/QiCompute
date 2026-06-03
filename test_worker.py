@@ -10,9 +10,18 @@ import failures
 from adversary import FLAKY, MALICIOUS_RECEIPT, duplicate_job, simulate_capability_claim, simulate_worker_receipt
 from challenges import create_challenge, verify_challenge_result
 from capabilities import compute_capability_hash, make_capability_claim, verify_capability_claim
+from committees import (
+    ACCEPTED,
+    DISPUTED,
+    REJECTED,
+    create_verification_committee,
+    run_verification_committee,
+    select_verifier_workers,
+)
 from customer_receipts import build_customer_receipt, compute_customer_receipt_hash
 from db import WorkerDB
 from envelopes import compute_envelope_hash, make_job_envelope, verify_job_envelope
+from epochs import active_epoch, finalize_epoch
 from lifecycle import transition_job_status
 from pricing import estimate_job_price
 from registry import heartbeat_local_worker
@@ -900,6 +909,15 @@ inference:
         self.assertGreater(summary1["completed"], 0)
         self.assertIn("average_final_price", summary1)
         self.assertTrue(summary1["malicious_worker_penalty_observed"])
+        self.assertEqual(summary1["total_epochs"], 1)
+        self.assertIn("committee_acceptance_rate", summary1)
+        self.assertIn("dispute_rate", summary1)
+        self.assertIn("verifier_disagreement_rate", summary1)
+        self.assertAlmostEqual(summary1["epoch_totals"]["total_settled_qi"], summary1["settled_qi_total"])
+        self.assertEqual(
+            summary1["epoch_totals"]["accepted_committee_count"],
+            summary1["completed"],
+        )
 
     def test_honest_worker_passes_deterministic_challenge(self) -> None:
         job = {"id": "challenge-job", "tokens": 20}
@@ -993,6 +1011,169 @@ inference:
             self.assertEqual(db.get_worker("test-worker")["reputation_score"], 40)
             db.close()
 
+    def test_epoch_aggregates_verified_receipts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            job_dir = Path(tmp) / "jobs"
+            job_dir.mkdir()
+            (job_dir / "job.json").write_text(
+                json.dumps({"id": "epoch-job", "input_tokens": 1, "output_tokens": 4, "seconds": 0.001}),
+                encoding="utf-8",
+            )
+            scheduler, db = self._scheduler(tmp)
+
+            receipt = scheduler.run_once()
+            epoch = db.active_epoch()
+            summary = finalize_epoch(db, epoch["epoch_id"])
+
+            self.assertEqual(summary["status"], "finalized")
+            self.assertEqual(summary["receipt_count"], 1)
+            self.assertEqual(summary["total_verified_jobs"], 1)
+            self.assertEqual(summary["total_tokens"], receipt["output"]["amount"])
+            self.assertGreater(summary["total_settled_qi"], 0)
+            self.assertIn("test-worker", summary["metadata"]["worker_totals"])
+            db.close()
+
+    def test_epoch_excludes_failed_challenge_and_duplicate_jobs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            job_dir = Path(tmp) / "jobs"
+            job_dir.mkdir()
+            scheduler, db = self._scheduler(
+                tmp,
+                challenges_config={"enabled": True, "challenge_rate": 1},
+            )
+            epoch = active_epoch(db)
+            bad_job = {
+                "id": "epoch-bad-challenge",
+                "input_tokens": 1,
+                "output_tokens": 4,
+                "seconds": 0.001,
+                "challenge_response_hash": "wrong",
+            }
+            (job_dir / "bad.json").write_text(json.dumps(bad_job), encoding="utf-8")
+            scheduler.run_once()
+            good_job = {"id": "epoch-duplicate", "input_tokens": 1, "output_tokens": 4, "seconds": 0.001}
+            (job_dir / "good-a.json").write_text(json.dumps(good_job), encoding="utf-8")
+            scheduler.run_once()
+            (job_dir / "good-b.json").write_text(json.dumps(good_job), encoding="utf-8")
+            scheduler.run_once()
+
+            summary = finalize_epoch(db, epoch["epoch_id"])
+
+            self.assertEqual(summary["receipt_count"], 1)
+            self.assertEqual(summary["total_verified_jobs"], 1)
+            self.assertEqual(summary["metadata"]["challenge_fail_count"], 0)
+            self.assertGreater(summary["total_settled_qi"], 0)
+            with self.assertRaises(ValueError):
+                finalize_epoch(db, epoch["epoch_id"])
+            db.close()
+
+    def test_quorum_accepts_valid_receipt(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            _, db = self._scheduler(tmp)
+            for worker_id, reputation in [("assigned", 90), ("v1", 80), ("v2", 70), ("v3", 60)]:
+                db.register_worker(self._worker(worker_id, reputation_score=reputation))
+            receipt = self._inference_receipt()
+            committee = create_verification_committee(
+                db,
+                challenge_id=None,
+                assigned_worker_id="assigned",
+                committee_size=3,
+                quorum_threshold=2,
+            )
+
+            result = run_verification_committee(db, committee, receipt=receipt, challenge_result={"accepted": True})
+
+            self.assertEqual(result["result"], ACCEPTED)
+            self.assertEqual(len(result["votes"]), 3)
+            self.assertNotIn("assigned", result["verifier_worker_ids"])
+            db.close()
+
+    def test_quorum_rejects_tampered_receipt(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            _, db = self._scheduler(tmp)
+            for worker_id in ["assigned", "v1", "v2", "v3"]:
+                db.register_worker(self._worker(worker_id))
+            receipt = self._inference_receipt()
+            receipt["output"]["amount"] = 999
+            committee = create_verification_committee(
+                db,
+                challenge_id=None,
+                assigned_worker_id="assigned",
+                committee_size=3,
+                quorum_threshold=2,
+            )
+
+            result = run_verification_committee(db, committee, receipt=receipt, challenge_result={"accepted": True})
+
+            self.assertEqual(result["result"], REJECTED)
+            self.assertEqual(result["metadata"]["failure_code"], failures.COMMITTEE_REJECTED)
+            db.close()
+
+    def test_split_vote_becomes_disputed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            _, db = self._scheduler(tmp)
+            for worker_id in ["assigned", "v1", "v2"]:
+                db.register_worker(self._worker(worker_id))
+            receipt = self._inference_receipt()
+            committee = create_verification_committee(
+                db,
+                challenge_id=None,
+                assigned_worker_id="assigned",
+                committee_size=2,
+                quorum_threshold=2,
+            )
+
+            result = run_verification_committee(
+                db,
+                committee,
+                receipt=receipt,
+                challenge_result={"accepted": True},
+                forced_votes={"v1": ACCEPTED, "v2": REJECTED},
+            )
+
+            self.assertEqual(result["result"], DISPUTED)
+            self.assertEqual(result["metadata"]["failure_code"], failures.COMMITTEE_DISPUTED)
+            db.close()
+
+    def test_assigned_worker_never_selected_as_verifier(self) -> None:
+        workers = [
+            self._worker("assigned", reputation_score=100),
+            self._worker("v1", reputation_score=90),
+            self._worker("v2", reputation_score=80),
+        ]
+
+        selected = select_verifier_workers(workers, assigned_worker_id="assigned", committee_size=2)
+
+        self.assertEqual(selected, ["v1", "v2"])
+
+    def test_committee_dispute_blocks_scheduler_payout(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            job_dir = Path(tmp) / "jobs"
+            job_dir.mkdir()
+            (job_dir / "job.json").write_text(
+                json.dumps({"id": "committee-blocked", "input_tokens": 1, "output_tokens": 4, "seconds": 0.001}),
+                encoding="utf-8",
+            )
+            scheduler, db = self._scheduler(
+                tmp,
+                committees_config={
+                    "enabled": True,
+                    "committee_size": 2,
+                    "quorum_threshold": 2,
+                    "forced_votes": {"v1": ACCEPTED, "v2": REJECTED},
+                },
+            )
+            db.register_worker(self._worker("test-worker", reputation_score=50))
+            db.register_worker(self._worker("v1", reputation_score=80))
+            db.register_worker(self._worker("v2", reputation_score=70))
+
+            receipt = scheduler.run_once()
+
+            self.assertEqual(receipt["metadata"]["verification"]["reason"], failures.COMMITTEE_DISPUTED)
+            self.assertEqual(db.get_settled_balance("test-worker"), 0)
+            self.assertEqual(db.get_worker("test-worker")["reputation_score"], 43)
+            db.close()
+
     def _scheduler(
         self,
         tmp: str,
@@ -1000,6 +1181,7 @@ inference:
         telemetry: object | None = None,
         cycle_seconds: float = 0.001,
         challenges_config: dict[str, object] | None = None,
+        committees_config: dict[str, object] | None = None,
     ) -> tuple[Scheduler, WorkerDB]:
         root = Path(tmp)
         config = {
@@ -1041,6 +1223,7 @@ inference:
                 "estimated_qi_per_token": 0.25,
             },
             "challenges": challenges_config or {"enabled": False, "challenge_rate": 0},
+            "committees": committees_config or {"enabled": False},
         }
         db = WorkerDB(config["worker"]["db_path"])
         telemetry = telemetry or GPUTelemetry(

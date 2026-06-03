@@ -975,6 +975,7 @@ class WorkerDB:
             (worker_id, now, lease_id, expires_at, now, job_id),
         )
         self.conn.commit()
+        self.increment_worker_load(worker_id)
         return self.get_customer_job(job_id)
 
     def expire_job_leases(self, now: str) -> int:
@@ -988,6 +989,8 @@ class WorkerDB:
             (now,),
         ).fetchall()
         for row in rows:
+            if row["assigned_worker_id"]:
+                self.decrement_worker_load(row["assigned_worker_id"])
             self.conn.execute(
                 """
                 UPDATE customer_jobs

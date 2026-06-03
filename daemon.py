@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any
 from uuid import uuid4
 
@@ -243,6 +244,33 @@ class ClusterWorkerClient:
         job = next_job.get("job")
         if not job:
             return {"accepted": True, "status": "no_job", "capability": capability, "heartbeat": heartbeat, "next_job": next_job}
+        result = self._execute_job(job, runtime_type=runtime_type)
+        return {"accepted": bool(result["submission"].get("accepted")), "status": "submitted", **result}
+
+    def run_available(self, runtime_type: str | None = None, max_jobs: int | None = None) -> list[dict[str, Any]]:
+        self.register_capability()
+        self.heartbeat()
+        slots = max_jobs or int(self.config.get("runtime", {}).get("max_concurrent_jobs", self.config.get("worker", {}).get("max_concurrent_jobs", 1)))
+        jobs = []
+        for _ in range(max(1, slots)):
+            next_job = self.next_job()
+            if not next_job.get("job"):
+                break
+            jobs.append(next_job["job"])
+        if not jobs:
+            return [{"accepted": True, "status": "no_job"}]
+        results: list[dict[str, Any]] = []
+        with ThreadPoolExecutor(max_workers=len(jobs)) as executor:
+            futures = [executor.submit(self._execute_job, job, runtime_type) for job in jobs]
+            for future in as_completed(futures):
+                try:
+                    result = future.result()
+                    results.append({"accepted": bool(result["submission"].get("accepted")), "status": "submitted", **result})
+                except Exception as exc:
+                    results.append({"accepted": False, "status": "failed", "error": str(exc)})
+        return results
+
+    def _execute_job(self, job: dict[str, Any], runtime_type: str | None = None) -> dict[str, Any]:
         runtime_cfg = dict(self.config.get("runtime", {}))
         selected_runtime_type = runtime_type or runtime_cfg.get("type", "simulated")
         self.config["runtime"] = {**runtime_cfg, "type": selected_runtime_type}
@@ -250,7 +278,7 @@ class ClusterWorkerClient:
         result = runtime.run(job, self.config)
         receipt = receipt_from_runtime_result(self.config, self.worker_id, job, result)
         submission = self.submit_receipt(receipt, lease_id=job.get("lease_id"))
-        return {"accepted": bool(submission.get("accepted")), "status": "submitted", "job": job, "receipt": receipt, "submission": submission}
+        return {"job": job, "receipt": receipt, "submission": submission}
 
 
 def main() -> None:

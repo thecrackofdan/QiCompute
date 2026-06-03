@@ -92,6 +92,9 @@ class ClusterController:
         if not receipt or not job:
             self._event("receipt", receipt.get("worker_id"), job_id, False, failures.VERIFICATION_FAILED, {"reason": "missing receipt or job"})
             return {"accepted": False, "failure_code": failures.VERIFICATION_FAILED, "reason": "missing receipt or job"}
+        if self.db.inference_job_was_paid(job["job_id"]):
+            self._event("receipt", receipt.get("worker_id"), job_id, False, failures.DUPLICATE_JOB, {"reason": "duplicate receipt"})
+            return {"accepted": False, "failure_code": failures.DUPLICATE_JOB, "reason": "job already settled"}
         if payload.get("lease_id") != job.get("lease_id"):
             self._event("receipt", receipt.get("worker_id"), job_id, False, failures.INVALID_LEASE, {"reason": "lease mismatch"})
             return {"accepted": False, "failure_code": failures.INVALID_LEASE, "reason": "lease mismatch"}
@@ -107,9 +110,10 @@ class ClusterController:
         update_worker_reputation(self.db, worker_id=receipt["worker_id"], verification=verification.to_dict(), receipt=receipt)
         if job["status"] == "routed":
             self.db.update_customer_job_status(job["job_id"], "running", {"source": "cluster-controller"})
-        if not verification.accepted or self.db.inference_job_was_paid(job["job_id"]):
-            failure_code = verification.reason if not verification.accepted else failures.DUPLICATE_JOB
+        if not verification.accepted:
+            failure_code = verification.reason
             self.db.mark_customer_job_failure(job["job_id"], failure_code, "cluster receipt rejected")
+            self.db.decrement_worker_load(receipt["worker_id"])
             self._event("receipt", receipt["worker_id"], job["job_id"], False, failure_code, verification.to_dict())
             return {"accepted": False, "failure_code": failure_code, "verification": verification.to_dict()}
         epoch = active_epoch(self.db)
@@ -133,6 +137,7 @@ class ClusterController:
             payout_event_id=payout_event["event_id"],
         )
         self.db.update_customer_job_status(job["job_id"], "completed", {"receipt_id": receipt["receipt_id"]})
+        self.db.decrement_worker_load(receipt["worker_id"])
         self._event("receipt", receipt["worker_id"], job["job_id"], True, None, {"epoch_id": epoch["epoch_id"]})
         return {"accepted": True, "job_id": job["job_id"], "receipt_id": receipt["receipt_id"], "epoch_id": epoch["epoch_id"]}
 

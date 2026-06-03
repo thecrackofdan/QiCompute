@@ -14,6 +14,7 @@ QiCompute is currently:
 - Runtime daemon with simulated, subprocess, and local Ollama support
 - Local LAN controller/worker skeleton with signed messages
 - Worker enrollment, persistent nonce replay protection, and job leases
+- Operator CLIs for enrollment, health, cluster inspection, and smoke testing
 - Receipt hashing, validation, challenge verification, and committee simulation
 - Reputation updates, retries, expiration, stress simulation, and settlement epochs
 - Mining fallback accounting with share and block reward separation
@@ -24,6 +25,7 @@ QiCompute is currently:
 - llama.cpp command/server adapter
 - GPU capability probing and model cache awareness
 - Safer execution sandbox boundaries
+- More accurate runtime slot accounting across real model runners
 
 ## Verification Roadmap
 

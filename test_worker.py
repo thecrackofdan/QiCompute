@@ -18,6 +18,7 @@ from adversary import FLAKY, MALICIOUS_RECEIPT, duplicate_job, simulate_capabili
 from challenges import create_challenge, verify_challenge_result
 from capabilities import compute_capability_hash, make_capability_claim, verify_capability_claim
 from cluster_demo import run_cluster_demo
+from cluster_ctl import command_rows, table
 from committees import (
     ACCEPTED,
     DISPUTED,
@@ -31,12 +32,14 @@ from customer_receipts import build_customer_receipt, compute_customer_receipt_h
 from daemon import ClusterWorkerClient, WorkerDaemon
 from doctor import run_checks
 from enrollment import activate_worker_enrollment, create_worker_enrollment, revoke_worker_enrollment
+from enroll import activate_worker, config_snippet, create_worker, revoke_worker, write_worker_config
 from demo import run_demo
 from demo_data import demo_prompt
 from db import WorkerDB
 from envelopes import compute_envelope_hash, make_job_envelope, verify_job_envelope
 from epochs import active_epoch, finalize_epoch
 from lifecycle import transition_job_status
+from lan_smoke_test import run_lan_smoke_test
 from logging_config import redact_payload
 from cluster_health import cluster_health
 from pricing import estimate_job_price
@@ -195,6 +198,23 @@ class WorkerPrototypeTest(unittest.TestCase):
 
             self.assertEqual(enrollment["status"], "pending")
             self.assertIsNone(db.get_worker_enrollment("worker-enroll")["shared_secret_hash"])
+            db.close()
+
+    def test_enrollment_cli_helpers_lifecycle_and_config_export(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            db = WorkerDB(str(Path(tmp) / "cluster.db"))
+            created = create_worker(db, "worker-3080-a")
+            active, secret = activate_worker(db, "worker-3080-a", "known-secret")
+            snippet = config_snippet("worker-3080-a", secret, "http://controller:8080")
+            config_path = Path(tmp) / "worker.yaml"
+            write_worker_config(str(config_path), "worker-3080-a", secret, "http://controller:8080")
+            revoked = revoke_worker(db, "worker-3080-a")
+
+            self.assertEqual(created["status"], "pending")
+            self.assertEqual(active["status"], "active")
+            self.assertIn("worker-3080-a", snippet)
+            self.assertIn("known-secret", config_path.read_text(encoding="utf-8"))
+            self.assertEqual(revoked["status"], "revoked")
             db.close()
 
     def test_activation_stores_hash_not_raw_secret(self) -> None:
@@ -373,6 +393,19 @@ class WorkerPrototypeTest(unittest.TestCase):
             self.assertGreater(result["epoch"]["total_settled_qi"], 0)
             self.assertTrue(any(event["event_type"] == "receipt" for event in result["events"]))
 
+    def test_cluster_demo_multi_worker_reassignment_metrics(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            result = run_cluster_demo(
+                db_path=str(Path(tmp) / "cluster-demo.db"),
+                worker_count=3,
+                job_count=5,
+                simulate_worker_failure=True,
+            )
+
+            self.assertEqual(result["metrics"]["jobs_completed"], 5)
+            self.assertGreaterEqual(result["metrics"]["reassigned_jobs"], 1)
+            self.assertGreater(result["metrics"]["total_settled_qi"], 0)
+
     def test_cluster_demo_does_not_persist_raw_prompt_or_output(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             result = run_cluster_demo(db_path=str(Path(tmp) / "cluster-demo.db"))
@@ -392,6 +425,89 @@ class WorkerPrototypeTest(unittest.TestCase):
             self.assertIn("total_workers", summary)
             self.assertIn("queued_jobs", summary)
             self.assertIn("active_epoch", summary)
+            db.close()
+
+    def test_cluster_ctl_table_commands(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            db = WorkerDB(str(Path(tmp) / "cluster.db"))
+            db.register_worker(self._cluster_worker("worker-ctl"))
+            rows, columns = command_rows(db, "workers")
+            text = table(rows, columns)
+
+            self.assertIn("worker_id", text)
+            self.assertIn("worker-ctl", text)
+            db.close()
+
+    def test_lan_smoke_test_runs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            result = run_lan_smoke_test(str(Path(tmp) / "smoke.db"))
+
+            self.assertTrue(result["accepted"])
+            self.assertGreaterEqual(result["jobs_completed"], 1)
+            self.assertGreater(result["total_settled_qi"], 0)
+
+    def test_concurrent_worker_processes_multiple_jobs_and_isolates_failure(self) -> None:
+        config = self._cluster_config("/tmp")
+        jobs = [
+            {"job_id": "job-a", "model": "llama-3.1-8b", "input_tokens": 1, "expected_output_tokens": 2, "lease_id": "lease-a"},
+            {"job_id": "job-b", "model": "llama-3.1-8b", "input_tokens": 1, "expected_output_tokens": 2, "lease_id": "lease-b"},
+        ]
+        original_post = daemon_module.post_json
+        original_get = daemon_module.get_json
+        submissions = []
+        try:
+            def fake_get(url: str, payload: dict[str, object], secret: str, timeout: float = 5) -> dict[str, object]:
+                return {"accepted": True, "job": jobs.pop(0) if jobs else None}
+
+            def fake_post(url: str, payload: dict[str, object], secret: str, timeout: float = 5) -> dict[str, object]:
+                submissions.append((url, payload))
+                if url.endswith("/receipt") and payload["job_id"] == "job-b":
+                    return {"accepted": False, "failure_code": failures.COMMAND_FAILED}
+                return {"accepted": True}
+
+            daemon_module.get_json = fake_get
+            daemon_module.post_json = fake_post
+            results = ClusterWorkerClient(config).run_available(runtime_type="simulated", max_jobs=2)
+        finally:
+            daemon_module.post_json = original_post
+            daemon_module.get_json = original_get
+
+        self.assertEqual(len(results), 2)
+        self.assertEqual(len([result for result in results if result["status"] == "submitted"]), 2)
+        self.assertEqual(len([result for result in results if not result["accepted"]]), 1)
+
+    def test_capacity_routing_prefers_warm_stable_worker(self) -> None:
+        job = {"job_id": "route-capacity", "model": "llama-3.1-8b", "requires_gpu": True}
+        overloaded = {**self._cluster_worker("overloaded"), "current_jobs": 2, "max_concurrent_jobs": 2}
+        cold = {**self._cluster_worker("cold"), "metadata": {"loaded_models": [], "recent_runtime_failures": 3, "tokens_per_second": 10}}
+        warm = {**self._cluster_worker("warm"), "metadata": {"loaded_models": ["llama-3.1-8b"], "recent_runtime_failures": 0, "tokens_per_second": 500}}
+
+        decision = route_inference_job(job, [overloaded, cold, warm])
+
+        self.assertEqual(decision.worker_id, "warm")
+
+    def test_worker_restart_requeues_expired_job_and_duplicate_receipt_no_double_pay(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            db = WorkerDB(str(Path(tmp) / "cluster.db"))
+            config = self._cluster_config(tmp)
+            controller = ClusterController(db, config)
+            worker = self._cluster_worker("worker-restart")
+            controller.handle_capability({"worker_id": worker["worker_id"], "worker": worker, "capability_claim": make_capability_claim(worker)})
+            db.insert_customer_job(self._customer_job("restart-job"))
+            assigned = controller.handle_next_job(worker["worker_id"])["job"]
+            db.conn.execute("UPDATE customer_jobs SET lease_expires_at = ? WHERE job_id = ?", ("2020-01-01T00:00:00Z", assigned["job_id"]))
+            db.conn.commit()
+            db.requeue_expired_leased_jobs("2020-01-01T00:00:01Z")
+            reassigned = controller.handle_next_job(worker["worker_id"])["job"]
+            result = SimulatedRuntime().run(reassigned, config)
+            receipt = daemon_module.receipt_from_runtime_result(config, worker["worker_id"], reassigned, result)
+            accepted = controller.handle_receipt({"worker_id": worker["worker_id"], "job_id": reassigned["job_id"], "lease_id": reassigned["lease_id"], "receipt": receipt})
+            duplicate = controller.handle_receipt({"worker_id": worker["worker_id"], "job_id": reassigned["job_id"], "lease_id": reassigned["lease_id"], "receipt": receipt})
+
+            self.assertTrue(accepted["accepted"])
+            self.assertFalse(duplicate["accepted"])
+            self.assertEqual(duplicate["failure_code"], failures.DUPLICATE_JOB)
+            self.assertEqual(db.get_balance(worker["worker_id"]), receipt["estimated_qi_owed"])
             db.close()
 
     def test_controller_snapshot_exports_deterministic_hash_without_raw_payloads(self) -> None:

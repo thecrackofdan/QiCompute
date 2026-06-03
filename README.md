@@ -35,6 +35,9 @@ This MVP has no smart contracts and no real payout rail. It records local receip
 - `controller.py`: local LAN controller HTTP skeleton.
 - `cluster_demo.py`: deterministic local cluster demo.
 - `transport.py`: signed JSON transport helpers.
+- `enroll.py`: LAN worker enrollment CLI.
+- `cluster_ctl.py`: operator inspection CLI.
+- `lan_smoke_test.py`: one-command local LAN validation.
 - `doctor.py`: local environment validation.
 - `benchmarks.py`: lightweight runtime benchmark stubs.
 - `logging_config.py`: privacy-preserving logging helpers.
@@ -44,6 +47,7 @@ This MVP has no smart contracts and no real payout rail. It records local receip
 - `ARCHITECTURE.md`: architecture overview.
 - `ROADMAP.md`: prototype roadmap.
 - `CONTRIBUTING.md`: contribution and privacy rules.
+- `LAN_SETUP.md`: LAN controller/worker deployment guide.
 
 ## Requirements
 
@@ -207,10 +211,39 @@ Run the deterministic single-process cluster demo:
 python3 cluster_demo.py
 ```
 
+Run a multi-worker local demo:
+
+```bash
+python3 cluster_demo.py --workers 3 --jobs 10
+python3 cluster_demo.py --workers 5 --jobs 50 --simulate-worker-failure
+```
+
 Inspect cluster health:
 
 ```bash
 python3 cluster_health.py
+```
+
+Enroll and activate a real LAN worker:
+
+```bash
+python3 enroll.py --create-worker worker-3080-a
+python3 enroll.py --activate-worker worker-3080-a --print-config
+```
+
+Inspect controller state:
+
+```bash
+python3 cluster_ctl.py workers
+python3 cluster_ctl.py jobs
+python3 cluster_ctl.py epochs
+python3 cluster_ctl.py events
+```
+
+Run the local LAN smoke test:
+
+```bash
+python3 lan_smoke_test.py
 ```
 
 Cluster transport uses standard-library HTTP plus shared-secret HMAC request signing with timestamp, nonce, and body hash. This is for local LAN development only. There is no public networking, blockchain integration, wallet integration, or cloud dependency.

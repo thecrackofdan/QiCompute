@@ -1,4 +1,5 @@
 .PHONY: test demo stress lint clean
+.PHONY: smoke
 
 PYTHON ?= python3
 
@@ -10,6 +11,9 @@ demo:
 
 stress:
 	$(PYTHON) market.py --stress-sim
+
+smoke:
+	$(PYTHON) lan_smoke_test.py
 
 lint:
 	$(PYTHON) -m compileall -q .

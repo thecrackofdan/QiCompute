@@ -119,6 +119,17 @@ def _score_worker(job: dict[str, Any], worker: dict[str, Any]) -> float:
         score -= 20 * failures / (failures + successes)
     load_percent = float(worker.get("load_percent", 0) or 0)
     score += max(0, 20 - load_percent / 5)
+    metadata = worker.get("metadata", {})
+    loaded_models = metadata.get("loaded_models", [])
+    if job.get("model") in loaded_models:
+        score += 15
+    else:
+        score -= float(metadata.get("model_load_latency_ms", 0) or 0) / 1000
+        score -= float(metadata.get("cold_load_count", 0) or 0)
+    if float(metadata.get("estimated_vram_available_gb", worker.get("total_vram_gb", 0)) or 0) < _required_vram(job):
+        score -= 25
+    score -= 5 * float(metadata.get("recent_runtime_failures", 0) or 0)
+    score += min(10, float(metadata.get("tokens_per_second", 0) or 0) / 50)
     return score
 
 

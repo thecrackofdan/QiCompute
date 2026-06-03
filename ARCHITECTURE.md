@@ -77,9 +77,13 @@ Accepted nonces are persisted in SQLite so replayed requests fail even after a c
 
 Cluster workers can be enrolled before they authenticate. Enrollment records are stored as `pending`, `active`, or `revoked`. Raw worker secrets are not stored; the controller stores only a shared-secret hash. In local demos, `cluster.allow_dev_shared_secret` can enable the configured development secret as a fallback. Main config keeps that fallback disabled.
 
+`enroll.py` provides the operator workflow for creating, activating, revoking, listing, and exporting worker config snippets.
+
 ## Job Leases
 
 The controller assigns jobs with a lease ID and lease expiration. Receipts must include the matching lease ID. Expired leases are requeued so disappeared workers do not permanently lock jobs.
+
+Worker clients can process multiple leased jobs concurrently up to configured runtime capacity. Runtime failures are isolated per job, and stale or duplicate receipts do not create a second payout.
 
 ## Controller Snapshots
 

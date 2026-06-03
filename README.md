@@ -707,6 +707,24 @@ Balances still derive only from settled payout events. Epochs are summary artifa
 
 Committee consensus gives QiCompute a local model for distributed trust. Accepted committees make work settlement-eligible. Rejected committees mark the job as failed verification. Disputed committees block payout until a future resolution path exists. If not enough verifiers are available to satisfy quorum, the result is treated as unresolved with `QUORUM_NOT_REACHED` metadata.
 
+## Performance And Scale Testing
+
+QiCompute includes local performance tools for measuring controller throughput and finding bottlenecks before larger simulations:
+
+```bash
+python3 run_tests.py --unit
+python3 run_tests.py --integration
+python3 run_tests.py --simulation
+python3 load_test.py --workers 10 --jobs 100
+python3 bottleneck_report.py --workers 25 --jobs 500
+python3 accounting_checks.py --quick
+python3 accounting_checks.py --full
+```
+
+`load_test.py` uses simulated workers and runtime execution, so it remains deterministic and does not require Ollama. Reports include jobs/sec, route and execution latency percentiles, worker utilization, settlement totals, refund totals, DB size, attack counters, and reconciliation status. Performance reports print hashes and metrics only, never raw prompts or raw outputs.
+
+SQLite indexes cover the hot local query paths for job status, leases, receipts, payout events, worker online/reputation state, routing audits, cluster events, and nonce expiry. SQLite remains a prototype/LAN storage choice, not final decentralized-scale storage.
+
 ## Useful-Work Settlement
 
 The local settlement path is now:

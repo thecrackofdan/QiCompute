@@ -84,6 +84,10 @@ from receipts import make_receipt, utc_now_iso, verify_receipt_hash
 from verifier import verify_inference_receipt
 from worker import _minimal_yaml_load, load_config
 from benchmarks import run_benchmarks
+from bottleneck_report import generate_bottleneck_report
+from load_test import print_load_report, run_load_test
+from perf import MetricsAccumulator, bottleneck_summary, percentile
+from run_tests import select_suite
 
 
 class WorkerPrototypeTest(unittest.TestCase):
@@ -97,8 +101,114 @@ class WorkerPrototypeTest(unittest.TestCase):
     def test_makefile_commands_exist(self) -> None:
         text = Path("Makefile").read_text(encoding="utf-8")
 
-        for target in ("test:", "demo:", "stress:", "lint:", "clean:"):
+        for target in (
+            "test:",
+            "test-unit:",
+            "test-integration:",
+            "test-simulation:",
+            "demo:",
+            "stress:",
+            "lint:",
+            "load-small:",
+            "load-medium:",
+            "bottleneck:",
+            "perf:",
+            "clean:",
+        ):
             self.assertIn(target, text)
+
+    def test_performance_docs_present(self) -> None:
+        text = Path("PERFORMANCE.md").read_text(encoding="utf-8")
+
+        self.assertIn("Load Tests", text)
+        self.assertIn("Bottleneck Reports", text)
+        self.assertIn("SQLite", text)
+
+    def test_run_tests_category_selection(self) -> None:
+        unit = select_suite("unit")
+        integration = select_suite("integration")
+        all_tests = select_suite("all")
+
+        self.assertGreater(unit.countTestCases(), 0)
+        self.assertGreater(integration.countTestCases(), 0)
+        self.assertGreaterEqual(all_tests.countTestCases(), unit.countTestCases())
+
+    def test_perf_percentile_and_bottleneck_helpers(self) -> None:
+        metrics = MetricsAccumulator()
+        for value in (1, 2, 3, 4):
+            metrics.add("routing", value)
+
+        self.assertEqual(percentile([1, 2, 3], 50), 2)
+        self.assertEqual(metrics.summary("routing")["p95"], percentile([1, 2, 3, 4], 95))
+        summary = bottleneck_summary({"routing": 1.0, "verification": 2.0})
+        self.assertEqual(summary["slowest_stage"], "verification")
+
+    def test_database_performance_indexes_exist(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            db = WorkerDB(str(Path(tmp) / "indexes.db"))
+            try:
+                rows = db.conn.execute(
+                    """
+                    SELECT name FROM sqlite_master
+                    WHERE type = 'index'
+                    """
+                ).fetchall()
+                names = {row["name"] for row in rows}
+            finally:
+                db.close()
+
+        for name in (
+            "idx_customer_jobs_status",
+            "idx_customer_jobs_assigned_worker_id",
+            "idx_customer_jobs_lease_expires_at",
+            "idx_customer_jobs_customer_id",
+            "idx_receipts_job_id",
+            "idx_receipts_worker_id",
+            "idx_payout_events_worker_id",
+            "idx_payout_events_epoch_id",
+            "idx_cluster_events_created_at",
+            "idx_routing_audit_logs_job_id",
+            "idx_worker_registry_online",
+            "idx_worker_registry_reputation_score",
+            "idx_transport_nonces_expires_at",
+        ):
+            self.assertIn(name, names)
+
+    def test_load_test_small_run_and_report_are_private(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            result = run_load_test(workers=2, jobs=4, db_path=str(Path(tmp) / "load.db"))
+            out = StringIO()
+            with redirect_stdout(out):
+                print_load_report(result)
+            output = out.getvalue()
+
+        self.assertEqual(result["jobs_completed"], 4)
+        self.assertGreater(result["throughput_jobs_sec"], 0)
+        self.assertIn("route_latency_p95", output)
+        self.assertNotIn("prompt", output.lower())
+        self.assertNotIn("raw_output", output.lower())
+
+    def test_bottleneck_report_generation(self) -> None:
+        report = generate_bottleneck_report(workers=2, jobs=4)
+
+        self.assertIn("slowest_stage", report)
+        self.assertIn("recommended_next_optimization", report)
+        self.assertGreaterEqual(report["jobs_completed"], 0)
+
+    def test_accounting_quick_and_full_modes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            db = WorkerDB(str(Path(tmp) / "checks.db"))
+            try:
+                quick = run_accounting_checks(db, mode="quick")
+                full = run_accounting_checks(db, mode="full")
+            finally:
+                db.close()
+
+        quick_names = {check.name for check in quick}
+        full_names = {check.name for check in full}
+        self.assertIn("treasury totals", quick_names)
+        self.assertNotIn("duplicate payout sources", quick_names)
+        self.assertIn("duplicate payout sources", full_names)
 
     def test_architecture_docs_present(self) -> None:
         text = Path("ARCHITECTURE.md").read_text(encoding="utf-8")

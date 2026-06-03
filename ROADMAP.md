@@ -82,6 +82,15 @@ QiCompute is currently:
 - Persist invoice ledgers for full replay detection
 - Replace prototype trust signals with audited security mechanisms before WAN use
 
+## Performance Roadmap
+
+- Keep categorized test runs fast enough for daily development
+- Expand synthetic load tests to model larger worker pools and queues
+- Add more detailed DB write timing around receipt and settlement hot paths
+- Cache route candidates by model and worker availability
+- Batch settlement and audit writes under high load
+- Replace SQLite with a distributed-ready storage design only after LAN behavior is well measured
+
 ## Mining Fallback Roadmap
 
 - Better mining launcher adapters

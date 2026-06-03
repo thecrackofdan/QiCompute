@@ -19,16 +19,22 @@ class AccountingCheck:
         return {"name": self.name, "status": self.status, "details": self.details}
 
 
-def run_accounting_checks(db: WorkerDB) -> list[AccountingCheck]:
+def run_accounting_checks(db: WorkerDB, mode: str = "full") -> list[AccountingCheck]:
     checks = [
         _customer_escrow_reconciles(db),
         _worker_payables_reconcile(db),
         _treasury_reconciles(db),
         _duplicate_receipts_not_paid(db),
-        _duplicate_payout_sources(db),
-        _stale_receipts_not_settled(db),
-        _replay_events_audited(db),
     ]
+    if mode == "quick":
+        return checks
+    checks.extend(
+        [
+            _duplicate_payout_sources(db),
+            _stale_receipts_not_settled(db),
+            _replay_events_audited(db),
+        ]
+    )
     return checks
 
 
@@ -118,11 +124,13 @@ def _sum(db: WorkerDB, sql: str) -> float:
 def main() -> int:
     parser = argparse.ArgumentParser(description="Check local QiCompute marketplace accounting")
     parser.add_argument("--config", default="config.yaml")
+    parser.add_argument("--quick", action="store_true", help="Run aggregate reconciliation checks only")
+    parser.add_argument("--full", action="store_true", help="Run aggregate plus replay/duplicate checks")
     args = parser.parse_args()
     config = load_config(args.config)
     db = WorkerDB(config["worker"]["db_path"])
     try:
-        checks = run_accounting_checks(db)
+        checks = run_accounting_checks(db, mode="quick" if args.quick and not args.full else "full")
         for check in checks:
             print(f"{check.status} {check.name}: {check.details}")
         return 0 if all(check.status != "FAIL" for check in checks) else 1

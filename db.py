@@ -311,6 +311,45 @@ WHERE block_hash IS NOT NULL;
 CREATE UNIQUE INDEX IF NOT EXISTS idx_receipts_receipt_hash
 ON receipts(receipt_hash)
 WHERE receipt_hash IS NOT NULL;
+
+CREATE INDEX IF NOT EXISTS idx_customer_jobs_status
+ON customer_jobs(status);
+
+CREATE INDEX IF NOT EXISTS idx_customer_jobs_assigned_worker_id
+ON customer_jobs(assigned_worker_id);
+
+CREATE INDEX IF NOT EXISTS idx_customer_jobs_lease_expires_at
+ON customer_jobs(lease_expires_at);
+
+CREATE INDEX IF NOT EXISTS idx_customer_jobs_customer_id
+ON customer_jobs(customer_id);
+
+CREATE INDEX IF NOT EXISTS idx_receipts_job_id
+ON receipts(job_id);
+
+CREATE INDEX IF NOT EXISTS idx_receipts_worker_id
+ON receipts(worker_id);
+
+CREATE INDEX IF NOT EXISTS idx_payout_events_worker_id
+ON payout_events(worker_id);
+
+CREATE INDEX IF NOT EXISTS idx_payout_events_epoch_id
+ON payout_events(epoch_id);
+
+CREATE INDEX IF NOT EXISTS idx_cluster_events_created_at
+ON cluster_events(created_at);
+
+CREATE INDEX IF NOT EXISTS idx_routing_audit_logs_job_id
+ON routing_audit_logs(job_id);
+
+CREATE INDEX IF NOT EXISTS idx_worker_registry_online
+ON worker_registry(online);
+
+CREATE INDEX IF NOT EXISTS idx_worker_registry_reputation_score
+ON worker_registry(reputation_score);
+
+CREATE INDEX IF NOT EXISTS idx_transport_nonces_expires_at
+ON transport_nonces(expires_at);
 """
 
 

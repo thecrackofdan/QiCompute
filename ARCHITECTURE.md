@@ -77,6 +77,18 @@ Escrow abuse resistance is configurable through minimum job escrow, maximum outs
 
 Committee consensus records abuse metadata: disagreement ratio, repeated verifier pair frequency, same-operator clustering, and a collusion suspicion score. These are simulation signals only; there is no staking, slashing, or production-grade Sybil resistance yet.
 
+## Performance Layer
+
+The performance layer is intentionally local and dependency-free:
+
+```text
+synthetic workers -> synthetic jobs -> routing/leases -> simulated runtime -> verification -> settlement -> metrics
+```
+
+`perf.py` provides timers, percentile calculation, metric accumulation, query timing, and bottleneck summaries. `load_test.py` runs deterministic synthetic controller load and reports throughput, latency percentiles, worker utilization, DB size, settlement totals, refund totals, and abuse counters. `bottleneck_report.py` summarizes routing, DB write, verification, committee, settlement, and execution time.
+
+SQLite indexes are installed with `CREATE INDEX IF NOT EXISTS` for the local hot paths: queued/routed jobs, assigned workers, leases, receipts, payout events, worker online/reputation scans, routing audit lookup, cluster event recency, and nonce expiry. This improves the LAN prototype but does not change the long-term need for a more distributed storage and coordination model.
+
 ## Privacy Model
 
 Strict mode is the default. Raw prompts are not stored in customer jobs, receipts, logs, audit trails, snapshots, or summaries. The local Ollama runtime may receive a prompt transiently for execution, but QiCompute stores prompt hashes, output hashes, byte counts, token counts, timing, energy estimates, and verification metadata. Raw model output is not persisted.

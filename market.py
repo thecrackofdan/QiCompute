@@ -5,6 +5,7 @@ import hashlib
 from uuid import uuid4
 
 from db import WorkerDB
+from logging_config import configure_logging, log_event
 from pricing import estimate_job_price
 from receipts import utc_now_iso
 from registry import heartbeat_local_worker, register_local_worker
@@ -30,7 +31,11 @@ def main() -> None:
     parser.add_argument("--reputation", action="store_true")
     parser.add_argument("--simulate", action="store_true")
     parser.add_argument("--stress-sim", action="store_true")
+    parser.add_argument("--verbose", action="store_true")
+    parser.add_argument("--quiet", action="store_true")
     args = parser.parse_args()
+    logger = configure_logging(verbose=args.verbose, quiet=args.quiet)
+    log_event(logger, "market.command", config=args.config)
 
     config = load_config(args.config)
     db = WorkerDB(config["worker"]["db_path"])

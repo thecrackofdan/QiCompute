@@ -1,5 +1,9 @@
 __pycache__/
 *.pyc
+.venv/
+.pytest_cache/
+*.db
+demo_worker.db
 worker.db
 jobs/
 jobs_done/

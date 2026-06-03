@@ -1,0 +1,6 @@
+Committee
+  committee_id: demo-committee-001
+  result: accepted
+  verifiers: demo-verifier-a,demo-verifier-b,demo-verifier-c
+  quorum: 2
+  vote counts: {'accepted': 3}

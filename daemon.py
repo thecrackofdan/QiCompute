@@ -10,6 +10,7 @@ from challenges import build_challenge_result, create_challenge, should_attach_c
 from committees import ACCEPTED, create_verification_committee, run_verification_committee
 from db import WorkerDB
 from epochs import active_epoch
+from logging_config import configure_logging, log_event
 from receipts import compute_receipt_hash, make_receipt, utc_now_iso
 from registry import heartbeat_local_worker, register_local_worker
 from reputation import update_worker_reputation
@@ -219,7 +220,10 @@ def main() -> None:
     parser.add_argument("--once", action="store_true")
     parser.add_argument("--loop", action="store_true")
     parser.add_argument("--runtime", choices=["simulated", "subprocess", "ollama", "ollama_placeholder", "llama_cpp_placeholder"])
+    parser.add_argument("--verbose", action="store_true")
+    parser.add_argument("--quiet", action="store_true")
     args = parser.parse_args()
+    logger = configure_logging(verbose=args.verbose, quiet=args.quiet)
 
     config = load_config(args.config)
     if args.runtime:
@@ -228,9 +232,17 @@ def main() -> None:
     try:
         daemon = WorkerDaemon(config, db)
         if args.loop:
+            log_event(logger, "daemon.loop.start", worker_id=config["worker"]["id"], runtime=args.runtime or config.get("runtime", {}).get("type"))
             daemon.run_loop(runtime_type=args.runtime)
         else:
-            daemon.run_once(runtime_type=args.runtime)
+            receipt = daemon.run_once(runtime_type=args.runtime)
+            log_event(
+                logger,
+                "daemon.once.complete",
+                worker_id=config["worker"]["id"],
+                runtime=args.runtime or config.get("runtime", {}).get("type"),
+                receipt_id=receipt.get("receipt_id") if receipt else None,
+            )
     finally:
         db.close()
 

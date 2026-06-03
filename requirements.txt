@@ -1,0 +1,3 @@
+# QiCompute is standard-library first.
+# PyYAML is optional; worker.py includes a small fallback parser for bundled configs.
+PyYAML>=6.0

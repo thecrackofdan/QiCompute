@@ -1,0 +1,17 @@
+QiCompute Local End-to-End Demo
+Settlement Epoch
+  epoch_id: demo-epoch-001
+  verified jobs: 1
+  rejected jobs: 0
+  disputed jobs: 0
+  total settled Qi: 0.000006800000
+  total rejected Qi: 0.000000000000
+  total energy joules: 0.250000
+  total tokens: 32.000000
+  average tokens/sec: 32000.000000
+Marketplace Metrics
+  jobs_submitted: 1
+  jobs_completed: 1
+  challenge_pass_rate: 1.0
+  committee_acceptance_rate: 1.0
+  runtime_type_distribution: {'ollama': 1}

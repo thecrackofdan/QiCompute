@@ -1,0 +1,8 @@
+Worker
+  worker_id: demo-worker-local
+  reputation: 51.00
+  completed jobs: 1
+  failed jobs: 0
+  committee outcomes: {}
+  average latency ms: 1.000000
+  energy efficiency J/token: 0.006250

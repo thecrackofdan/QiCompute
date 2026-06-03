@@ -25,12 +25,14 @@ from committees import (
 )
 from customer_receipts import build_customer_receipt, compute_customer_receipt_hash
 from daemon import WorkerDaemon
+from doctor import run_checks
 from demo import run_demo
 from demo_data import demo_prompt
 from db import WorkerDB
 from envelopes import compute_envelope_hash, make_job_envelope, verify_job_envelope
 from epochs import active_epoch, finalize_epoch
 from lifecycle import transition_job_status
+from logging_config import redact_payload
 from pricing import estimate_job_price
 from registry import heartbeat_local_worker
 from reputation import apply_reputation_decay, update_worker_reputation
@@ -44,9 +46,69 @@ from telemetry import GPUTelemetry
 from receipts import make_receipt, utc_now_iso, verify_receipt_hash
 from verifier import verify_inference_receipt
 from worker import _minimal_yaml_load, load_config
+from benchmarks import run_benchmarks
 
 
 class WorkerPrototypeTest(unittest.TestCase):
+    def test_doctor_runs_successfully(self) -> None:
+        results = run_checks("config.yaml")
+        statuses = {result.status for result in results}
+
+        self.assertIn("PASS", statuses)
+        self.assertNotIn("FAIL", statuses)
+
+    def test_makefile_commands_exist(self) -> None:
+        text = Path("Makefile").read_text(encoding="utf-8")
+
+        for target in ("test:", "demo:", "stress:", "lint:", "clean:"):
+            self.assertIn(target, text)
+
+    def test_architecture_docs_present(self) -> None:
+        text = Path("ARCHITECTURE.md").read_text(encoding="utf-8")
+
+        self.assertIn("customer job", text)
+        self.assertIn("challenge verification", text)
+        self.assertIn("epoch settlement", text)
+
+    def test_example_outputs_present(self) -> None:
+        examples = Path("examples")
+
+        for filename in (
+            "demo_summary.txt",
+            "epoch_summary.txt",
+            "worker_summary.txt",
+            "committee_summary.txt",
+            "failure_output.txt",
+        ):
+            self.assertTrue((examples / filename).exists())
+
+    def test_logging_redacts_raw_prompt_and_output(self) -> None:
+        redacted = redact_payload(
+            {
+                "prompt": "private prompt",
+                "nested": {"raw_output": "private output", "output_hash": "safe"},
+            }
+        )
+
+        serialized = json.dumps(redacted, sort_keys=True)
+        self.assertNotIn("private prompt", serialized)
+        self.assertNotIn("private output", serialized)
+        self.assertIn("output_hash", serialized)
+
+    def test_github_workflow_file_exists(self) -> None:
+        workflow = Path(".github/workflows/tests.yml")
+
+        self.assertTrue(workflow.exists())
+        self.assertIn("python -m unittest -v", workflow.read_text(encoding="utf-8"))
+
+    def test_benchmark_stub_runs(self) -> None:
+        results = run_benchmarks(iterations=1)
+
+        self.assertIn("simulated", results)
+        self.assertIn("subprocess", results)
+        self.assertGreater(results["simulated"]["jobs_per_second"], 0)
+        self.assertGreaterEqual(results["subprocess"]["tokens_per_second"], 0)
+
     def test_load_config_without_pyyaml_shape(self) -> None:
         config = load_config("config.yaml")
 

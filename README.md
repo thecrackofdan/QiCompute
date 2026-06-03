@@ -31,8 +31,16 @@ This MVP has no smart contracts and no real payout rail. It records local receip
 - `simulation.py`: local marketplace simulation.
 - `stress_simulation.py`: deterministic marketplace stress simulation.
 - `market.py`: local marketplace CLI.
+- `demo.py`: end-to-end local inference settlement demo.
+- `doctor.py`: local environment validation.
+- `benchmarks.py`: lightweight runtime benchmark stubs.
+- `logging_config.py`: privacy-preserving logging helpers.
 - `db.py`: SQLite schema and persistence.
 - `config.yaml`: local worker configuration.
+- `config.demo.yaml`: local Ollama demo configuration.
+- `ARCHITECTURE.md`: architecture overview.
+- `ROADMAP.md`: prototype roadmap.
+- `CONTRIBUTING.md`: contribution and privacy rules.
 
 ## Requirements
 
@@ -40,7 +48,34 @@ This MVP has no smart contracts and no real payout rail. It records local receip
 - NVIDIA drivers with `nvidia-smi` for real GPU telemetry.
 - Optional: `PyYAML`. The worker includes a small fallback parser for the provided `config.yaml`.
 
-## Quick Start
+## Quickstart
+
+Fresh clone setup:
+
+```bash
+git clone https://github.com/thecrackofdan/QiCompute.git
+cd QiCompute
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+python3 -m unittest -v
+python3 demo.py --mode honest
+```
+
+The test suite does not require Ollama. The honest demo uses local Ollama by default; if Ollama is not running, use `python3 demo.py --mode flaky` to see the failure/reputation path or run daemon tests with the simulated runtime.
+
+Useful local commands:
+
+```bash
+make test
+make demo
+make stress
+make lint
+python3 doctor.py
+python3 benchmarks.py
+```
+
+## Worker Quick Start
 
 Run one scheduler cycle:
 
@@ -93,6 +128,31 @@ Run continuously:
 ```bash
 python3 daemon.py --loop --runtime simulated
 ```
+
+## Running Local Ollama
+
+Ollama is installed separately from QiCompute. The demo defaults to the local Ollama generate endpoint:
+
+```text
+http://127.0.0.1:11434/api/generate
+```
+
+Recommended starter model:
+
+```bash
+ollama pull llama3.1:8b
+```
+
+`config.demo.yaml` uses:
+
+```yaml
+runtime:
+  type: "ollama"
+  ollama_url: "http://127.0.0.1:11434/api/generate"
+  ollama_model: "llama3.1:8b"
+```
+
+Raw prompts are sent only to the local Ollama process for inference. QiCompute does not store raw prompts or raw model outputs; it stores hashes, counts, timing, energy, and verification metadata.
 
 ## Marketplace Prototype
 

@@ -10,6 +10,7 @@ from daemon import WorkerDaemon
 from db import WorkerDB
 from demo_data import demo_job, demo_prompt, demo_workers
 from epochs import active_epoch, finalize_epoch
+from logging_config import configure_logging, log_event
 from receipts import utc_now_iso
 from registry import heartbeat_local_worker
 from router import route_and_audit_inference_job
@@ -92,8 +93,13 @@ def main() -> None:
     parser.add_argument("--mode", choices=["honest", "flaky", "malicious"], default="honest")
     parser.add_argument("--db-path")
     parser.add_argument("--keep-db", action="store_true")
+    parser.add_argument("--verbose", action="store_true")
+    parser.add_argument("--quiet", action="store_true")
     args = parser.parse_args()
+    logger = configure_logging(verbose=args.verbose, quiet=args.quiet)
+    log_event(logger, "demo.start", mode=args.mode, config=args.config)
     run_demo(mode=args.mode, config_path=args.config, db_path=args.db_path, reset_db=not args.keep_db)
+    log_event(logger, "demo.complete", mode=args.mode)
 
 
 def _latest_receipt_for_job(db: WorkerDB, job_id: str) -> dict[str, Any] | None:

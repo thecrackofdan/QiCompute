@@ -1,0 +1,14 @@
+QiCompute Local End-to-End Demo
+Job
+  job_id: demo-job-malicious
+  routed worker: demo-worker-local
+  status: failed
+  runtime type: ollama
+  verification outcome: CHALLENGE_FAILED
+  challenge outcome: CHALLENGE_FAILED
+  committee outcome: None
+  payout eligibility: False
+Marketplace Metrics
+  jobs_rejected: 1
+  settled_qi_total: 0.0
+  rejected_qi_total: 0.0000068

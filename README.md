@@ -261,6 +261,7 @@ Runtime types are local-only:
 
 - `simulated`
 - `subprocess`
+- `ollama`
 - `ollama_placeholder`
 - `llama_cpp_placeholder`
 
@@ -276,9 +277,13 @@ runtime:
   command: []
   redact_outputs: true
   store_output_hash_only: true
+  ollama_url: "http://127.0.0.1:11434/api/generate"
+  ollama_model: "llama3.1:8b"
 ```
 
-The Ollama and llama.cpp adapters are placeholders shaped for future local integrations. They do not import SDKs, start servers, or make network calls.
+The Ollama runtime calls a local Ollama endpoint with the Python standard library only. It sends the prompt to local Ollama for execution, hashes the returned text, estimates output tokens when needed, and stores only hashes/counts/timing/runtime metadata in receipts. It does not persist raw prompts or raw model output.
+
+The Ollama placeholder and llama.cpp adapter remain placeholders shaped for future local integrations. They do not import SDKs or start servers.
 
 ## Accounting Model
 

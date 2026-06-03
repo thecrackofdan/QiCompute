@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import json
+import socket
 import tempfile
 import unittest
+import urllib.error
+import urllib.request
 from pathlib import Path
 from uuid import uuid4
 
@@ -29,7 +32,7 @@ from registry import heartbeat_local_worker
 from reputation import apply_reputation_decay, update_worker_reputation
 from retry import next_retry_status, should_retry
 from router import route_and_audit_inference_job, route_inference_job
-from runtime import RuntimeResult, SimulatedRuntime, SubprocessRuntime, output_hash
+from runtime import OllamaRuntime, RuntimeResult, SimulatedRuntime, SubprocessRuntime, output_hash
 from scheduler import Scheduler
 from simulation import run_marketplace_simulation
 from stress_simulation import run_stress_simulation
@@ -1260,6 +1263,71 @@ inference:
         with self.assertRaises(ValueError):
             runtime.run(self._assigned_job("subprocess-shell"), config)
 
+    def test_ollama_runtime_success_with_mocked_response(self) -> None:
+        runtime = OllamaRuntime()
+        config = self._daemon_config(Path(tempfile.mkdtemp()))
+        config["runtime"]["type"] = "ollama"
+        job = self._assigned_job("ollama-ok")
+        job["prompt"] = "private prompt"
+        response = {"response": "private model output", "eval_count": 3}
+
+        with patched_urlopen(response):
+            result = runtime.run(job, config)
+
+        self.assertTrue(result.accepted)
+        self.assertEqual(result.output_hash, output_hash("private model output"))
+        self.assertEqual(result.output_tokens, 3)
+        self.assertEqual(result.metadata["runtime_type"], "ollama")
+        self.assertEqual(result.metadata["prompt_hash"], output_hash("private prompt"))
+
+    def test_ollama_runtime_connection_failure(self) -> None:
+        runtime = OllamaRuntime()
+        config = self._daemon_config(Path(tempfile.mkdtemp()))
+        config["runtime"]["type"] = "ollama"
+
+        with patched_urlopen_error(urllib.error.URLError("refused")):
+            result = runtime.run(self._assigned_job("ollama-offline"), config)
+
+        self.assertFalse(result.accepted)
+        self.assertEqual(result.error_code, failures.WORKER_OFFLINE)
+
+    def test_ollama_runtime_timeout(self) -> None:
+        runtime = OllamaRuntime()
+        config = self._daemon_config(Path(tempfile.mkdtemp()))
+        config["runtime"]["type"] = "ollama"
+
+        with patched_urlopen_error(socket.timeout("timeout")):
+            result = runtime.run(self._assigned_job("ollama-timeout"), config)
+
+        self.assertFalse(result.accepted)
+        self.assertEqual(result.error_code, failures.WORKER_TIMEOUT)
+
+    def test_ollama_runtime_invalid_response(self) -> None:
+        runtime = OllamaRuntime()
+        config = self._daemon_config(Path(tempfile.mkdtemp()))
+        config["runtime"]["type"] = "ollama"
+
+        with patched_urlopen_raw(b"not-json"):
+            result = runtime.run(self._assigned_job("ollama-invalid"), config)
+
+        self.assertFalse(result.accepted)
+        self.assertEqual(result.error_code, failures.RUNTIME_INVALID_RESPONSE)
+
+    def test_ollama_runtime_does_not_return_raw_prompt_or_output_metadata(self) -> None:
+        runtime = OllamaRuntime()
+        config = self._daemon_config(Path(tempfile.mkdtemp()))
+        config["runtime"]["type"] = "ollama"
+        job = self._assigned_job("ollama-private")
+        job["prompt"] = "secret prompt"
+
+        with patched_urlopen({"response": "secret output"}):
+            result = runtime.run(job, config)
+
+        metadata_json = json.dumps(result.metadata, sort_keys=True)
+        self.assertNotIn("secret prompt", metadata_json)
+        self.assertNotIn("secret output", metadata_json)
+        self.assertEqual(result.output_hash, output_hash("secret output"))
+
     def test_daemon_processes_one_assigned_job_and_creates_receipt(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             config = self._daemon_config(Path(tmp))
@@ -1295,6 +1363,26 @@ inference:
             self.assertNotIn("also private", metadata_json)
             self.assertIn("output_hash", receipt["metadata"])
             self.assertNotIn("raw_output", metadata_json)
+            db.close()
+
+    def test_daemon_handles_ollama_unavailable_without_crashing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = self._daemon_config(Path(tmp))
+            config["runtime"]["type"] = "ollama"
+            db = WorkerDB(config["worker"]["db_path"])
+            job = self._assigned_job("daemon-ollama-offline")
+            job["metadata"] = {"safe": "value"}
+            db.insert_customer_job(job)
+            daemon = WorkerDaemon(config, db, FixedTelemetry([100]))
+
+            with patched_urlopen_error(urllib.error.URLError("refused")):
+                receipt = daemon.run_once(runtime_type="ollama")
+
+            stored = db.get_customer_job("daemon-ollama-offline")
+            self.assertIsNotNone(receipt)
+            self.assertEqual(stored["status"], "failed")
+            self.assertEqual(stored["last_failure_code"], failures.WORKER_OFFLINE)
+            self.assertEqual(receipt["metadata"]["runtime"]["error_code"], failures.WORKER_OFFLINE)
             db.close()
 
     def test_output_hash_is_deterministic(self) -> None:
@@ -1545,6 +1633,59 @@ class FixedTelemetry(GPUTelemetry):
             }
             for index, watts in enumerate(self.watts)
         ]
+
+
+class MockHTTPResponse:
+    def __init__(self, payload: bytes):
+        self.payload = payload
+
+    def __enter__(self) -> "MockHTTPResponse":
+        return self
+
+    def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
+        return None
+
+    def read(self) -> bytes:
+        return self.payload
+
+
+class patched_urlopen:
+    def __init__(self, payload: dict[str, object]):
+        self.payload = json.dumps(payload).encode("utf-8")
+        self.original = urllib.request.urlopen
+
+    def __enter__(self) -> None:
+        urllib.request.urlopen = lambda request, timeout=None: MockHTTPResponse(self.payload)
+
+    def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
+        urllib.request.urlopen = self.original
+
+
+class patched_urlopen_raw:
+    def __init__(self, payload: bytes):
+        self.payload = payload
+        self.original = urllib.request.urlopen
+
+    def __enter__(self) -> None:
+        urllib.request.urlopen = lambda request, timeout=None: MockHTTPResponse(self.payload)
+
+    def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
+        urllib.request.urlopen = self.original
+
+
+class patched_urlopen_error:
+    def __init__(self, error: Exception):
+        self.error = error
+        self.original = urllib.request.urlopen
+
+    def __enter__(self) -> None:
+        def raise_error(request: object, timeout: object = None) -> object:
+            raise self.error
+
+        urllib.request.urlopen = raise_error
+
+    def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
+        urllib.request.urlopen = self.original
 
 
 if __name__ == "__main__":

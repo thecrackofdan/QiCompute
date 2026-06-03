@@ -5,6 +5,7 @@ from typing import Any
 from runtime import (
     BaseRuntime,
     LlamaCppPlaceholderRuntime,
+    OllamaRuntime,
     OllamaPlaceholderRuntime,
     RuntimeResult,
     SimulatedRuntime,
@@ -20,11 +21,13 @@ class SubprocessRunner(SubprocessRuntime):
     pass
 
 
-class OllamaRunner(OllamaPlaceholderRuntime):
+class OllamaRunner(OllamaRuntime):
     def run(self, job: dict[str, Any], config: dict[str, Any]) -> RuntimeResult:
-        if not config.get("runtime", {}).get("ollama_endpoint"):
-            return super().run(job, config)
         return super().run(job, config)
+
+
+class OllamaPlaceholderRunner(OllamaPlaceholderRuntime):
+    pass
 
 
 class LlamaCppRunner(LlamaCppPlaceholderRuntime):
@@ -38,7 +41,8 @@ def runner_for_type(runtime_type: str) -> BaseRuntime:
     runners: dict[str, BaseRuntime] = {
         "simulated": SimulatedRunner(),
         "subprocess": SubprocessRunner(),
-        "ollama_placeholder": OllamaRunner(),
+        "ollama": OllamaRunner(),
+        "ollama_placeholder": OllamaPlaceholderRunner(),
         "llama_cpp_placeholder": LlamaCppRunner(),
     }
     if runtime_type not in runners:

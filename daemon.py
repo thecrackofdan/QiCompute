@@ -53,7 +53,7 @@ class WorkerDaemon:
                 verification=verification.to_dict(),
                 receipt=receipt,
             )
-            if verification.accepted:
+            if result.accepted and verification.accepted:
                 self.db.update_customer_job_status(job["job_id"], "completed", {"receipt_id": receipt["receipt_id"]})
             else:
                 self.db.mark_customer_job_failure(
@@ -113,7 +113,7 @@ def main() -> None:
     parser.add_argument("--config", default="config.yaml")
     parser.add_argument("--once", action="store_true")
     parser.add_argument("--loop", action="store_true")
-    parser.add_argument("--runtime", choices=["simulated", "subprocess", "ollama_placeholder", "llama_cpp_placeholder"])
+    parser.add_argument("--runtime", choices=["simulated", "subprocess", "ollama", "ollama_placeholder", "llama_cpp_placeholder"])
     args = parser.parse_args()
 
     config = load_config(args.config)

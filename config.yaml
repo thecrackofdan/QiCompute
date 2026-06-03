@@ -48,6 +48,8 @@ runtime:
   command: []
   redact_outputs: true
   store_output_hash_only: true
+  ollama_url: "http://127.0.0.1:11434/api/generate"
+  ollama_model: "llama3.1:8b"
 
 pricing:
   base_input_token_rate_qi: 0.00000005

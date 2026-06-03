@@ -1,8 +1,12 @@
 from __future__ import annotations
 
 import hashlib
+import json
+import socket
 import subprocess
 import time
+import urllib.error
+import urllib.request
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
@@ -136,6 +140,123 @@ class SubprocessRuntime(BaseRuntime):
         )
 
 
+class OllamaRuntime(BaseRuntime):
+    runtime_type = "ollama"
+
+    def can_run(self, job: dict[str, Any], worker: dict[str, Any]) -> bool:
+        return True
+
+    def run(self, job: dict[str, Any], config: dict[str, Any]) -> RuntimeResult:
+        runtime_cfg = config.get("runtime", {})
+        url = runtime_cfg.get("ollama_url", "http://127.0.0.1:11434/api/generate")
+        model = runtime_cfg.get("ollama_model") or job.get("model")
+        prompt = job.get("prompt", "")
+        timeout = float(job.get("timeout_seconds", runtime_cfg.get("timeout_seconds", 300)))
+        started = utc_now_iso()
+        start_time = time.monotonic()
+
+        if not url or not model:
+            return _runtime_result(
+                job=job,
+                config=config,
+                started_at=started,
+                duration_seconds=0.0,
+                output_tokens=0.0,
+                output_hash=_hash_text(""),
+                exit_code=None,
+                accepted=False,
+                error_code=failures.RUNTIME_NOT_CONFIGURED,
+                error_message="ollama url or model is not configured",
+                metadata={"configured": False, "ollama_url_configured": bool(url), "ollama_model_configured": bool(model)},
+            )
+
+        body = json.dumps({"model": model, "prompt": prompt, "stream": False}).encode("utf-8")
+        request = urllib.request.Request(
+            str(url),
+            data=body,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=timeout) as response:
+                raw = response.read()
+            payload = json.loads(raw.decode("utf-8"))
+            text = _ollama_response_text(payload)
+            if text is None:
+                return _ollama_failure(
+                    job,
+                    config,
+                    started,
+                    start_time,
+                    failures.RUNTIME_INVALID_RESPONSE,
+                    "ollama response missing response text",
+                    {"response_bytes": len(raw)},
+                )
+            output_tokens = float(
+                payload.get("eval_count")
+                or payload.get("output_tokens")
+                or _count_tokens(text)
+            )
+            return _runtime_result(
+                job={**job, "model": str(model)},
+                config=config,
+                started_at=started,
+                duration_seconds=time.monotonic() - start_time,
+                output_tokens=output_tokens,
+                output_hash=_hash_text(text),
+                exit_code=0,
+                accepted=True,
+                error_code=None,
+                error_message=None,
+                metadata={
+                    "ollama_url": str(url),
+                    "ollama_model": str(model),
+                    "response_bytes": len(raw),
+                    "prompt_hash": _hash_text(str(prompt)),
+                },
+            )
+        except TimeoutError:
+            return _ollama_failure(
+                job,
+                config,
+                started,
+                start_time,
+                failures.WORKER_TIMEOUT,
+                f"ollama request timed out after {timeout} seconds",
+                {"timeout_seconds": timeout},
+            )
+        except socket.timeout:
+            return _ollama_failure(
+                job,
+                config,
+                started,
+                start_time,
+                failures.WORKER_TIMEOUT,
+                f"ollama request timed out after {timeout} seconds",
+                {"timeout_seconds": timeout},
+            )
+        except urllib.error.URLError as exc:
+            return _ollama_failure(
+                job,
+                config,
+                started,
+                start_time,
+                failures.WORKER_OFFLINE,
+                "local ollama endpoint is unavailable",
+                {"error_type": type(exc.reason).__name__ if hasattr(exc, "reason") else type(exc).__name__},
+            )
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            return _ollama_failure(
+                job,
+                config,
+                started,
+                start_time,
+                failures.RUNTIME_INVALID_RESPONSE,
+                "ollama returned invalid JSON",
+                {},
+            )
+
+
 class OllamaPlaceholderRuntime(BaseRuntime):
     runtime_type = "ollama_placeholder"
 
@@ -160,6 +281,7 @@ def runtime_for_type(runtime_type: str) -> BaseRuntime:
     runtimes: dict[str, BaseRuntime] = {
         "simulated": SimulatedRuntime(),
         "subprocess": SubprocessRuntime(),
+        "ollama": OllamaRuntime(),
         "ollama_placeholder": OllamaPlaceholderRuntime(),
         "llama_cpp_placeholder": LlamaCppPlaceholderRuntime(),
     }
@@ -231,10 +353,41 @@ def _not_configured_result(job: dict[str, Any], config: dict[str, Any], runtime_
         output_hash=_hash_text(""),
         exit_code=None,
         accepted=False,
-        error_code=failures.COMMAND_FAILED,
+        error_code=failures.RUNTIME_NOT_CONFIGURED,
         error_message=message,
         metadata={"configured": False},
     )
+
+
+def _ollama_failure(
+    job: dict[str, Any],
+    config: dict[str, Any],
+    started_at: str,
+    start_time: float,
+    error_code: str,
+    error_message: str,
+    metadata: dict[str, Any],
+) -> RuntimeResult:
+    return _runtime_result(
+        job=job,
+        config=config,
+        started_at=started_at,
+        duration_seconds=time.monotonic() - start_time,
+        output_tokens=0.0,
+        output_hash=_hash_text(""),
+        exit_code=None,
+        accepted=False,
+        error_code=error_code,
+        error_message=error_message,
+        metadata=metadata,
+    )
+
+
+def _ollama_response_text(payload: Any) -> str | None:
+    if not isinstance(payload, dict):
+        return None
+    value = payload.get("response")
+    return value if isinstance(value, str) else None
 
 
 def _stable_output(job: dict[str, Any], output_tokens: float) -> str:

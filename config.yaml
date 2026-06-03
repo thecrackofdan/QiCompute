@@ -41,6 +41,14 @@ inference:
   estimated_qi_per_input_token: 0.00000005
   estimated_qi_per_output_token: 0.0000002
 
+runtime:
+  type: "simulated"
+  timeout_seconds: 300
+  max_concurrent_jobs: 1
+  command: []
+  redact_outputs: true
+  store_output_hash_only: true
+
 pricing:
   base_input_token_rate_qi: 0.00000005
   base_output_token_rate_qi: 0.0000002

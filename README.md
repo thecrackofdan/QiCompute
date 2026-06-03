@@ -8,6 +8,9 @@ This MVP has no smart contracts and no real payout rail. It records local receip
 
 - `worker.py`: CLI entrypoint and config loading.
 - `scheduler.py`: mode selection, placeholder launchers, accounting.
+- `daemon.py`: local worker execution daemon for assigned jobs.
+- `runtime.py`: runtime result structure and local runtime implementations.
+- `runners.py`: lightweight model runner adapters.
 - `telemetry.py`: GPU telemetry via `nvidia-smi`, with fallback watts when unavailable.
 - `receipts.py`: local job receipt format.
 - `verifier.py`: local inference receipt validation.
@@ -77,6 +80,18 @@ Run smoke tests:
 
 ```bash
 python3 -m unittest -v
+```
+
+Run the local worker daemon once:
+
+```bash
+python3 daemon.py --once --runtime simulated
+```
+
+Run continuously:
+
+```bash
+python3 daemon.py --loop --runtime simulated
 ```
 
 ## Marketplace Prototype
@@ -237,6 +252,33 @@ inference:
 ```
 
 An individual job may also specify a `command` and `timeout_seconds`.
+
+## Local Runtime Boundary
+
+The daemon separates marketplace control-plane state from local execution. It polls SQLite for jobs assigned to the local worker, marks them running, executes through a selected runtime, creates a receipt, verifies it, updates reputation, and moves the job to completed or failed.
+
+Runtime types are local-only:
+
+- `simulated`
+- `subprocess`
+- `ollama_placeholder`
+- `llama_cpp_placeholder`
+
+The subprocess runtime requires commands as argument lists and runs with `shell=False`. It captures stdout/stderr, enforces timeouts, hashes stdout as `output_hash`, and maps timeout/nonzero exits to structured failure codes. Raw prompts and raw model outputs are not stored by default.
+
+Runtime config:
+
+```yaml
+runtime:
+  type: "simulated"
+  timeout_seconds: 300
+  max_concurrent_jobs: 1
+  command: []
+  redact_outputs: true
+  store_output_hash_only: true
+```
+
+The Ollama and llama.cpp adapters are placeholders shaped for future local integrations. They do not import SDKs, start servers, or make network calls.
 
 ## Accounting Model
 

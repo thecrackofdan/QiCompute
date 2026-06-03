@@ -19,6 +19,7 @@ from committees import (
     select_verifier_workers,
 )
 from customer_receipts import build_customer_receipt, compute_customer_receipt_hash
+from daemon import WorkerDaemon
 from db import WorkerDB
 from envelopes import compute_envelope_hash, make_job_envelope, verify_job_envelope
 from epochs import active_epoch, finalize_epoch
@@ -28,6 +29,7 @@ from registry import heartbeat_local_worker
 from reputation import apply_reputation_decay, update_worker_reputation
 from retry import next_retry_status, should_retry
 from router import route_and_audit_inference_job, route_inference_job
+from runtime import RuntimeResult, SimulatedRuntime, SubprocessRuntime, output_hash
 from scheduler import Scheduler
 from simulation import run_marketplace_simulation
 from stress_simulation import run_stress_simulation
@@ -1174,6 +1176,131 @@ inference:
             self.assertEqual(db.get_worker("test-worker")["reputation_score"], 43)
             db.close()
 
+    def test_runtime_result_structure(self) -> None:
+        result = RuntimeResult(
+            job_id="runtime-job",
+            worker_id="worker-a",
+            model="llama-3.1-8b",
+            started_at=utc_now_iso(),
+            ended_at=utc_now_iso(),
+            duration_seconds=1,
+            input_tokens=1,
+            output_tokens=2,
+            output_hash=output_hash("output"),
+            exit_code=0,
+            accepted=True,
+            error_code=None,
+            error_message=None,
+            metadata={"runtime_type": "test"},
+        )
+
+        data = result.to_dict()
+
+        self.assertEqual(data["job_id"], "runtime-job")
+        self.assertEqual(data["output_hash"], output_hash("output"))
+        self.assertTrue(data["accepted"])
+
+    def test_simulated_runtime_success(self) -> None:
+        runtime = SimulatedRuntime()
+        _, db = self._scheduler(tempfile.mkdtemp())
+        config = self._daemon_config(Path(db.path).parent)
+        job = self._assigned_job("sim-runtime")
+
+        result = runtime.run(job, config)
+
+        self.assertTrue(result.accepted)
+        self.assertEqual(result.job_id, "sim-runtime")
+        self.assertEqual(result.output_tokens, job["expected_output_tokens"])
+        self.assertEqual(result.metadata["runtime_type"], "simulated")
+        db.close()
+
+    def test_subprocess_runtime_success(self) -> None:
+        runtime = SubprocessRuntime()
+        config = self._daemon_config(Path(tempfile.mkdtemp()))
+        config["runtime"]["type"] = "subprocess"
+        config["runtime"]["command"] = ["python3", "-c", "print('hello runtime')"]
+        job = self._assigned_job("subprocess-ok")
+
+        result = runtime.run(job, config)
+
+        self.assertTrue(result.accepted)
+        self.assertEqual(result.exit_code, 0)
+        self.assertEqual(result.output_hash, output_hash("hello runtime\n"))
+
+    def test_subprocess_runtime_timeout(self) -> None:
+        runtime = SubprocessRuntime()
+        config = self._daemon_config(Path(tempfile.mkdtemp()))
+        config["runtime"]["type"] = "subprocess"
+        config["runtime"]["timeout_seconds"] = 0.01
+        config["runtime"]["command"] = ["python3", "-c", "import time; time.sleep(1)"]
+
+        result = runtime.run(self._assigned_job("subprocess-timeout"), config)
+
+        self.assertFalse(result.accepted)
+        self.assertEqual(result.error_code, failures.WORKER_TIMEOUT)
+
+    def test_subprocess_runtime_nonzero_failure(self) -> None:
+        runtime = SubprocessRuntime()
+        config = self._daemon_config(Path(tempfile.mkdtemp()))
+        config["runtime"]["type"] = "subprocess"
+        config["runtime"]["command"] = ["python3", "-c", "import sys; sys.exit(7)"]
+
+        result = runtime.run(self._assigned_job("subprocess-fail"), config)
+
+        self.assertFalse(result.accepted)
+        self.assertEqual(result.exit_code, 7)
+        self.assertEqual(result.error_code, failures.COMMAND_FAILED)
+
+    def test_subprocess_runtime_rejects_shell_string(self) -> None:
+        runtime = SubprocessRuntime()
+        config = self._daemon_config(Path(tempfile.mkdtemp()))
+        config["runtime"]["type"] = "subprocess"
+        config["runtime"]["command"] = "echo unsafe"
+
+        with self.assertRaises(ValueError):
+            runtime.run(self._assigned_job("subprocess-shell"), config)
+
+    def test_daemon_processes_one_assigned_job_and_creates_receipt(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = self._daemon_config(Path(tmp))
+            db = WorkerDB(config["worker"]["db_path"])
+            job = self._assigned_job("daemon-job")
+            job["metadata"] = {"raw_prompt": "secret prompt", "visible": "ok"}
+            db.insert_customer_job(job)
+            daemon = WorkerDaemon(config, db, FixedTelemetry([100]))
+
+            receipt = daemon.run_once(runtime_type="simulated")
+
+            stored = db.get_customer_job("daemon-job")
+            receipts = db.recent_receipts(1)
+            self.assertIsNotNone(receipt)
+            self.assertEqual(stored["status"], "completed")
+            self.assertEqual(receipts[0]["receipt_id"], receipt["receipt_id"])
+            self.assertEqual(db.get_worker("test-worker")["current_jobs"], 0)
+            db.close()
+
+    def test_daemon_does_not_store_raw_prompt_or_output(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = self._daemon_config(Path(tmp))
+            db = WorkerDB(config["worker"]["db_path"])
+            job = self._assigned_job("daemon-private")
+            job["metadata"] = {"raw_prompt": "do not store this", "prompt": "also private"}
+            db.insert_customer_job(job)
+            daemon = WorkerDaemon(config, db, FixedTelemetry([100]))
+
+            receipt = daemon.run_once(runtime_type="simulated")
+
+            metadata_json = json.dumps(receipt["metadata"], sort_keys=True)
+            self.assertNotIn("do not store this", metadata_json)
+            self.assertNotIn("also private", metadata_json)
+            self.assertIn("output_hash", receipt["metadata"])
+            self.assertNotIn("raw_output", metadata_json)
+            db.close()
+
+    def test_output_hash_is_deterministic(self) -> None:
+        self.assertEqual(output_hash("same output"), output_hash("same output"))
+        self.assertNotEqual(output_hash("same output"), output_hash("different output"))
+
     def _scheduler(
         self,
         tmp: str,
@@ -1221,6 +1348,14 @@ inference:
                 "default_tokens": 10,
                 "seconds_per_job": 0.001,
                 "estimated_qi_per_token": 0.25,
+            },
+            "runtime": {
+                "type": "simulated",
+                "timeout_seconds": 300,
+                "max_concurrent_jobs": 1,
+                "command": [],
+                "redact_outputs": True,
+                "store_output_hash_only": True,
             },
             "challenges": challenges_config or {"enabled": False, "challenge_rate": 0},
             "committees": committees_config or {"enabled": False},
@@ -1338,6 +1473,47 @@ inference:
             "created_at": utc_now_iso(),
             "expires_at": "9999-01-01T00:00:00+00:00",
             "metadata": {},
+        }
+
+    def _assigned_job(self, job_id: str) -> dict[str, object]:
+        job = self._customer_job(job_id)
+        job["status"] = "routed"
+        job["assigned_worker_id"] = "test-worker"
+        job["route_score"] = 1.0
+        return job
+
+    def _daemon_config(self, root: Path) -> dict[str, object]:
+        return {
+            "worker": {
+                "id": "test-worker",
+                "operator": "test-operator",
+                "public_key": "placeholder-test-key",
+                "region": "test-region",
+                "hardware_profile": {
+                    "gpu_count": 1,
+                    "gpu_names": ["test-gpu"],
+                    "total_vram_gb": 24,
+                    "total_watts_capacity": 100,
+                },
+                "supported_modes": ["inference", "mining"],
+                "supported_models": ["llama-3.1-8b"],
+                "db_path": str(root / "worker.db"),
+                "fallback_watts": 100,
+                "loop_interval_seconds": 0.001,
+            },
+            "telemetry": {"nvidia_smi_path": "definitely-not-nvidia-smi"},
+            "inference": {
+                "estimated_qi_per_input_token": 0.25,
+                "estimated_qi_per_output_token": 0.25,
+            },
+            "runtime": {
+                "type": "simulated",
+                "timeout_seconds": 300,
+                "max_concurrent_jobs": 1,
+                "command": [],
+                "redact_outputs": True,
+                "store_output_hash_only": True,
+            },
         }
 
     def _envelope(self) -> dict[str, object]:

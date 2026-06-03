@@ -945,6 +945,19 @@ class WorkerDB:
         )
         return [_customer_job_row_to_dict(row) for row in rows]
 
+    def list_assigned_jobs(self, worker_id: str, limit: int = 10) -> list[dict[str, Any]]:
+        rows = self.conn.execute(
+            """
+            SELECT * FROM customer_jobs
+            WHERE status = 'routed'
+              AND assigned_worker_id = ?
+            ORDER BY created_at ASC
+            LIMIT ?
+            """,
+            (worker_id, limit),
+        )
+        return [_customer_job_row_to_dict(row) for row in rows]
+
     def expire_stale_customer_jobs(self, now: str) -> int:
         rows = self.conn.execute(
             """

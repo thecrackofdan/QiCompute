@@ -1,0 +1,8 @@
+{
+  "workers": 2,
+  "jobs_submitted": 4,
+  "expected_completed_min": 1,
+  "accounting_reconciliation": "PASS",
+  "prompt_redacted": true,
+  "output_redacted": true
+}

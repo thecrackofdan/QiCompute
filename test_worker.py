@@ -85,9 +85,12 @@ from verifier import verify_inference_receipt
 from worker import _minimal_yaml_load, load_config
 from benchmarks import run_benchmarks
 from bottleneck_report import generate_bottleneck_report
+from determinism import run_determinism_checks
+from dev_health import generate_dev_health
 from load_test import print_load_report, run_load_test
 from perf import MetricsAccumulator, bottleneck_summary, percentile
-from run_tests import select_suite
+from reliability_report import generate_reliability_report
+from run_tests import categorized_tests, select_suite, validate_categories
 
 
 class WorkerPrototypeTest(unittest.TestCase):
@@ -106,6 +109,8 @@ class WorkerPrototypeTest(unittest.TestCase):
             "test-unit:",
             "test-integration:",
             "test-simulation:",
+            "test-slow:",
+            "test-profile:",
             "demo:",
             "stress:",
             "lint:",
@@ -113,9 +118,22 @@ class WorkerPrototypeTest(unittest.TestCase):
             "load-medium:",
             "bottleneck:",
             "perf:",
+            "determinism:",
+            "reliability:",
+            "dev-health:",
             "clean:",
         ):
             self.assertIn(target, text)
+
+    def test_ci_workflows_exist(self) -> None:
+        self.assertTrue(Path(".github/workflows/smoke.yml").exists())
+        self.assertTrue(Path(".github/workflows/full_validation.yml").exists())
+        smoke = Path(".github/workflows/smoke.yml").read_text(encoding="utf-8")
+        full = Path(".github/workflows/full_validation.yml").read_text(encoding="utf-8")
+
+        self.assertIn("python run_tests.py --smoke", smoke)
+        self.assertIn("python -m unittest -v", full)
+        self.assertIn("upload-artifact", full)
 
     def test_performance_docs_present(self) -> None:
         text = Path("PERFORMANCE.md").read_text(encoding="utf-8")
@@ -124,14 +142,38 @@ class WorkerPrototypeTest(unittest.TestCase):
         self.assertIn("Bottleneck Reports", text)
         self.assertIn("SQLite", text)
 
+    def test_development_docs_present(self) -> None:
+        text = Path("DEVELOPMENT.md").read_text(encoding="utf-8")
+
+        self.assertIn("Test Categories", text)
+        self.assertIn("Determinism", text)
+        self.assertIn("Reliability Reports", text)
+
     def test_run_tests_category_selection(self) -> None:
+        smoke = select_suite("smoke")
         unit = select_suite("unit")
         integration = select_suite("integration")
         all_tests = select_suite("all")
 
+        self.assertGreater(smoke.countTestCases(), 0)
         self.assertGreater(unit.countTestCases(), 0)
         self.assertGreater(integration.countTestCases(), 0)
         self.assertGreaterEqual(all_tests.countTestCases(), unit.countTestCases())
+        self.assertEqual(validate_categories(), [])
+        self.assertTrue(all(item.categories for item in categorized_tests()))
+
+    def test_regression_fixtures_present_and_redacted(self) -> None:
+        for filename in (
+            "epoch_summary.json",
+            "invoice_summary.json",
+            "cluster_snapshot.json",
+            "settlement_example.json",
+            "load_test_sample.json",
+        ):
+            text = (Path("fixtures") / filename).read_text(encoding="utf-8")
+            self.assertNotIn("raw_prompt", text)
+            self.assertNotIn("raw_output", text)
+            self.assertNotIn("shared_secret", text)
 
     def test_perf_percentile_and_bottleneck_helpers(self) -> None:
         metrics = MetricsAccumulator()
@@ -209,6 +251,29 @@ class WorkerPrototypeTest(unittest.TestCase):
         self.assertIn("treasury totals", quick_names)
         self.assertNotIn("duplicate payout sources", quick_names)
         self.assertIn("duplicate payout sources", full_names)
+
+    def test_determinism_checks(self) -> None:
+        result = run_determinism_checks(seed=9)
+
+        self.assertTrue(result["accepted"])
+        self.assertTrue(result["simulation"]["same_seed_equal"])
+        self.assertTrue(result["simulation"]["different_seed_differs"])
+        self.assertTrue(result["epochs"]["same_seed_equal"])
+        self.assertTrue(result["invoices"]["same_invoice_equal"])
+
+    def test_reliability_report_generation(self) -> None:
+        report = generate_reliability_report()
+
+        self.assertEqual(report["status"], "PASS")
+        self.assertIn("test_counts", report)
+        self.assertEqual(report["settlement_reconciliation"], "PASS")
+
+    def test_dev_health_report_generation(self) -> None:
+        report = generate_dev_health()
+
+        self.assertGreater(report["test_count"], 0)
+        self.assertEqual(report["accounting_status"], "PASS")
+        self.assertEqual(report["reliability_status"], "PASS")
 
     def test_architecture_docs_present(self) -> None:
         text = Path("ARCHITECTURE.md").read_text(encoding="utf-8")

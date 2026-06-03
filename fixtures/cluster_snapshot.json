@@ -1,0 +1,8 @@
+{
+  "workers": 2,
+  "active_jobs": 0,
+  "outstanding_leases": 0,
+  "recent_cluster_events": 3,
+  "prompt_redacted": true,
+  "output_redacted": true
+}

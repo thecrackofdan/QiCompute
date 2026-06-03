@@ -1,0 +1,10 @@
+{
+  "invoice_type": "customer",
+  "job_id": "fixture-job",
+  "customer_id": "fixture-customer",
+  "worker_id": "fixture-worker",
+  "settled_qi": 0.0000068,
+  "fee_qi": 0.00000017,
+  "refund_qi": 0.0,
+  "status": "settled"
+}

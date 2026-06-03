@@ -2,6 +2,17 @@
 
 QiCompute values deterministic behavior over maximum speed. The project is simulation-heavy, accounting-heavy, and privacy-sensitive, so development workflows are designed to catch drift early without forcing every edit loop to run the full suite.
 
+## Current Status
+
+QiCompute v0.1.0 is an experimental MVP. Development should preserve clear prototype boundaries: no production security claims, no public networking assumptions, no blockchain settlement, and no raw prompt/output persistence.
+
+Version metadata lives in `VERSION`. Release readiness can be checked with:
+
+```bash
+python3 release_check.py
+python3 license_check.py
+```
+
 ## Test Categories
 
 Run smoke tests for quick contributor feedback:

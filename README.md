@@ -4,6 +4,20 @@ Local Python prototype for a unified Qi compute/mining pool worker. It runs on a
 
 This MVP has no smart contracts and no real payout rail. It records local receipts, telemetry, estimated energy usage, output, and estimated Qi owed in SQLite.
 
+## Current Status
+
+QiCompute v0.1.0 is an experimental MVP. It is a privacy-first compute marketplace prototype with local useful-work verification, LAN worker orchestration, settlement accounting, abuse simulation, and reliability tooling.
+
+It is not production-ready, not a blockchain, not a token, not a wallet, not public networking infrastructure, and not audited security software. Current cluster mode uses trusted LAN controller assumptions.
+
+Version information lives in `VERSION` and can be printed with:
+
+```bash
+python3 version.py
+```
+
+The project is released under the MIT License. See `LICENSE`.
+
 ## Components
 
 - `worker.py`: CLI entrypoint and config loading.
@@ -48,6 +62,13 @@ This MVP has no smart contracts and no real payout rail. It records local receip
 - `ROADMAP.md`: prototype roadmap.
 - `CONTRIBUTING.md`: contribution and privacy rules.
 - `LAN_SETUP.md`: LAN controller/worker deployment guide.
+- `MVP.md`: MVP scope definition.
+- `CHANGELOG.md`: release history.
+- `SECURITY.md`: security and responsible disclosure guidance.
+- `PROJECT_INFO.md`: goals, non-goals, and design principles.
+- `SHOWCASE.md`: short demo walkthrough.
+- `PERFORMANCE.md`: performance and load-test guide.
+- `DEVELOPMENT.md`: test, CI, determinism, and reliability workflow.
 
 ## Requirements
 

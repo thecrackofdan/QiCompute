@@ -1,6 +1,6 @@
 .PHONY: test test-smoke test-unit test-integration test-simulation test-slow test-profile demo stress lint clean
 .PHONY: smoke
-.PHONY: load-small load-medium bottleneck perf determinism reliability dev-health
+.PHONY: load-small load-medium bottleneck perf determinism reliability dev-health release-check license-check
 
 PYTHON ?= python3
 
@@ -57,6 +57,12 @@ reliability:
 
 dev-health:
 	$(PYTHON) dev_health.py
+
+release-check:
+	$(PYTHON) release_check.py
+
+license-check:
+	$(PYTHON) license_check.py
 
 clean:
 	find . -type d -name __pycache__ -prune -exec rm -rf {} +

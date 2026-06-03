@@ -2,6 +2,12 @@
 
 QiCompute is a local-first prototype for private distributed inference markets. It models the control plane and accounting path before real networking or chain settlement exists.
 
+## Current Status
+
+QiCompute v0.1.0 is an experimental MVP. It demonstrates a local/LAN architecture for private inference execution, useful-work verification, settlement accounting, and operator tooling.
+
+The architecture is intentionally protocol-shaped but not decentralized yet. Current cluster mode assumes a trusted LAN controller. Public networking, blockchain settlement, production cryptography, and production consensus are future work.
+
 ```text
 customer job
 -> routing

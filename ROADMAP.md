@@ -1,5 +1,9 @@
 # QiCompute Roadmap
 
+## Current Status
+
+QiCompute v0.1.0 is an experimental MVP for private distributed inference research. It is local-first, LAN-capable, simulation-heavy, and useful for testing receipt-backed useful-work settlement accounting before adding broader networking or decentralized settlement.
+
 QiCompute is currently:
 
 - local-first

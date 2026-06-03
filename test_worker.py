@@ -90,7 +90,10 @@ from dev_health import generate_dev_health
 from load_test import print_load_report, run_load_test
 from perf import MetricsAccumulator, bottleneck_summary, percentile
 from reliability_report import generate_reliability_report
+from release_check import run_release_checks
 from run_tests import categorized_tests, select_suite, validate_categories
+from license_check import run_license_checks
+from version import current_version
 
 
 class WorkerPrototypeTest(unittest.TestCase):
@@ -121,6 +124,8 @@ class WorkerPrototypeTest(unittest.TestCase):
             "determinism:",
             "reliability:",
             "dev-health:",
+            "release-check:",
+            "license-check:",
             "clean:",
         ):
             self.assertIn(target, text)
@@ -148,6 +153,38 @@ class WorkerPrototypeTest(unittest.TestCase):
         self.assertIn("Test Categories", text)
         self.assertIn("Determinism", text)
         self.assertIn("Reliability Reports", text)
+
+    def test_release_readiness_documents_present(self) -> None:
+        expected = (
+            "VERSION",
+            "CHANGELOG.md",
+            "RELEASE_NOTES_0.1.0.md",
+            "MVP.md",
+            "SECURITY.md",
+            "PROJECT_INFO.md",
+            "SHOWCASE.md",
+            "LICENSE",
+        )
+        for path in expected:
+            self.assertTrue(Path(path).exists(), path)
+        self.assertEqual(current_version(), "0.1.0")
+        self.assertIn("0.1.0", Path("CHANGELOG.md").read_text(encoding="utf-8"))
+        self.assertIn("Known Limitations", Path("RELEASE_NOTES_0.1.0.md").read_text(encoding="utf-8"))
+        self.assertIn("Not Included", Path("MVP.md").read_text(encoding="utf-8"))
+        self.assertIn("experimental", Path("SECURITY.md").read_text(encoding="utf-8").lower())
+
+    def test_github_templates_present(self) -> None:
+        for path in (
+            ".github/ISSUE_TEMPLATE/bug_report.md",
+            ".github/ISSUE_TEMPLATE/feature_request.md",
+            ".github/ISSUE_TEMPLATE/security_report.md",
+            ".github/pull_request_template.md",
+        ):
+            self.assertTrue(Path(path).exists(), path)
+        pr_template = Path(".github/pull_request_template.md").read_text(encoding="utf-8")
+        self.assertIn("Determinism Impact", pr_template)
+        self.assertIn("Privacy Impact", pr_template)
+        self.assertIn("Accounting Impact", pr_template)
 
     def test_run_tests_category_selection(self) -> None:
         smoke = select_suite("smoke")
@@ -274,6 +311,13 @@ class WorkerPrototypeTest(unittest.TestCase):
         self.assertGreater(report["test_count"], 0)
         self.assertEqual(report["accounting_status"], "PASS")
         self.assertEqual(report["reliability_status"], "PASS")
+
+    def test_release_and_license_checks_pass(self) -> None:
+        release_checks = run_release_checks(dynamic=False)
+        license_checks = run_license_checks()
+
+        self.assertTrue(all(check.status != "FAIL" for check in release_checks))
+        self.assertTrue(all(check.status != "FAIL" for check in license_checks))
 
     def test_architecture_docs_present(self) -> None:
         text = Path("ARCHITECTURE.md").read_text(encoding="utf-8")

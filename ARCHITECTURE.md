@@ -67,6 +67,16 @@ Worker accounts track earned, payable, disputed, rejected, and refunded Qi. Mark
 
 This is a local deterministic economic simulation. QiCompute is not a blockchain, wallet, token transfer system, or payment processor.
 
+## Threat Model
+
+QiCompute now models adversarial local marketplace behavior: malicious workers, malicious customers, replay attackers, spam, escrow griefing, malicious verifiers, and colluding committees.
+
+Receipt replay resistance is enforced before settlement. Duplicate settled receipt hashes and stale receipts after refund/failure are rejected and logged as audit events. Invoice hashes are deterministic and can be verified for mutation detection.
+
+Escrow abuse resistance is configurable through minimum job escrow, maximum outstanding customer escrow, and escrow expiry cleanup. Rate-limit events track customer submission spam, receipt spam, verifier spam, and failed-auth bursts.
+
+Committee consensus records abuse metadata: disagreement ratio, repeated verifier pair frequency, same-operator clustering, and a collusion suspicion score. These are simulation signals only; there is no staking, slashing, or production-grade Sybil resistance yet.
+
 ## Privacy Model
 
 Strict mode is the default. Raw prompts are not stored in customer jobs, receipts, logs, audit trails, snapshots, or summaries. The local Ollama runtime may receive a prompt transiently for execution, but QiCompute stores prompt hashes, output hashes, byte counts, token counts, timing, energy estimates, and verification metadata. Raw model output is not persisted.

@@ -25,6 +25,9 @@ def run_accounting_checks(db: WorkerDB) -> list[AccountingCheck]:
         _worker_payables_reconcile(db),
         _treasury_reconciles(db),
         _duplicate_receipts_not_paid(db),
+        _duplicate_payout_sources(db),
+        _stale_receipts_not_settled(db),
+        _replay_events_audited(db),
     ]
     return checks
 
@@ -63,6 +66,43 @@ def _duplicate_receipts_not_paid(db: WorkerDB) -> AccountingCheck:
         """
     ).fetchall()
     return AccountingCheck("duplicate paid jobs", "PASS" if not duplicates else "FAIL", f"duplicates={len(duplicates)}")
+
+
+def _duplicate_payout_sources(db: WorkerDB) -> AccountingCheck:
+    duplicates = db.conn.execute(
+        """
+        SELECT source_id, COUNT(*) AS count
+        FROM payout_events
+        WHERE source_id IS NOT NULL
+        GROUP BY source_id
+        HAVING COUNT(*) > 1
+        """
+    ).fetchall()
+    return AccountingCheck("duplicate payout sources", "PASS" if not duplicates else "FAIL", f"duplicates={len(duplicates)}")
+
+
+def _stale_receipts_not_settled(db: WorkerDB) -> AccountingCheck:
+    rows = db.conn.execute(
+        """
+        SELECT r.receipt_id
+        FROM receipts r
+        JOIN customer_jobs j ON j.job_id = r.job_id
+        JOIN payout_events p ON p.source_id = r.receipt_id
+        WHERE j.status IN ('failed', 'expired', 'rejected')
+        """
+    ).fetchall()
+    return AccountingCheck("stale receipt settlement", "PASS" if not rows else "FAIL", f"stale_settled={len(rows)}")
+
+
+def _replay_events_audited(db: WorkerDB) -> AccountingCheck:
+    rows = db.conn.execute(
+        """
+        SELECT COUNT(*) AS count
+        FROM cluster_events
+        WHERE failure_code IN ('DUPLICATE_RECEIPT', 'STALE_RECEIPT')
+        """
+    ).fetchone()
+    return AccountingCheck("replay audit events", "PASS", f"events={int(rows['count'] if rows else 0)}")
 
 
 def _compare(name: str, left: float, right: float) -> AccountingCheck:

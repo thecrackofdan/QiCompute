@@ -334,6 +334,51 @@ python3 accounting_checks.py
 
 The checks reconcile escrow totals, treasury totals, worker payable totals, refunds, and duplicate paid jobs.
 
+## Threat Model And Abuse Resistance
+
+QiCompute includes local simulations for hostile marketplace behavior. This is still experimental, LAN-first, and not audited production security.
+
+Modeled adversaries include:
+
+- malicious workers submitting malformed or replayed receipts
+- malicious customers underfunding or griefing escrow
+- malicious verifiers and colluding committees
+- spammers flooding job, receipt, or auth paths
+- replay attackers resubmitting receipts or invoices
+
+Replay resistance:
+
+- receipt hashes are globally unique in SQLite
+- settled receipt replays return `DUPLICATE_RECEIPT`
+- stale receipts after refund/failure return `STALE_RECEIPT`
+- replay attempts are written as cluster audit events
+
+Escrow abuse resistance:
+
+- `marketplace.min_job_escrow_qi` rejects underfunded jobs
+- `marketplace.max_outstanding_escrow_qi` limits customer capacity griefing
+- expired escrow can be refunded by local cleanup
+
+Rate limits:
+
+```yaml
+rate_limits:
+  max_jobs_per_minute: 60
+  max_receipts_per_minute: 120
+  max_failed_auth_per_minute: 20
+```
+
+Committee collusion simulation records verifier disagreement ratio, repeated verifier pair frequency, same-operator clustering, and a local suspicion score. QiCompute does not implement staking, slashing, or legal/payment enforcement.
+
+Audit local abuse signals:
+
+```bash
+python3 audit.py --recent-attacks
+python3 audit.py --reconciliation
+python3 audit.py --suspicious-committees
+python3 audit.py --duplicate-receipts
+```
+
 Register the local worker:
 
 ```bash

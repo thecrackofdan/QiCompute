@@ -95,6 +95,13 @@ class ClusterController:
         if not receipt or not job:
             self._event("receipt", receipt.get("worker_id"), job_id, False, failures.VERIFICATION_FAILED, {"reason": "missing receipt or job"})
             return {"accepted": False, "failure_code": failures.VERIFICATION_FAILED, "reason": "missing receipt or job"}
+        receipt["receipt_hash"] = receipt.get("receipt_hash") or compute_receipt_hash(receipt)
+        if self.db.receipt_already_settled(receipt.get("receipt_hash"), receipt.get("receipt_id")):
+            self._event("receipt_replay", receipt.get("worker_id"), job_id, False, failures.DUPLICATE_RECEIPT, {"receipt_hash": receipt.get("receipt_hash")})
+            return {"accepted": False, "failure_code": failures.DUPLICATE_RECEIPT, "reason": "receipt already settled"}
+        if self.db.stale_receipt_detected(job_id, receipt.get("receipt_hash")):
+            self._event("stale_receipt", receipt.get("worker_id"), job_id, False, failures.STALE_RECEIPT, {"receipt_hash": receipt.get("receipt_hash")})
+            return {"accepted": False, "failure_code": failures.STALE_RECEIPT, "reason": "stale receipt cannot settle"}
         if self.db.inference_job_was_paid(job["job_id"]):
             self._event("receipt", receipt.get("worker_id"), job_id, False, failures.DUPLICATE_JOB, {"reason": "duplicate receipt"})
             return {"accepted": False, "failure_code": failures.DUPLICATE_JOB, "reason": "job already settled"}
@@ -107,7 +114,6 @@ class ClusterController:
             record_refund(self.db, refund_qi=refund.get("refund_qi", 0))
             self._event("receipt", receipt.get("worker_id"), job_id, False, failures.LEASE_EXPIRED, {"reason": "lease expired"})
             return {"accepted": False, "failure_code": failures.LEASE_EXPIRED, "reason": "lease expired"}
-        receipt["receipt_hash"] = receipt.get("receipt_hash") or compute_receipt_hash(receipt)
         verification = verify_inference_receipt(receipt, _job_for_verifier(job), self.config)
         receipt.setdefault("metadata", {})["verification"] = verification.to_dict()
         receipt["receipt_hash"] = _refresh_receipt_hash(receipt)

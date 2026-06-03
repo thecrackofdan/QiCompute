@@ -189,6 +189,15 @@ CREATE TABLE IF NOT EXISTS marketplace_treasury (
     updated_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS rate_limit_events (
+    event_id TEXT PRIMARY KEY,
+    actor_type TEXT NOT NULL,
+    actor_id TEXT NOT NULL,
+    event_type TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    metadata_json TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS routing_audit_logs (
     audit_id TEXT PRIMARY KEY,
     job_id TEXT NOT NULL,
@@ -298,6 +307,10 @@ CREATE TABLE IF NOT EXISTS worker_enrollments (
 CREATE UNIQUE INDEX IF NOT EXISTS idx_mining_rounds_block_hash
 ON mining_rounds(block_hash)
 WHERE block_hash IS NOT NULL;
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_receipts_receipt_hash
+ON receipts(receipt_hash)
+WHERE receipt_hash IS NOT NULL;
 """
 
 
@@ -464,6 +477,39 @@ class WorkerDB:
             (job_id,),
         ).fetchone()
         return row is not None
+
+    def receipt_already_settled(self, receipt_hash: str | None = None, receipt_id: str | None = None) -> bool:
+        if receipt_id:
+            row = self.conn.execute("SELECT 1 FROM payout_events WHERE source_id = ?", (receipt_id,)).fetchone()
+            if row:
+                return True
+        if receipt_hash:
+            row = self.conn.execute(
+                """
+                SELECT 1
+                FROM receipts r
+                JOIN payout_events p ON p.source_id = r.receipt_id
+                WHERE r.receipt_hash = ?
+                """,
+                (receipt_hash,),
+            ).fetchone()
+            return row is not None
+        return False
+
+    def stale_receipt_detected(self, job_id: str | None, receipt_hash: str | None = None) -> bool:
+        if not job_id:
+            return False
+        row = self.conn.execute(
+            "SELECT status FROM customer_jobs WHERE job_id = ?",
+            (job_id,),
+        ).fetchone()
+        if row and row["status"] in {"refunded", "failed", "expired", "rejected"}:
+            return True
+        escrow = self.conn.execute(
+            "SELECT status FROM job_escrows WHERE job_id = ?",
+            (job_id,),
+        ).fetchone()
+        return bool(escrow and escrow["status"] in {"refunded", "disputed"})
 
     def record_inference_job_paid(
         self,
@@ -1229,6 +1275,38 @@ class WorkerDB:
             ),
         )
         self.conn.commit()
+
+    def record_rate_limit_event(self, event: dict[str, Any]) -> None:
+        self.conn.execute(
+            """
+            INSERT INTO rate_limit_events (
+                event_id, actor_type, actor_id, event_type, created_at, metadata_json
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                event["event_id"],
+                event["actor_type"],
+                event["actor_id"],
+                event["event_type"],
+                event["created_at"],
+                json.dumps(redact_sensitive_fields(event.get("metadata", {})), sort_keys=True),
+            ),
+        )
+        self.conn.commit()
+
+    def rate_limit_count(self, actor_type: str, actor_id: str, event_type: str, since: str) -> int:
+        row = self.conn.execute(
+            """
+            SELECT COUNT(*) AS count
+            FROM rate_limit_events
+            WHERE actor_type = ?
+              AND actor_id = ?
+              AND event_type = ?
+              AND created_at >= ?
+            """,
+            (actor_type, actor_id, event_type, since),
+        ).fetchone()
+        return int(row["count"] if row else 0)
 
     def recent_cluster_events(self, limit: int = 10) -> list[dict[str, Any]]:
         rows = self.conn.execute(

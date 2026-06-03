@@ -60,6 +60,14 @@ pricing:
 
 marketplace:
   fee_percent: 2.5
+  max_outstanding_escrow_qi: 1000
+  min_job_escrow_qi: 0.000001
+  escrow_expiry_seconds: 600
+
+rate_limits:
+  max_jobs_per_minute: 60
+  max_receipts_per_minute: 120
+  max_failed_auth_per_minute: 20
 
 demo:
   seed: 7

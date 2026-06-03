@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections import Counter
+import json
 import random
 from typing import Any
 from uuid import uuid4
@@ -126,6 +127,7 @@ def run_verification_committee(
         **committee.get("metadata", {}),
         "vote_counts": dict(Counter(vote["vote"] for vote in votes)),
         "failure_code": failures.QUORUM_NOT_REACHED if quorum_not_reached else _failure_code_for_result(result),
+        **committee_abuse_metadata(db, committee, votes),
     }
     finalized_at = utc_now_iso()
     db.finalize_verification_committee(committee["committee_id"], result, finalized_at, metadata)
@@ -141,6 +143,50 @@ def aggregate_committee_votes(votes: list[dict[str, Any]], quorum_threshold: int
     if counts[REJECTED] >= quorum_threshold:
         return REJECTED
     return DISPUTED
+
+
+def committee_abuse_metadata(db: WorkerDB, committee: dict[str, Any], votes: list[dict[str, Any]]) -> dict[str, Any]:
+    if not votes:
+        return {"verifier_disagreement_ratio": 0.0, "collusion_suspicion_score": 0.0, "repeated_pair_frequency": 0}
+    counts = Counter(vote["vote"] for vote in votes)
+    majority = counts.most_common(1)[0][1]
+    disagreement = round(1.0 - majority / len(votes), 6)
+    verifier_ids = sorted(vote["verifier_worker_id"] for vote in votes)
+    pair_frequency = _repeated_pair_frequency(db, verifier_ids, committee["committee_id"])
+    same_operator_pairs = _same_operator_pairs(db, verifier_ids)
+    suspicion = min(1.0, disagreement + 0.1 * pair_frequency + 0.2 * same_operator_pairs)
+    return {
+        "verifier_disagreement_ratio": disagreement,
+        "repeated_pair_frequency": pair_frequency,
+        "same_operator_pair_count": same_operator_pairs,
+        "collusion_suspicion_score": round(suspicion, 6),
+    }
+
+
+def _repeated_pair_frequency(db: WorkerDB, verifier_ids: list[str], current_committee_id: str) -> int:
+    if len(verifier_ids) < 2:
+        return 0
+    previous = db.conn.execute(
+        "SELECT committee_id, verifier_worker_ids_json FROM verification_committees WHERE committee_id != ?",
+        (current_committee_id,),
+    ).fetchall()
+    current_pairs = {tuple(sorted((left, right))) for index, left in enumerate(verifier_ids) for right in verifier_ids[index + 1 :]}
+    frequency = 0
+    for row in previous:
+        ids = sorted(json.loads(row["verifier_worker_ids_json"]))
+        pairs = {tuple(sorted((left, right))) for index, left in enumerate(ids) for right in ids[index + 1 :]}
+        frequency += len(current_pairs & pairs)
+    return frequency
+
+
+def _same_operator_pairs(db: WorkerDB, verifier_ids: list[str]) -> int:
+    workers = {worker_id: db.get_worker(worker_id) for worker_id in verifier_ids}
+    count = 0
+    for index, left in enumerate(verifier_ids):
+        for right in verifier_ids[index + 1 :]:
+            if workers.get(left) and workers.get(right) and workers[left].get("operator") == workers[right].get("operator"):
+                count += 1
+    return count
 
 
 def _verify_vote(

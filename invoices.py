@@ -50,6 +50,19 @@ def build_settlement_invoice(
 
 
 def compute_invoice_hash(invoice: dict[str, Any]) -> str:
-    payload = {key: value for key, value in redact_sensitive_fields(invoice).items() if key != "invoice_hash"}
+    payload = canonicalize_invoice(invoice)
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
+
+
+def canonicalize_invoice(invoice: dict[str, Any]) -> dict[str, Any]:
+    return {key: value for key, value in redact_sensitive_fields(invoice).items() if key != "invoice_hash"}
+
+
+def verify_invoice_hash(invoice: dict[str, Any]) -> bool:
+    return bool(invoice.get("invoice_hash")) and compute_invoice_hash(invoice) == invoice.get("invoice_hash")
+
+
+def duplicate_invoice_detected(existing_invoices: list[dict[str, Any]], invoice: dict[str, Any]) -> bool:
+    invoice_hash = invoice.get("invoice_hash") or compute_invoice_hash(invoice)
+    return any((existing.get("invoice_hash") or compute_invoice_hash(existing)) == invoice_hash for existing in existing_invoices)

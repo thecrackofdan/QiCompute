@@ -14,6 +14,7 @@ from uuid import uuid4
 
 import failures
 import daemon as daemon_module
+from abuse import expire_escrows, rate_limit_allowed, record_rate_limit_event, validate_job_escrow_request
 from accounting_checks import run_accounting_checks
 from accounts import (
     create_customer_account,
@@ -27,6 +28,8 @@ from accounts import (
     worker_account,
 )
 from adversary import FLAKY, MALICIOUS_RECEIPT, duplicate_job, simulate_capability_claim, simulate_worker_receipt
+from adversaries import adversary_profiles
+from audit import duplicate_receipts as audit_duplicate_receipts, recent_attacks, suspicious_committees
 from challenges import create_challenge, verify_challenge_result
 from capabilities import compute_capability_hash, make_capability_claim, verify_capability_claim
 from cluster_demo import run_cluster_demo
@@ -51,7 +54,7 @@ from db import WorkerDB
 from envelopes import compute_envelope_hash, make_job_envelope, verify_job_envelope
 from epochs import active_epoch, finalize_epoch
 from economics import compare_inference_vs_mining
-from invoices import build_settlement_invoice, compute_invoice_hash
+from invoices import build_settlement_invoice, compute_invoice_hash, duplicate_invoice_detected, verify_invoice_hash
 from lifecycle import transition_job_status
 from lan_smoke_test import run_lan_smoke_test
 from logging_config import redact_payload
@@ -601,7 +604,7 @@ class WorkerPrototypeTest(unittest.TestCase):
 
             self.assertTrue(accepted["accepted"])
             self.assertFalse(duplicate["accepted"])
-            self.assertEqual(duplicate["failure_code"], failures.DUPLICATE_JOB)
+            self.assertEqual(duplicate["failure_code"], failures.DUPLICATE_RECEIPT)
             self.assertEqual(db.get_balance(worker["worker_id"]), receipt["estimated_qi_owed"])
             db.close()
 
@@ -629,7 +632,7 @@ class WorkerPrototypeTest(unittest.TestCase):
             worker_acct = worker_account(db, worker["worker_id"])
             self.assertTrue(accepted["accepted"])
             self.assertFalse(duplicate["accepted"])
-            self.assertEqual(duplicate["failure_code"], failures.DUPLICATE_JOB)
+            self.assertEqual(duplicate["failure_code"], failures.DUPLICATE_RECEIPT)
             self.assertAlmostEqual(escrow["fee_qi"], escrow["settled_qi"] * 0.025)
             self.assertAlmostEqual(worker_acct["payable_qi"], escrow["settled_qi"] - escrow["fee_qi"])
             self.assertAlmostEqual(treasury["total_fees_collected"], escrow["fee_qi"])
@@ -672,6 +675,66 @@ class WorkerPrototypeTest(unittest.TestCase):
             self.assertAlmostEqual(customer_balance(db, "customer-a")["available_qi"], 1)
             self.assertAlmostEqual(worker_account(db, worker["worker_id"])["payable_qi"], 0)
             self.assertAlmostEqual(get_treasury(db)["total_customer_refunds"], 1)
+            db.close()
+
+    def test_adversary_profiles_are_seeded_and_descriptive(self) -> None:
+        first = adversary_profiles(seed=7)
+        second = adversary_profiles(seed=7)
+
+        self.assertEqual(first, second)
+        self.assertIn("malicious_worker", first)
+        self.assertIn(failures.DUPLICATE_RECEIPT, first["replay_attacker"]["expected_failure_patterns"])
+
+    def test_duplicate_receipt_no_double_payout_and_audited(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            db = WorkerDB(str(Path(tmp) / "cluster.db"))
+            config = self._cluster_config(tmp)
+            config["marketplace"] = {"fee_percent": 0}
+            controller = ClusterController(db, config)
+            worker = self._cluster_worker("replay-worker")
+            controller.handle_capability({"worker_id": worker["worker_id"], "worker": worker, "capability_claim": make_capability_claim(worker)})
+            job = {**self._customer_job("replay-job"), "customer_id": "customer-a", "max_price_qi": 1}
+            create_customer_account(db, "customer-a", initial_qi=1)
+            db.insert_customer_job(job)
+            escrow_job_funds(db, job, 1)
+            assigned = controller.handle_next_job(worker["worker_id"])["job"]
+            result = SimulatedRuntime().run(assigned, config)
+            receipt = daemon_module.receipt_from_runtime_result(config, worker["worker_id"], assigned, result)
+
+            accepted = controller.handle_receipt({"worker_id": worker["worker_id"], "job_id": assigned["job_id"], "lease_id": assigned["lease_id"], "receipt": receipt})
+            treasury_before = get_treasury(db)
+            replay = controller.handle_receipt({"worker_id": worker["worker_id"], "job_id": assigned["job_id"], "lease_id": assigned["lease_id"], "receipt": receipt})
+            treasury_after = get_treasury(db)
+
+            self.assertTrue(accepted["accepted"])
+            self.assertFalse(replay["accepted"])
+            self.assertEqual(replay["failure_code"], failures.DUPLICATE_RECEIPT)
+            self.assertEqual(treasury_before, treasury_after)
+            self.assertTrue(recent_attacks(db))
+            self.assertFalse(audit_duplicate_receipts(db))
+            db.close()
+
+    def test_stale_receipt_after_refund_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            db = WorkerDB(str(Path(tmp) / "cluster.db"))
+            config = self._cluster_config(tmp)
+            controller = ClusterController(db, config)
+            worker = self._cluster_worker("stale-worker")
+            controller.handle_capability({"worker_id": worker["worker_id"], "worker": worker, "capability_claim": make_capability_claim(worker)})
+            job = {**self._customer_job("stale-job"), "customer_id": "customer-a", "max_price_qi": 1}
+            create_customer_account(db, "customer-a", initial_qi=1)
+            db.insert_customer_job(job)
+            escrow_job_funds(db, job, 1)
+            assigned = controller.handle_next_job(worker["worker_id"])["job"]
+            result = SimulatedRuntime().run(assigned, config)
+            receipt = daemon_module.receipt_from_runtime_result(config, worker["worker_id"], assigned, result)
+            refund_job_escrow(db, assigned["job_id"], "manual refund")
+
+            stale = controller.handle_receipt({"worker_id": worker["worker_id"], "job_id": assigned["job_id"], "lease_id": assigned["lease_id"], "receipt": receipt})
+
+            self.assertFalse(stale["accepted"])
+            self.assertEqual(stale["failure_code"], failures.STALE_RECEIPT)
+            self.assertAlmostEqual(worker_account(db, worker["worker_id"])["payable_qi"], 0)
             db.close()
 
     def test_controller_snapshot_exports_deterministic_hash_without_raw_payloads(self) -> None:
@@ -1213,6 +1276,48 @@ inference:
         self.assertEqual(first["invoice_hash"], compute_invoice_hash(first))
         self.assertEqual(first["fee_qi"], 0.025)
         self.assertNotIn("secret prompt", json.dumps(first, sort_keys=True))
+
+    def test_invoice_mutation_and_duplicate_detection(self) -> None:
+        invoice = build_settlement_invoice(
+            invoice_type="worker",
+            job={**self._customer_job("invoice-replay"), "customer_id": "customer-a"},
+            epoch={"epoch_id": "epoch-a", "ended_at": "2026-01-01T00:00:00Z"},
+            receipt={**self._inference_receipt(), "receipt_hash": "hash-a"},
+            escrow={"status": "settled", "settled_qi": 1, "fee_qi": 0.1, "worker_payout_qi": 0.9, "refunded_qi": 0},
+        )
+        tampered = {**invoice, "worker_payout_qi": 99}
+
+        self.assertTrue(verify_invoice_hash(invoice))
+        self.assertFalse(verify_invoice_hash(tampered))
+        self.assertTrue(duplicate_invoice_detected([invoice], dict(invoice)))
+
+    def test_escrow_abuse_underfunded_expiry_and_limit(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            db = WorkerDB(str(Path(tmp) / "escrow-abuse.db"))
+            config = {"marketplace": {"min_job_escrow_qi": 0.5, "max_outstanding_escrow_qi": 1.0}}
+            create_customer_account(db, "customer-a", initial_qi=2)
+            self.assertEqual(validate_job_escrow_request(db, "customer-a", 0.1, config)["failure_code"], failures.ESCROW_UNDERFUNDED)
+            job = {**self._customer_job("grief-job"), "customer_id": "customer-a", "max_price_qi": 0.8}
+            escrow_job_funds(db, job, 0.8)
+            self.assertEqual(validate_job_escrow_request(db, "customer-a", 0.5, config)["failure_code"], failures.ESCROW_LIMIT_EXCEEDED)
+            db.conn.execute("UPDATE job_escrows SET created_at = ? WHERE job_id = ?", ("2020-01-01T00:00:00Z", "grief-job"))
+            expired = expire_escrows(db, now="2020-01-01T00:11:00Z", expiry_seconds=600)
+            self.assertEqual(expired, 1)
+            self.assertAlmostEqual(customer_balance(db, "customer-a")["available_qi"], 2)
+            db.close()
+
+    def test_rate_limits_block_spam_and_reset_after_window(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            db = WorkerDB(str(Path(tmp) / "rate.db"))
+            base = time.time()
+            for _ in range(2):
+                record_rate_limit_event(db, "customer", "spammer", "job_submission")
+
+            self.assertFalse(rate_limit_allowed(db, actor_type="customer", actor_id="spammer", event_type="job_submission", limit=2))
+            self.assertTrue(rate_limit_allowed(db, actor_type="customer", actor_id="spammer", event_type="job_submission", limit=3))
+            db.conn.execute("UPDATE rate_limit_events SET created_at = ?", ("2020-01-01T00:00:00Z",))
+            self.assertTrue(rate_limit_allowed(db, actor_type="customer", actor_id="spammer", event_type="job_submission", limit=2))
+            db.close()
 
     def test_accounting_checks_pass_and_detect_corruption(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1927,6 +2032,24 @@ inference:
 
             self.assertEqual(result["result"], DISPUTED)
             self.assertEqual(result["metadata"]["failure_code"], failures.COMMITTEE_DISPUTED)
+            db.close()
+
+    def test_committee_collusion_metadata_records_suspicion(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            _, db = self._scheduler(tmp)
+            db.register_worker({**self._worker("assigned"), "operator": "op-a"})
+            for worker_id in ["v1", "v2", "v3"]:
+                db.register_worker({**self._worker(worker_id), "operator": "same-op"})
+            receipt = self._inference_receipt()
+            first = create_verification_committee(db, challenge_id=None, assigned_worker_id="assigned", committee_size=3, quorum_threshold=2)
+            run_verification_committee(db, first, receipt=receipt, challenge_result={"accepted": True}, forced_votes={"v1": ACCEPTED, "v2": REJECTED, "v3": REJECTED})
+            second = create_verification_committee(db, challenge_id=None, assigned_worker_id="assigned", committee_size=3, quorum_threshold=2)
+            result = run_verification_committee(db, second, receipt=receipt, challenge_result={"accepted": True}, forced_votes={"v1": ACCEPTED, "v2": REJECTED, "v3": REJECTED})
+
+            self.assertGreater(result["metadata"]["verifier_disagreement_ratio"], 0)
+            self.assertGreater(result["metadata"]["repeated_pair_frequency"], 0)
+            self.assertGreater(result["metadata"]["collusion_suspicion_score"], 0)
+            self.assertTrue(suspicious_committees(db))
             db.close()
 
     def test_assigned_worker_never_selected_as_verifier(self) -> None:

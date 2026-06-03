@@ -74,6 +74,14 @@ QiCompute is currently:
 - Accounting reconciliation checks
 - Mining fallback profitability comparisons
 
+## Abuse Resistance Roadmap
+
+- Expand adversarial actor simulations
+- Add richer customer reputation and anti-spam policies
+- Improve committee collusion analysis
+- Persist invoice ledgers for full replay detection
+- Replace prototype trust signals with audited security mechanisms before WAN use
+
 ## Mining Fallback Roadmap
 
 - Better mining launcher adapters

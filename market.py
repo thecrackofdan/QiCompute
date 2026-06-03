@@ -4,6 +4,8 @@ import argparse
 import hashlib
 from uuid import uuid4
 
+import failures
+from abuse import rate_limit_allowed, record_rate_limit_event, validate_job_escrow_request
 from accounts import create_customer_account, credit_available_balance, escrow_job_funds
 from db import WorkerDB
 from logging_config import configure_logging, log_event
@@ -57,6 +59,11 @@ def main() -> None:
         if args.submit_job:
             job_id = str(uuid4())
             customer_id = "local-customer"
+            limit = int(config.get("rate_limits", {}).get("max_jobs_per_minute", 60))
+            if not rate_limit_allowed(db, actor_type="customer", actor_id=customer_id, event_type="job_submission", limit=limit):
+                print(f"rejected failure_code={failures.RATE_LIMITED} reason=customer job submission rate limit exceeded")
+                return
+            record_rate_limit_event(db, "customer", customer_id, "job_submission")
             price = estimate_job_price(
                 input_tokens=args.input_tokens,
                 output_tokens=args.output_tokens,
@@ -69,6 +76,10 @@ def main() -> None:
             )
             escrow_amount = max(args.max_price_qi, price.estimated_price_qi)
             create_customer_account(db, customer_id, initial_qi=0)
+            escrow_check = validate_job_escrow_request(db, customer_id, escrow_amount, config)
+            if not escrow_check.get("accepted", True):
+                print(f"rejected failure_code={escrow_check['failure_code']} reason={escrow_check['reason']}")
+                return
             credit_available_balance(db, customer_id, escrow_amount)
             job = {
                 "job_id": job_id,

@@ -67,6 +67,12 @@ QiCompute is currently:
 - Energy price sensitivity
 - Worker shutdown thresholds
 - Price discovery and utilization metrics
+- Customer account funding and escrow simulations
+- Marketplace treasury fee accounting
+- Worker payable balance accounting
+- Settlement invoice artifacts
+- Accounting reconciliation checks
+- Mining fallback profitability comparisons
 
 ## Mining Fallback Roadmap
 

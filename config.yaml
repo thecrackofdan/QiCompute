@@ -68,6 +68,9 @@ pricing:
   low_latency_premium_multiplier: 1.15
   energy_rate_qi_per_joule: 0.0
 
+marketplace:
+  fee_percent: 2.5
+
 cluster:
   enabled: false
   node_role: "controller"

@@ -7,6 +7,7 @@ from typing import Any
 from uuid import uuid4
 
 import failures
+from accounts import record_worker_rejected, refund_job_escrow, settle_job_escrow
 from capabilities import make_capability_claim
 from challenges import build_challenge_result, create_challenge, should_attach_challenge, verify_challenge_result
 from committees import ACCEPTED, create_verification_committee, run_verification_committee
@@ -19,6 +20,7 @@ from registry import heartbeat_local_worker, register_local_worker, worker_from_
 from reputation import update_worker_reputation
 from runners import runner_for_type
 from telemetry import GPUTelemetry
+from treasury import record_refund, record_settlement
 from transport import get_json, post_json
 from verifier import verify_inference_receipt
 from worker import load_config
@@ -139,12 +141,25 @@ class WorkerDaemon:
             payout_eligible = result.accepted and verification.accepted
             if payout_eligible:
                 epoch = active_epoch(self.db)
+                settlement = settle_job_escrow(
+                    self.db,
+                    job["job_id"],
+                    self.worker_id,
+                    receipt["estimated_qi_owed"],
+                    float(self.config.get("marketplace", {}).get("fee_percent", 0)),
+                )
+                record_settlement(
+                    self.db,
+                    fee_qi=settlement["fee_qi"],
+                    worker_payout_qi=settlement["worker_payout_qi"],
+                    settled_qi=settlement["settled_qi"],
+                )
                 payout_event = {
                     "event_id": str(uuid4()),
                     "worker_id": self.worker_id,
                     "event_type": "inference_job",
                     "basis": "daemon_verified_runtime",
-                    "qi_amount": receipt["estimated_qi_owed"],
+                    "qi_amount": settlement["worker_payout_qi"],
                     "created_at": utc_now_iso(),
                     "source_id": receipt["receipt_id"],
                     "epoch_id": epoch["epoch_id"],
@@ -154,6 +169,8 @@ class WorkerDaemon:
                         "verification_reason": verification.reason,
                         "challenge_id": receipt["metadata"].get("challenge_id"),
                         "committee_id": receipt["metadata"].get("committee_verification", {}).get("committee_id"),
+                        "settled_qi": settlement["settled_qi"],
+                        "fee_qi": settlement["fee_qi"],
                     },
                 }
                 self.db.insert_payout_event(payout_event)
@@ -166,6 +183,13 @@ class WorkerDaemon:
                 )
                 self.db.update_customer_job_status(job["job_id"], "completed", {"receipt_id": receipt["receipt_id"]})
             else:
+                refund = refund_job_escrow(
+                    self.db,
+                    job["job_id"],
+                    "disputed" if verification.reason == failures.COMMITTEE_DISPUTED else verification.reason or failures.VERIFICATION_FAILED,
+                )
+                record_refund(self.db, refund_qi=refund.get("refund_qi", 0), disputed=verification.reason == failures.COMMITTEE_DISPUTED)
+                record_worker_rejected(self.db, self.worker_id, receipt.get("estimated_qi_owed", 0), disputed=verification.reason == failures.COMMITTEE_DISPUTED)
                 self.db.mark_customer_job_failure(
                     job["job_id"],
                     result.error_code or verification.reason or failures.VERIFICATION_FAILED,

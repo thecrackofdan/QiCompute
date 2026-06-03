@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 import failures
+from accounts import create_customer_account, escrow_job_funds
 from daemon import WorkerDaemon
 from db import WorkerDB
 from demo_data import demo_job, demo_prompt, demo_workers
@@ -16,6 +17,7 @@ from registry import heartbeat_local_worker
 from router import route_and_audit_inference_job
 from summary import print_committee_summary, print_epoch_summary, print_job_summary, print_worker_summary
 from telemetry import GPUTelemetry
+from treasury import get_treasury
 from worker import load_config
 
 
@@ -44,7 +46,9 @@ def run_demo(
             heartbeat_local_worker(db, worker["worker_id"], {"source": "demo", "last_seen_at": utc_now_iso()})
         epoch = active_epoch(db)
         job = demo_job(mode)
+        create_customer_account(db, job["customer_id"], initial_qi=job["max_price_qi"])
         db.insert_customer_job(job)
+        escrow_job_funds(db, job, job["max_price_qi"])
         decision = route_and_audit_inference_job(
             db,
             {**job, "requires_gpu": True},
@@ -158,6 +162,7 @@ def _metrics(
         "average_energy_per_token": energy_per_token,
         "mining_fallback_utilization": 0.0,
         "runtime_type_distribution": {runtime_type or "none": 1},
+        "treasury": get_treasury(db),
     }
 
 

@@ -4,6 +4,7 @@ import argparse
 import hashlib
 from uuid import uuid4
 
+from accounts import create_customer_account, credit_available_balance, escrow_job_funds
 from db import WorkerDB
 from logging_config import configure_logging, log_event
 from pricing import estimate_job_price
@@ -55,6 +56,7 @@ def main() -> None:
             return
         if args.submit_job:
             job_id = str(uuid4())
+            customer_id = "local-customer"
             price = estimate_job_price(
                 input_tokens=args.input_tokens,
                 output_tokens=args.output_tokens,
@@ -65,21 +67,24 @@ def main() -> None:
                 worker_reputation=50,
                 config=config,
             )
-            db.insert_customer_job(
-                {
-                    "job_id": job_id,
-                    "customer_id": "local-customer",
-                    "model": args.model,
-                    "prompt_hash": _placeholder_prompt_hash(job_id),
-                    "input_tokens": args.input_tokens,
-                    "expected_output_tokens": args.output_tokens,
-                    "privacy_level": args.privacy_level,
-                    "max_price_qi": args.max_price_qi,
-                    "status": "queued",
-                    "created_at": utc_now_iso(),
-                    "metadata": {"price": price.to_dict()},
-                }
-            )
+            escrow_amount = max(args.max_price_qi, price.estimated_price_qi)
+            create_customer_account(db, customer_id, initial_qi=0)
+            credit_available_balance(db, customer_id, escrow_amount)
+            job = {
+                "job_id": job_id,
+                "customer_id": customer_id,
+                "model": args.model,
+                "prompt_hash": _placeholder_prompt_hash(job_id),
+                "input_tokens": args.input_tokens,
+                "expected_output_tokens": args.output_tokens,
+                "privacy_level": args.privacy_level,
+                "max_price_qi": args.max_price_qi,
+                "status": "queued",
+                "created_at": utc_now_iso(),
+                "metadata": {"price": price.to_dict()},
+            }
+            db.insert_customer_job(job)
+            escrow_job_funds(db, job, escrow_amount)
             print(f"queued job={job_id} model={args.model} estimated_price_qi={price.estimated_price_qi:.12f}")
             return
         if args.route_jobs:

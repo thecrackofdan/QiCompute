@@ -14,6 +14,18 @@ from uuid import uuid4
 
 import failures
 import daemon as daemon_module
+from accounting_checks import run_accounting_checks
+from accounts import (
+    create_customer_account,
+    credit_available_balance,
+    customer_balance,
+    debit_available_balance,
+    escrow_job_funds,
+    job_escrow,
+    refund_job_escrow,
+    settle_job_escrow,
+    worker_account,
+)
 from adversary import FLAKY, MALICIOUS_RECEIPT, duplicate_job, simulate_capability_claim, simulate_worker_receipt
 from challenges import create_challenge, verify_challenge_result
 from capabilities import compute_capability_hash, make_capability_claim, verify_capability_claim
@@ -38,6 +50,8 @@ from demo_data import demo_prompt
 from db import WorkerDB
 from envelopes import compute_envelope_hash, make_job_envelope, verify_job_envelope
 from epochs import active_epoch, finalize_epoch
+from economics import compare_inference_vs_mining
+from invoices import build_settlement_invoice, compute_invoice_hash
 from lifecycle import transition_job_status
 from lan_smoke_test import run_lan_smoke_test
 from logging_config import redact_payload
@@ -60,6 +74,7 @@ from scheduler import Scheduler
 from simulation import run_marketplace_simulation
 from stress_simulation import run_stress_simulation
 from telemetry import GPUTelemetry
+from treasury import get_treasury, record_refund, record_settlement
 from snapshot import compute_snapshot_hash, export_controller_snapshot
 from transport import clear_nonce_cache, sign_request, verify_request_signature
 from receipts import make_receipt, utc_now_iso, verify_receipt_hash
@@ -590,6 +605,75 @@ class WorkerPrototypeTest(unittest.TestCase):
             self.assertEqual(db.get_balance(worker["worker_id"]), receipt["estimated_qi_owed"])
             db.close()
 
+    def test_controller_settles_escrow_to_worker_payable_and_fee(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            db = WorkerDB(str(Path(tmp) / "cluster.db"))
+            config = self._cluster_config(tmp)
+            config["marketplace"] = {"fee_percent": 2.5}
+            controller = ClusterController(db, config)
+            worker = self._cluster_worker("settlement-worker")
+            controller.handle_capability({"worker_id": worker["worker_id"], "worker": worker, "capability_claim": make_capability_claim(worker)})
+            job = {**self._customer_job("controller-settlement-job"), "customer_id": "customer-a", "max_price_qi": 1}
+            create_customer_account(db, "customer-a", initial_qi=1)
+            db.insert_customer_job(job)
+            escrow_job_funds(db, job, 1)
+            assigned = controller.handle_next_job(worker["worker_id"])["job"]
+            result = SimulatedRuntime().run(assigned, config)
+            receipt = daemon_module.receipt_from_runtime_result(config, worker["worker_id"], assigned, result)
+
+            accepted = controller.handle_receipt({"worker_id": worker["worker_id"], "job_id": assigned["job_id"], "lease_id": assigned["lease_id"], "receipt": receipt})
+            duplicate = controller.handle_receipt({"worker_id": worker["worker_id"], "job_id": assigned["job_id"], "lease_id": assigned["lease_id"], "receipt": receipt})
+
+            escrow = job_escrow(db, job["job_id"])
+            treasury = get_treasury(db)
+            worker_acct = worker_account(db, worker["worker_id"])
+            self.assertTrue(accepted["accepted"])
+            self.assertFalse(duplicate["accepted"])
+            self.assertEqual(duplicate["failure_code"], failures.DUPLICATE_JOB)
+            self.assertAlmostEqual(escrow["fee_qi"], escrow["settled_qi"] * 0.025)
+            self.assertAlmostEqual(worker_acct["payable_qi"], escrow["settled_qi"] - escrow["fee_qi"])
+            self.assertAlmostEqual(treasury["total_fees_collected"], escrow["fee_qi"])
+            self.assertAlmostEqual(db.get_balance(worker["worker_id"]), worker_acct["payable_qi"])
+            db.close()
+
+    def test_controller_rejected_receipt_refunds_escrow_and_blocks_payable(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            db = WorkerDB(str(Path(tmp) / "cluster.db"))
+            config = self._cluster_config(tmp)
+            controller = ClusterController(db, config)
+            worker = self._cluster_worker("reject-worker")
+            controller.handle_capability({"worker_id": worker["worker_id"], "worker": worker, "capability_claim": make_capability_claim(worker)})
+            job = {**self._customer_job("controller-reject-job"), "customer_id": "customer-a", "max_price_qi": 1}
+            create_customer_account(db, "customer-a", initial_qi=1)
+            db.insert_customer_job(job)
+            escrow_job_funds(db, job, 1)
+            assigned = controller.handle_next_job(worker["worker_id"])["job"]
+            result = RuntimeResult(
+                job_id=assigned["job_id"],
+                worker_id=worker["worker_id"],
+                model=assigned["model"],
+                started_at=utc_now_iso(),
+                ended_at=utc_now_iso(),
+                duration_seconds=0.001,
+                input_tokens=-1,
+                output_tokens=0,
+                output_hash=output_hash(""),
+                exit_code=1,
+                accepted=False,
+                error_code=failures.COMMAND_FAILED,
+                error_message="failed",
+                metadata={"runtime_type": "test", "total_watts": 0, "energy_joules": 0},
+            )
+            receipt = daemon_module.receipt_from_runtime_result(config, worker["worker_id"], assigned, result)
+
+            rejected = controller.handle_receipt({"worker_id": worker["worker_id"], "job_id": assigned["job_id"], "lease_id": assigned["lease_id"], "receipt": receipt})
+
+            self.assertFalse(rejected["accepted"])
+            self.assertAlmostEqual(customer_balance(db, "customer-a")["available_qi"], 1)
+            self.assertAlmostEqual(worker_account(db, worker["worker_id"])["payable_qi"], 0)
+            self.assertAlmostEqual(get_treasury(db)["total_customer_refunds"], 1)
+            db.close()
+
     def test_controller_snapshot_exports_deterministic_hash_without_raw_payloads(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             db = WorkerDB(str(Path(tmp) / "cluster.db"))
@@ -1056,6 +1140,106 @@ inference:
 
         self.assertGreater(estimate.estimated_price_qi, 0)
         self.assertEqual(estimate.pricing_basis, "tokens+privacy+latency+reputation+energy")
+
+    def test_customer_account_debit_credit_and_escrow(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            db = WorkerDB(str(Path(tmp) / "accounts.db"))
+            create_customer_account(db, "customer-a", initial_qi=10)
+            credit_available_balance(db, "customer-a", 2)
+            debit_available_balance(db, "customer-a", 3)
+            job = {**self._customer_job("escrow-job"), "customer_id": "customer-a", "max_price_qi": 4}
+
+            escrow = escrow_job_funds(db, job, 4)
+
+            balance = customer_balance(db, "customer-a")
+            self.assertEqual(balance["available_qi"], 5)
+            self.assertEqual(balance["escrowed_qi"], 4)
+            self.assertEqual(escrow["status"], "escrowed")
+            with self.assertRaises(ValueError):
+                debit_available_balance(db, "customer-a", 100)
+            db.close()
+
+    def test_successful_job_settles_escrow_fee_and_worker_payable(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            db = WorkerDB(str(Path(tmp) / "settlement.db"))
+            create_customer_account(db, "customer-a", initial_qi=1)
+            job = {**self._customer_job("settled-job"), "customer_id": "customer-a", "max_price_qi": 1}
+            escrow_job_funds(db, job, 1)
+
+            settlement = settle_job_escrow(db, "settled-job", "worker-a", 0.4, 2.5)
+            record_settlement(db, fee_qi=settlement["fee_qi"], worker_payout_qi=settlement["worker_payout_qi"], settled_qi=settlement["settled_qi"])
+
+            balance = customer_balance(db, "customer-a")
+            treasury = get_treasury(db)
+            worker = worker_account(db, "worker-a")
+            self.assertAlmostEqual(settlement["fee_qi"], 0.01)
+            self.assertAlmostEqual(settlement["worker_payout_qi"], 0.39)
+            self.assertAlmostEqual(balance["available_qi"], 0.6)
+            self.assertAlmostEqual(balance["spent_qi"], 0.4)
+            self.assertAlmostEqual(treasury["total_fees_collected"], 0.01)
+            self.assertAlmostEqual(worker["payable_qi"], 0.39)
+            db.close()
+
+    def test_failed_job_refunds_escrow_and_treasury_tracks_refund(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            db = WorkerDB(str(Path(tmp) / "refund.db"))
+            create_customer_account(db, "customer-a", initial_qi=1)
+            job = {**self._customer_job("refund-job"), "customer_id": "customer-a", "max_price_qi": 1}
+            escrow_job_funds(db, job, 1)
+
+            refund = refund_job_escrow(db, "refund-job", "failed")
+            record_refund(db, refund_qi=refund["refund_qi"])
+
+            balance = customer_balance(db, "customer-a")
+            treasury = get_treasury(db)
+            self.assertEqual(refund["status"], "refunded")
+            self.assertAlmostEqual(balance["available_qi"], 1)
+            self.assertAlmostEqual(balance["escrowed_qi"], 0)
+            self.assertAlmostEqual(treasury["total_customer_refunds"], 1)
+            db.close()
+
+    def test_settlement_invoice_is_deterministic_redacted_and_matches_totals(self) -> None:
+        job = {**self._customer_job("invoice-job"), "customer_id": "invoice-customer", "metadata": {"prompt": "secret prompt"}}
+        receipt = self._inference_receipt()
+        receipt["metadata"]["job_id"] = "invoice-job"
+        receipt["receipt_hash"] = "receipt-hash"
+        epoch = {"epoch_id": "epoch-a", "ended_at": "2026-01-01T00:00:00Z"}
+        escrow = {"status": "settled", "settled_qi": 1.0, "fee_qi": 0.025, "worker_payout_qi": 0.975, "refunded_qi": 0.0}
+
+        first = build_settlement_invoice(invoice_type="customer", job=job, epoch=epoch, receipt=receipt, escrow=escrow, committee_outcome="accepted", challenge_outcome="accepted")
+        second = build_settlement_invoice(invoice_type="customer", job=job, epoch=epoch, receipt=receipt, escrow=escrow, committee_outcome="accepted", challenge_outcome="accepted")
+
+        self.assertEqual(first["invoice_hash"], second["invoice_hash"])
+        self.assertEqual(first["invoice_hash"], compute_invoice_hash(first))
+        self.assertEqual(first["fee_qi"], 0.025)
+        self.assertNotIn("secret prompt", json.dumps(first, sort_keys=True))
+
+    def test_accounting_checks_pass_and_detect_corruption(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            db = WorkerDB(str(Path(tmp) / "checks.db"))
+            create_customer_account(db, "customer-a", initial_qi=1)
+            job = {**self._customer_job("check-job"), "customer_id": "customer-a", "max_price_qi": 1}
+            escrow_job_funds(db, job, 1)
+            settlement = settle_job_escrow(db, "check-job", "worker-a", 1, 0)
+            record_settlement(db, fee_qi=settlement["fee_qi"], worker_payout_qi=settlement["worker_payout_qi"], settled_qi=settlement["settled_qi"])
+
+            self.assertTrue(all(check.status == "PASS" for check in run_accounting_checks(db)))
+            db.conn.execute("UPDATE marketplace_treasury SET total_fees_collected = 99 WHERE treasury_id = 'local-marketplace'")
+            self.assertIn("FAIL", {check.status for check in run_accounting_checks(db)})
+            db.close()
+
+    def test_mining_fallback_economic_comparison(self) -> None:
+        comparison = compare_inference_vs_mining(
+            gpu_wattage=300,
+            energy_cost_per_kwh=0.15,
+            inference_utilization=0.75,
+            mining_reward_estimate_qi_per_hour=0.01,
+            average_inference_price_qi=0.002,
+            tokens_per_second=50,
+        )
+
+        self.assertGreater(comparison["estimated_inference_revenue_qi_per_hour"], comparison["estimated_mining_fallback_revenue_qi_per_hour"])
+        self.assertEqual(comparison["utilization_ratio"], 0.75)
 
     def test_customer_job_is_queued_routed_assigned_and_status_updated(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -59,6 +59,14 @@ Accepted work creates local payout events. Settlement epochs batch those payout 
 
 Cluster receipts follow the same rule: controller-accepted receipts create local payout events and epoch summaries; rejected receipts do not update payable balances.
 
+## Marketplace Accounting
+
+Customer accounts separate spendable and escrowed Qi. Jobs reserve estimated funds before routing. Verified successful work settles escrow into worker payable Qi plus marketplace fee, with unused escrow refunded to the customer. Failed, rejected, expired, or disputed jobs refund escrow and do not increase worker payable balance.
+
+Worker accounts track earned, payable, disputed, rejected, and refunded Qi. Marketplace treasury totals track fees, worker payouts, refunds, disputed volume, and settled volume. `accounting_checks.py` reconciles these local ledgers against job escrow records and paid inference jobs.
+
+This is a local deterministic economic simulation. QiCompute is not a blockchain, wallet, token transfer system, or payment processor.
+
 ## Privacy Model
 
 Strict mode is the default. Raw prompts are not stored in customer jobs, receipts, logs, audit trails, snapshots, or summaries. The local Ollama runtime may receive a prompt transiently for execution, but QiCompute stores prompt hashes, output hashes, byte counts, token counts, timing, energy estimates, and verification metadata. Raw model output is not persisted.

@@ -279,6 +279,61 @@ The local marketplace layer models:
 customer job -> router -> selected worker -> receipt -> verification -> reputation -> settled payout
 ```
 
+## Marketplace Economics
+
+QiCompute now simulates marketplace settlement accounting locally. It is not a blockchain, token transfer system, wallet, or payment network.
+
+Economic flow:
+
+```text
+customer funding -> job escrow -> private inference execution
+-> verification/committee result -> settlement split or refund
+-> worker payable accounting -> treasury accounting -> epoch summary
+```
+
+### Escrow Lifecycle
+
+Customer accounts track `available_qi`, `escrowed_qi`, `spent_qi`, and `refunded_qi`. A job reserves estimated funds before routing. Successful verified work settles escrow into:
+
+- worker payout
+- marketplace fee
+- customer refund for unused escrow
+
+Failed, rejected, expired, or disputed work refunds escrow to the customer and does not increase worker payable balance.
+
+### Worker Payables
+
+Worker accounts track `earned_qi`, `payable_qi`, `disputed_qi`, `rejected_qi`, and `refunded_qi`. Verified settled work increases payable Qi. Duplicate receipts remain idempotent and do not double-pay.
+
+### Treasury Accounting
+
+The local marketplace treasury tracks:
+
+- fees collected
+- worker payouts
+- customer refunds
+- disputed volume
+- settled volume
+
+Configure the local fee:
+
+```yaml
+marketplace:
+  fee_percent: 2.5
+```
+
+### Settlement Invoices
+
+`invoices.py` builds deterministic redacted invoice artifacts for customer, worker, and epoch settlement views. Invoices include job/epoch IDs, customer and worker IDs, estimated and settled Qi, fee/refund amounts, receipt hashes, and challenge/committee outcomes. They never include raw prompts or raw outputs.
+
+Run accounting reconciliation:
+
+```bash
+python3 accounting_checks.py
+```
+
+The checks reconcile escrow totals, treasury totals, worker payable totals, refunds, and duplicate paid jobs.
+
 Register the local worker:
 
 ```bash

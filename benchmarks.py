@@ -6,13 +6,14 @@ import time
 from statistics import mean
 from typing import Any
 
+from economics import compare_inference_vs_mining
 from runtime import SimulatedRuntime, SubprocessRuntime
 
 
 def run_benchmarks(iterations: int = 3) -> dict[str, Any]:
     return {
-        "simulated": _benchmark_runtime(SimulatedRuntime(), iterations, _base_config("simulated")),
-        "subprocess": _benchmark_runtime(SubprocessRuntime(), iterations, _base_config("subprocess")),
+        "simulated": _with_economics(_benchmark_runtime(SimulatedRuntime(), iterations, _base_config("simulated"))),
+        "subprocess": _with_economics(_benchmark_runtime(SubprocessRuntime(), iterations, _base_config("subprocess"))),
     }
 
 
@@ -69,6 +70,20 @@ def _job(index: int) -> dict[str, Any]:
         "model": "benchmark-model",
         "input_tokens": 4,
         "expected_output_tokens": 16,
+    }
+
+
+def _with_economics(result: dict[str, float]) -> dict[str, Any]:
+    return {
+        **result,
+        "economic_comparison": compare_inference_vs_mining(
+            gpu_wattage=100,
+            energy_cost_per_kwh=0.15,
+            inference_utilization=0.75,
+            mining_reward_estimate_qi_per_hour=0.01,
+            average_inference_price_qi=0.0001,
+            tokens_per_second=result["tokens_per_second"],
+        ),
     }
 
 

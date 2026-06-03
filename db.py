@@ -145,6 +145,50 @@ CREATE TABLE IF NOT EXISTS customer_jobs (
     metadata_json TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS customer_accounts (
+    customer_id TEXT PRIMARY KEY,
+    created_at TEXT NOT NULL,
+    available_qi REAL NOT NULL DEFAULT 0,
+    escrowed_qi REAL NOT NULL DEFAULT 0,
+    spent_qi REAL NOT NULL DEFAULT 0,
+    refunded_qi REAL NOT NULL DEFAULT 0,
+    metadata_json TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS job_escrows (
+    job_id TEXT PRIMARY KEY,
+    customer_id TEXT NOT NULL,
+    escrowed_qi REAL NOT NULL,
+    settled_qi REAL NOT NULL DEFAULT 0,
+    fee_qi REAL NOT NULL DEFAULT 0,
+    worker_payout_qi REAL NOT NULL DEFAULT 0,
+    refunded_qi REAL NOT NULL DEFAULT 0,
+    status TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    metadata_json TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS worker_accounts (
+    worker_id TEXT PRIMARY KEY,
+    earned_qi REAL NOT NULL DEFAULT 0,
+    payable_qi REAL NOT NULL DEFAULT 0,
+    disputed_qi REAL NOT NULL DEFAULT 0,
+    rejected_qi REAL NOT NULL DEFAULT 0,
+    refunded_qi REAL NOT NULL DEFAULT 0,
+    updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS marketplace_treasury (
+    treasury_id TEXT PRIMARY KEY,
+    total_fees_collected REAL NOT NULL DEFAULT 0,
+    total_worker_payouts REAL NOT NULL DEFAULT 0,
+    total_customer_refunds REAL NOT NULL DEFAULT 0,
+    total_disputed_volume REAL NOT NULL DEFAULT 0,
+    total_settled_volume REAL NOT NULL DEFAULT 0,
+    updated_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS routing_audit_logs (
     audit_id TEXT PRIMARY KEY,
     job_id TEXT NOT NULL,
@@ -1077,6 +1121,9 @@ class WorkerDB:
         return [_customer_job_row_to_dict(row) for row in rows]
 
     def expire_stale_customer_jobs(self, now: str) -> int:
+        from accounts import refund_job_escrow
+        from treasury import record_refund
+
         rows = self.conn.execute(
             """
             SELECT * FROM customer_jobs
@@ -1095,6 +1142,8 @@ class WorkerDB:
                 """,
                 (now, failures.JOB_EXPIRED, row["job_id"]),
             )
+            refund = refund_job_escrow(self, row["job_id"], failures.JOB_EXPIRED)
+            record_refund(self, refund_qi=refund.get("refund_qi", 0))
         self.conn.commit()
         return len(rows)
 

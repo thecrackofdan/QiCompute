@@ -4,6 +4,7 @@ import argparse
 from typing import Any
 
 from db import WorkerDB
+from economics import compare_inference_vs_mining
 from epochs import active_epoch
 from receipts import utc_now_iso
 from worker import load_config
@@ -15,6 +16,8 @@ def cluster_health(db: WorkerDB) -> dict[str, Any]:
     jobs = _all_jobs(db)
     events = db.recent_cluster_events(50)
     active = active_epoch(db)
+    total_watts = sum(float(worker.get("total_watts_capacity", 0) or 0) for worker in all_workers)
+    utilization = len([job for job in jobs if job["status"] in {"routed", "running"}]) / max(1, len(all_workers))
     return {
         "total_workers": len(all_workers),
         "online_workers": len([worker for worker in all_workers if worker.get("online")]),
@@ -31,6 +34,14 @@ def cluster_health(db: WorkerDB) -> dict[str, Any]:
             "total_tokens": active.get("total_tokens", 0),
         },
         "online_worker_ids": [worker["worker_id"] for worker in workers],
+        "economic_comparison": compare_inference_vs_mining(
+            gpu_wattage=total_watts,
+            energy_cost_per_kwh=0.15,
+            inference_utilization=min(utilization, 1.0),
+            mining_reward_estimate_qi_per_hour=0.01 * max(1, len(all_workers)),
+            average_inference_price_qi=max(float(active.get("total_settled_qi", 0)), 0.0001),
+            tokens_per_second=100.0 * max(1, len(workers)),
+        ),
     }
 
 

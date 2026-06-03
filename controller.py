@@ -9,6 +9,7 @@ from typing import Any
 from uuid import uuid4
 
 import failures
+from accounts import record_worker_rejected, refund_job_escrow, settle_job_escrow
 from capabilities import verify_capability_claim
 from db import WorkerDB
 from enrollment import activate_worker_enrollment, get_active_worker_secret
@@ -17,6 +18,7 @@ from privacy import redact_sensitive_fields
 from receipts import compute_receipt_hash, utc_now_iso
 from reputation import update_worker_reputation
 from router import route_and_audit_inference_job
+from treasury import record_refund, record_settlement
 from transport import NONCE_HEADER, TIMESTAMP_HEADER, verify_request_signature
 from verifier import VerificationResult, verify_inference_receipt
 from worker import load_config
@@ -101,6 +103,8 @@ class ClusterController:
             return {"accepted": False, "failure_code": failures.INVALID_LEASE, "reason": "lease mismatch"}
         if job.get("lease_expires_at") and job["lease_expires_at"] <= utc_now_iso():
             self.db.requeue_expired_leased_jobs(utc_now_iso())
+            refund = refund_job_escrow(self.db, job["job_id"], failures.LEASE_EXPIRED)
+            record_refund(self.db, refund_qi=refund.get("refund_qi", 0))
             self._event("receipt", receipt.get("worker_id"), job_id, False, failures.LEASE_EXPIRED, {"reason": "lease expired"})
             return {"accepted": False, "failure_code": failures.LEASE_EXPIRED, "reason": "lease expired"}
         receipt["receipt_hash"] = receipt.get("receipt_hash") or compute_receipt_hash(receipt)
@@ -115,19 +119,40 @@ class ClusterController:
             failure_code = verification.reason
             self.db.mark_customer_job_failure(job["job_id"], failure_code, "cluster receipt rejected")
             self.db.decrement_worker_load(receipt["worker_id"])
+            refund = refund_job_escrow(self.db, job["job_id"], "disputed" if failure_code == failures.COMMITTEE_DISPUTED else failure_code)
+            record_refund(self.db, refund_qi=refund.get("refund_qi", 0), disputed=failure_code == failures.COMMITTEE_DISPUTED)
+            record_worker_rejected(self.db, receipt["worker_id"], receipt.get("estimated_qi_owed", 0), disputed=failure_code == failures.COMMITTEE_DISPUTED)
             self._event("receipt", receipt["worker_id"], job["job_id"], False, failure_code, verification.to_dict())
             return {"accepted": False, "failure_code": failure_code, "verification": verification.to_dict()}
         epoch = active_epoch(self.db)
+        settlement = settle_job_escrow(
+            self.db,
+            job["job_id"],
+            receipt["worker_id"],
+            receipt["estimated_qi_owed"],
+            float(self.config.get("marketplace", {}).get("fee_percent", 0)),
+        )
+        record_settlement(
+            self.db,
+            fee_qi=settlement["fee_qi"],
+            worker_payout_qi=settlement["worker_payout_qi"],
+            settled_qi=settlement["settled_qi"],
+        )
         payout_event = {
             "event_id": str(uuid4()),
             "worker_id": receipt["worker_id"],
             "event_type": "inference_job",
             "basis": "cluster_verified_runtime",
-            "qi_amount": receipt["estimated_qi_owed"],
+            "qi_amount": settlement["worker_payout_qi"],
             "created_at": utc_now_iso(),
             "source_id": receipt["receipt_id"],
             "epoch_id": epoch["epoch_id"],
-            "metadata": {"job_id": job["job_id"], "verification_reason": verification.reason},
+            "metadata": {
+                "job_id": job["job_id"],
+                "verification_reason": verification.reason,
+                "settled_qi": settlement["settled_qi"],
+                "fee_qi": settlement["fee_qi"],
+            },
         }
         self.db.insert_payout_event(payout_event)
         self.db.record_inference_job_paid(

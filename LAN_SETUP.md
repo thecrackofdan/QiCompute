@@ -61,7 +61,10 @@ python3 cluster_health.py
 python3 cluster_ctl.py workers
 python3 cluster_ctl.py jobs
 python3 cluster_ctl.py epochs
+python3 accounting_checks.py
 ```
+
+`accounting_checks.py` verifies local escrow, treasury, worker payable, refund, and duplicate-payment consistency. It does not perform blockchain or wallet settlement.
 
 ## Run Local Validation
 

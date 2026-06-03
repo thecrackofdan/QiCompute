@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 from typing import Any
 
+from accounts import create_customer_account, escrow_job_funds
 from capabilities import make_capability_claim
 from controller import ClusterController
 from daemon import receipt_from_runtime_result
@@ -15,6 +16,7 @@ from receipts import utc_now_iso
 from registry import worker_from_config
 from runtime import SimulatedRuntime
 from summary import print_epoch_summary, print_job_summary, print_worker_summary
+from treasury import get_treasury
 from worker import load_config
 
 
@@ -45,7 +47,10 @@ def run_cluster_demo(
 
         for index in range(job_count):
             job = {**demo_job("honest"), "job_id": f"demo-cluster-job-{index}", "model": _model_for_index(index)}
+            if index == 0:
+                create_customer_account(db, job["customer_id"], initial_qi=float(job["max_price_qi"]) * max(1, job_count) + 0.000001)
             db.insert_customer_job(job)
+            escrow_job_funds(db, job, job["max_price_qi"])
 
         metrics = {
             "jobs_completed": 0,
@@ -94,6 +99,10 @@ def run_cluster_demo(
         workers = [db.get_worker(worker_config["worker"]["id"]) for worker_config in worker_configs]
         metrics["jobs_completed"] = len([job for job in jobs if job["status"] == "completed"])
         metrics["total_settled_qi"] = epoch["total_settled_qi"]
+        treasury = get_treasury(db)
+        metrics["marketplace_fees_collected"] = treasury["total_fees_collected"]
+        metrics["worker_payouts"] = treasury["total_worker_payouts"]
+        metrics["customer_refunds"] = treasury["total_customer_refunds"]
         metrics["average_worker_utilization"] = sum(float(worker.get("load_percent", 0) or 0) for worker in workers if worker) / max(1, len(workers))
         _print_cluster_demo(db, epoch, jobs[-1] if jobs else {}, events, metrics)
         return {

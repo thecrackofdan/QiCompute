@@ -58,6 +58,9 @@ pricing:
   base_output_token_rate_qi: 0.0000002
   energy_rate_qi_per_joule: 0.0
 
+marketplace:
+  fee_percent: 2.5
+
 demo:
   seed: 7
 

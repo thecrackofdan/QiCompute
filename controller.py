@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import urllib.parse
+from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 from uuid import uuid4
@@ -10,11 +11,12 @@ from uuid import uuid4
 import failures
 from capabilities import verify_capability_claim
 from db import WorkerDB
+from enrollment import activate_worker_enrollment, get_active_worker_secret
 from epochs import active_epoch
 from receipts import compute_receipt_hash, utc_now_iso
 from reputation import update_worker_reputation
 from router import route_and_audit_inference_job
-from transport import verify_request_signature
+from transport import NONCE_HEADER, TIMESTAMP_HEADER, verify_request_signature
 from verifier import VerificationResult, verify_inference_receipt
 from worker import load_config
 
@@ -24,7 +26,6 @@ class ClusterController:
         self.db = db
         self.config = config
         self.secret = config.get("cluster", {}).get("shared_secret", "dev-local-secret")
-        self.nonce_cache: set[str] = set()
 
     def handle_heartbeat(self, payload: dict[str, Any]) -> dict[str, Any]:
         worker_id = payload.get("worker_id")
@@ -63,10 +64,13 @@ class ClusterController:
         worker.setdefault("metadata", {})
         worker["metadata"] = {**worker.get("metadata", {}), "capability_claim": claim, "capability_hash": claim.get("capability_hash")}
         self.db.register_worker(worker)
+        if self.config.get("cluster", {}).get("allow_dev_shared_secret", False):
+            activate_worker_enrollment(self.db, worker["worker_id"], self.config.get("cluster", {}).get("shared_secret", self.secret))
         self._event("capability", worker["worker_id"], None, True, None, {"capability_hash": claim.get("capability_hash")})
         return {"accepted": True, "worker_id": worker["worker_id"]}
 
     def handle_next_job(self, worker_id: str) -> dict[str, Any]:
+        self.db.requeue_expired_leased_jobs(utc_now_iso())
         worker = self.db.get_worker(worker_id)
         if not worker or not worker.get("online"):
             self._event("job_next", worker_id, None, False, failures.WORKER_OFFLINE, {})
@@ -74,9 +78,9 @@ class ClusterController:
         for job in self.db.list_queued_jobs():
             decision = route_and_audit_inference_job(self.db, {**job, "requires_gpu": True}, [worker])
             if decision.accepted and decision.worker_id:
-                self.db.assign_customer_job(job["job_id"], worker_id, decision.score)
-                assigned = self.db.get_customer_job(job["job_id"])
-                self._event("job_assigned", worker_id, job["job_id"], True, None, {"route_score": decision.score})
+                lease_seconds = int(self.config.get("cluster", {}).get("job_lease_seconds", 60))
+                assigned = self.db.lease_customer_job(job["job_id"], worker_id, lease_seconds)
+                self._event("job_assigned", worker_id, job["job_id"], True, None, {"route_score": decision.score, "lease_id": assigned.get("lease_id")})
                 return {"accepted": True, "job": _job_payload_for_worker(assigned)}
         self._event("job_next", worker_id, None, True, None, {"job": None})
         return {"accepted": True, "job": None, "reason": "no eligible job"}
@@ -88,6 +92,13 @@ class ClusterController:
         if not receipt or not job:
             self._event("receipt", receipt.get("worker_id"), job_id, False, failures.VERIFICATION_FAILED, {"reason": "missing receipt or job"})
             return {"accepted": False, "failure_code": failures.VERIFICATION_FAILED, "reason": "missing receipt or job"}
+        if payload.get("lease_id") != job.get("lease_id"):
+            self._event("receipt", receipt.get("worker_id"), job_id, False, failures.INVALID_LEASE, {"reason": "lease mismatch"})
+            return {"accepted": False, "failure_code": failures.INVALID_LEASE, "reason": "lease mismatch"}
+        if job.get("lease_expires_at") and job["lease_expires_at"] <= utc_now_iso():
+            self.db.requeue_expired_leased_jobs(utc_now_iso())
+            self._event("receipt", receipt.get("worker_id"), job_id, False, failures.LEASE_EXPIRED, {"reason": "lease expired"})
+            return {"accepted": False, "failure_code": failures.LEASE_EXPIRED, "reason": "lease expired"}
         receipt["receipt_hash"] = receipt.get("receipt_hash") or compute_receipt_hash(receipt)
         verification = verify_inference_receipt(receipt, _job_for_verifier(job), self.config)
         receipt.setdefault("metadata", {})["verification"] = verification.to_dict()
@@ -135,13 +146,45 @@ class ClusterController:
         return {"accepted": True}
 
     def verify_headers(self, payload: dict[str, Any], headers: dict[str, str]) -> dict[str, Any]:
-        return verify_request_signature(
+        worker_id = payload.get("worker_id")
+        if not worker_id:
+            return {"accepted": False, "failure_code": failures.AUTH_FAILED, "reason": "missing worker_id"}
+        secret = self._secret_for_worker(worker_id)
+        if not secret:
+            return {"accepted": False, "failure_code": failures.AUTH_FAILED, "reason": "worker is not actively enrolled"}
+        normalized = {key.lower(): value for key, value in headers.items()}
+        nonce = normalized.get(NONCE_HEADER.lower())
+        timestamp = normalized.get(TIMESTAMP_HEADER.lower())
+        if nonce and self.db.transport_nonce_seen(nonce):
+            return {"accepted": False, "failure_code": failures.INVALID_NONCE, "reason": "nonce already used"}
+        result = verify_request_signature(
             payload,
             headers,
-            self.secret,
+            secret,
             max_age_seconds=int(self.config.get("cluster", {}).get("request_timeout_seconds", 5)) + 300,
-            nonce_cache=self.nonce_cache,
+            nonce_cache=set(),
         )
+        if result.get("accepted") and nonce:
+            self.db.record_transport_nonce(
+                nonce,
+                created_at=utc_now_iso(),
+                expires_at=_nonce_expires_at(timestamp, int(self.config.get("cluster", {}).get("request_timeout_seconds", 5)) + 300),
+                source_worker_id=worker_id,
+                metadata={"source": "controller"},
+            )
+        return result
+
+    def _secret_for_worker(self, worker_id: str) -> str | None:
+        cluster_cfg = self.config.get("cluster", {})
+        candidates = []
+        if isinstance(cluster_cfg.get("worker_secrets"), dict):
+            candidates.append(cluster_cfg["worker_secrets"].get(worker_id))
+        if cluster_cfg.get("allow_dev_shared_secret", False):
+            candidates.append(cluster_cfg.get("shared_secret", self.secret))
+        for candidate in [secret for secret in candidates if secret]:
+            if get_active_worker_secret(self.db, worker_id, candidate):
+                return candidate
+        return None
 
     def _event(self, event_type: str, worker_id: str | None, job_id: str | None, accepted: bool, failure_code: str | None, metadata: dict[str, Any]) -> None:
         self.db.insert_cluster_event(
@@ -264,6 +307,14 @@ def _job_for_verifier(job: dict[str, Any]) -> dict[str, Any]:
 def _refresh_receipt_hash(receipt: dict[str, Any]) -> str:
     receipt.pop("receipt_hash", None)
     return compute_receipt_hash(receipt)
+
+
+def _nonce_expires_at(timestamp: str | None, max_age_seconds: int) -> str:
+    try:
+        base = datetime.fromtimestamp(int(timestamp or "0"), tz=timezone.utc)
+    except ValueError:
+        base = datetime.now(timezone.utc)
+    return (base + timedelta(seconds=max_age_seconds)).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
 if __name__ == "__main__":

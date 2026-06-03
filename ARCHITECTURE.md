@@ -71,6 +71,20 @@ Cluster transport preserves the same default. Worker receipts contain output has
 
 The controller rejects missing signatures, expired timestamps, duplicate nonces, tampered bodies, and invalid signatures. This is a development boundary for trusted LAN testing, not public internet infrastructure.
 
+Accepted nonces are persisted in SQLite so replayed requests fail even after a controller object restart. Expired nonce records can be pruned.
+
+## Worker Enrollment
+
+Cluster workers can be enrolled before they authenticate. Enrollment records are stored as `pending`, `active`, or `revoked`. Raw worker secrets are not stored; the controller stores only a shared-secret hash. In local demos, `cluster.allow_dev_shared_secret` can enable the configured development secret as a fallback. Main config keeps that fallback disabled.
+
+## Job Leases
+
+The controller assigns jobs with a lease ID and lease expiration. Receipts must include the matching lease ID. Expired leases are requeued so disappeared workers do not permanently lock jobs.
+
+## Controller Snapshots
+
+`snapshot.py` exports a deterministic controller snapshot for future failover and decentralization work. It includes worker summaries, active jobs, outstanding leases, recent events, audit logs, and active epoch state without raw prompts or raw outputs.
+
 ## Mining Fallback Philosophy
 
 Inference is the primary work mode. Mining fallback exists to keep GPU workers economically active when inference demand is unavailable. Mining shares are accounting inputs for future block reward distribution and do not directly increase balances.

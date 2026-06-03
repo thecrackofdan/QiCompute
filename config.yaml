@@ -66,5 +66,6 @@ cluster:
   worker_bind_host: "127.0.0.1"
   worker_bind_port: 8081
   shared_secret: "dev-local-secret"
+  allow_dev_shared_secret: false
   heartbeat_interval_seconds: 10
   request_timeout_seconds: 5

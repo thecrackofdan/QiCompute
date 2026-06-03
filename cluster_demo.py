@@ -41,7 +41,14 @@ def run_cluster_demo(config_path: str = "config.demo.yaml", db_path: str | None 
         assigned_job = next_job["job"]
         result = SimulatedRuntime().run(assigned_job, config)
         receipt = receipt_from_runtime_result(config, assigned_job["assigned_worker_id"], assigned_job, result)
-        receipt_result = controller.handle_receipt({"worker_id": receipt["worker_id"], "job_id": assigned_job["job_id"], "receipt": receipt})
+        receipt_result = controller.handle_receipt(
+            {
+                "worker_id": receipt["worker_id"],
+                "job_id": assigned_job["job_id"],
+                "lease_id": assigned_job.get("lease_id"),
+                "receipt": receipt,
+            }
+        )
         epoch = finalize_epoch(db, active["epoch_id"])
         stored_job = db.get_customer_job(job["job_id"])
         events = db.recent_cluster_events(20)

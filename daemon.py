@@ -223,10 +223,15 @@ class ClusterWorkerClient:
             timeout=self.timeout,
         )
 
-    def submit_receipt(self, receipt: dict[str, Any]) -> dict[str, Any]:
+    def submit_receipt(self, receipt: dict[str, Any], lease_id: str | None = None) -> dict[str, Any]:
         return post_json(
             f"{self.controller_url}/receipt",
-            {"worker_id": self.worker_id, "job_id": receipt.get("metadata", {}).get("job_id"), "receipt": _redact_receipt_for_cluster(receipt)},
+            {
+                "worker_id": self.worker_id,
+                "job_id": receipt.get("metadata", {}).get("job_id"),
+                "lease_id": lease_id,
+                "receipt": _redact_receipt_for_cluster(receipt),
+            },
             self.secret,
             timeout=self.timeout,
         )
@@ -244,7 +249,7 @@ class ClusterWorkerClient:
         runtime = runner_for_type(selected_runtime_type)
         result = runtime.run(job, self.config)
         receipt = receipt_from_runtime_result(self.config, self.worker_id, job, result)
-        submission = self.submit_receipt(receipt)
+        submission = self.submit_receipt(receipt, lease_id=job.get("lease_id"))
         return {"accepted": bool(submission.get("accepted")), "status": "submitted", "job": job, "receipt": receipt, "submission": submission}
 
 

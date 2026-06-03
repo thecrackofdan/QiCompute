@@ -13,6 +13,7 @@ QiCompute is currently:
 - Local worker registry and job routing
 - Runtime daemon with simulated, subprocess, and local Ollama support
 - Local LAN controller/worker skeleton with signed messages
+- Worker enrollment, persistent nonce replay protection, and job leases
 - Receipt hashing, validation, challenge verification, and committee simulation
 - Reputation updates, retries, expiration, stress simulation, and settlement epochs
 - Mining fallback accounting with share and block reward separation
@@ -38,6 +39,15 @@ QiCompute is currently:
 - Add worker-to-router transport
 - Authenticated job envelope exchange
 - Current networking is limited to local/LAN HTTP skeletons with shared-secret HMAC. There is no public networking.
+- Current cluster mode is a trusted-controller prototype, not decentralized consensus.
+
+## Decentralization Readiness Roadmap
+
+- Replace trusted-controller assignment with replicated coordination
+- Expand per-worker enrollment into decentralized identity
+- Make controller snapshots importable for failover
+- Add committee anti-collusion policies beyond operator/region diversity
+- Keep private prompts and raw outputs out of shared settlement state
 
 ## Privacy Roadmap
 

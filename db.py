@@ -131,6 +131,9 @@ CREATE TABLE IF NOT EXISTS customer_jobs (
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
     expires_at TEXT,
+    lease_id TEXT,
+    lease_expires_at TEXT,
+    assigned_at TEXT,
     retry_count INTEGER NOT NULL DEFAULT 0,
     last_failure_code TEXT,
     last_failure_reason TEXT,
@@ -224,6 +227,25 @@ CREATE TABLE IF NOT EXISTS cluster_events (
     metadata_json TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS transport_nonces (
+    nonce TEXT PRIMARY KEY,
+    created_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    source_worker_id TEXT,
+    metadata_json TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS worker_enrollments (
+    worker_id TEXT PRIMARY KEY,
+    enrollment_id TEXT NOT NULL,
+    shared_secret_hash TEXT,
+    status TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    activated_at TEXT,
+    revoked_at TEXT,
+    metadata_json TEXT NOT NULL
+);
+
 CREATE UNIQUE INDEX IF NOT EXISTS idx_mining_rounds_block_hash
 ON mining_rounds(block_hash)
 WHERE block_hash IS NOT NULL;
@@ -264,6 +286,9 @@ class WorkerDB:
         job_columns = {row["name"] for row in self.conn.execute("PRAGMA table_info(customer_jobs)")}
         for column, ddl in {
             "expires_at": "ALTER TABLE customer_jobs ADD COLUMN expires_at TEXT",
+            "lease_id": "ALTER TABLE customer_jobs ADD COLUMN lease_id TEXT",
+            "lease_expires_at": "ALTER TABLE customer_jobs ADD COLUMN lease_expires_at TEXT",
+            "assigned_at": "ALTER TABLE customer_jobs ADD COLUMN assigned_at TEXT",
             "retry_count": "ALTER TABLE customer_jobs ADD COLUMN retry_count INTEGER NOT NULL DEFAULT 0",
             "last_failure_code": "ALTER TABLE customer_jobs ADD COLUMN last_failure_code TEXT",
             "last_failure_reason": "ALTER TABLE customer_jobs ADD COLUMN last_failure_reason TEXT",
@@ -861,8 +886,9 @@ class WorkerDB:
                 job_id, customer_id, model, prompt_hash, input_tokens,
                 expected_output_tokens, privacy_level, max_price_qi, status,
                 assigned_worker_id, route_score, created_at, updated_at, expires_at,
+                lease_id, lease_expires_at, assigned_at,
                 retry_count, last_failure_code, last_failure_reason, metadata_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 job["job_id"],
@@ -879,6 +905,9 @@ class WorkerDB:
                 now,
                 job.get("updated_at", now),
                 job.get("expires_at"),
+                job.get("lease_id"),
+                job.get("lease_expires_at"),
+                job.get("assigned_at"),
                 int(job.get("retry_count", 0)),
                 job.get("last_failure_code"),
                 job.get("last_failure_reason"),
@@ -916,12 +945,72 @@ class WorkerDB:
             SET status = 'routed',
                 assigned_worker_id = ?,
                 route_score = ?,
+                assigned_at = ?,
                 updated_at = ?
             WHERE job_id = ?
             """,
-            (worker_id, route_score, utc_now_iso(), job_id),
+            (worker_id, route_score, utc_now_iso(), utc_now_iso(), job_id),
         )
         self.conn.commit()
+
+    def lease_customer_job(self, job_id: str, worker_id: str, lease_seconds: int) -> dict[str, Any]:
+        from receipts import utc_now_iso
+        from datetime import datetime, timedelta, timezone
+        from uuid import uuid4
+
+        now = utc_now_iso()
+        expires_at = (datetime.now(timezone.utc) + timedelta(seconds=lease_seconds)).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+        lease_id = str(uuid4())
+        self.conn.execute(
+            """
+            UPDATE customer_jobs
+            SET status = 'routed',
+                assigned_worker_id = ?,
+                assigned_at = ?,
+                lease_id = ?,
+                lease_expires_at = ?,
+                updated_at = ?
+            WHERE job_id = ?
+            """,
+            (worker_id, now, lease_id, expires_at, now, job_id),
+        )
+        self.conn.commit()
+        return self.get_customer_job(job_id)
+
+    def expire_job_leases(self, now: str) -> int:
+        rows = self.conn.execute(
+            """
+            SELECT * FROM customer_jobs
+            WHERE lease_expires_at IS NOT NULL
+              AND lease_expires_at <= ?
+              AND status IN ('routed', 'running')
+            """,
+            (now,),
+        ).fetchall()
+        for row in rows:
+            self.conn.execute(
+                """
+                UPDATE customer_jobs
+                SET status = 'queued',
+                    assigned_worker_id = NULL,
+                    route_score = NULL,
+                    lease_id = NULL,
+                    lease_expires_at = NULL,
+                    assigned_at = NULL,
+                    updated_at = ?,
+                    last_failure_code = ?
+                WHERE job_id = ?
+                """,
+                (now, failures.LEASE_EXPIRED, row["job_id"]),
+            )
+        self.conn.commit()
+        return len(rows)
+
+    def release_expired_leases(self, now: str) -> int:
+        return self.expire_job_leases(now)
+
+    def requeue_expired_leased_jobs(self, now: str) -> int:
+        return self.expire_job_leases(now)
 
     def mark_customer_job_failure(self, job_id: str, failure_code: str, failure_reason: str, *, retrying: bool = False) -> None:
         from receipts import utc_now_iso
@@ -1081,6 +1170,62 @@ class WorkerDB:
         )
         return [_cluster_event_row_to_dict(row) for row in rows]
 
+    def record_transport_nonce(self, nonce: str, created_at: str, expires_at: str, source_worker_id: str | None = None, metadata: dict[str, Any] | None = None) -> None:
+        self.conn.execute(
+            """
+            INSERT INTO transport_nonces (
+                nonce, created_at, expires_at, source_worker_id, metadata_json
+            ) VALUES (?, ?, ?, ?, ?)
+            """,
+            (nonce, created_at, expires_at, source_worker_id, json.dumps(metadata or {}, sort_keys=True)),
+        )
+        self.conn.commit()
+
+    def transport_nonce_seen(self, nonce: str) -> bool:
+        row = self.conn.execute("SELECT 1 FROM transport_nonces WHERE nonce = ?", (nonce,)).fetchone()
+        return row is not None
+
+    def prune_expired_transport_nonces(self, now: str) -> int:
+        cursor = self.conn.execute("DELETE FROM transport_nonces WHERE expires_at <= ?", (now,))
+        self.conn.commit()
+        return int(cursor.rowcount or 0)
+
+    def create_worker_enrollment(self, enrollment: dict[str, Any]) -> None:
+        self.conn.execute(
+            """
+            INSERT INTO worker_enrollments (
+                worker_id, enrollment_id, shared_secret_hash, status,
+                created_at, activated_at, revoked_at, metadata_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(worker_id) DO UPDATE SET
+                enrollment_id = excluded.enrollment_id,
+                shared_secret_hash = excluded.shared_secret_hash,
+                status = excluded.status,
+                created_at = excluded.created_at,
+                activated_at = excluded.activated_at,
+                revoked_at = excluded.revoked_at,
+                metadata_json = excluded.metadata_json
+            """,
+            (
+                enrollment["worker_id"],
+                enrollment["enrollment_id"],
+                enrollment.get("shared_secret_hash"),
+                enrollment["status"],
+                enrollment["created_at"],
+                enrollment.get("activated_at"),
+                enrollment.get("revoked_at"),
+                json.dumps(enrollment.get("metadata", {}), sort_keys=True),
+            ),
+        )
+        self.conn.commit()
+
+    def get_worker_enrollment(self, worker_id: str) -> dict[str, Any] | None:
+        row = self.conn.execute(
+            "SELECT * FROM worker_enrollments WHERE worker_id = ?",
+            (worker_id,),
+        ).fetchone()
+        return _worker_enrollment_row_to_dict(row) if row else None
+
 
 def _worker_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
     return {
@@ -1126,6 +1271,9 @@ def _customer_job_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
         "created_at": row["created_at"],
         "updated_at": row["updated_at"],
         "expires_at": row["expires_at"],
+        "lease_id": row["lease_id"],
+        "lease_expires_at": row["lease_expires_at"],
+        "assigned_at": row["assigned_at"],
         "retry_count": row["retry_count"],
         "last_failure_code": row["last_failure_code"],
         "last_failure_reason": row["last_failure_reason"],
@@ -1158,6 +1306,19 @@ def _cluster_event_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
         "created_at": row["created_at"],
         "accepted": bool(row["accepted"]),
         "failure_code": row["failure_code"],
+        "metadata": json.loads(row["metadata_json"]),
+    }
+
+
+def _worker_enrollment_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "worker_id": row["worker_id"],
+        "enrollment_id": row["enrollment_id"],
+        "shared_secret_hash": row["shared_secret_hash"],
+        "status": row["status"],
+        "created_at": row["created_at"],
+        "activated_at": row["activated_at"],
+        "revoked_at": row["revoked_at"],
         "metadata": json.loads(row["metadata_json"]),
     }
 

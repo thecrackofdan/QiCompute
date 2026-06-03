@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections import Counter
+import random
 from typing import Any
 from uuid import uuid4
 
@@ -20,14 +21,38 @@ def select_verifier_workers(
     *,
     assigned_worker_id: str,
     committee_size: int,
+    seed: int | None = None,
+    min_reputation: float = 0,
 ) -> list[str]:
     eligible = [
         worker
         for worker in workers
         if worker.get("online") and worker.get("worker_id") != assigned_worker_id
+        and float(worker.get("reputation_score", 50)) >= min_reputation
+        and not worker.get("metadata", {}).get("recent_verifier_failure")
     ]
+    if seed is not None:
+        rng = random.Random(seed)
+        rng.shuffle(eligible)
     eligible.sort(key=lambda worker: (-float(worker.get("reputation_score", 50)), str(worker.get("worker_id"))))
-    return [worker["worker_id"] for worker in eligible[:committee_size]]
+    selected: list[dict[str, Any]] = []
+    used_operators: set[str] = set()
+    used_regions: set[str] = set()
+    remaining = list(eligible)
+    while remaining and len(selected) < committee_size:
+        diverse_index = next(
+            (
+                index
+                for index, worker in enumerate(remaining)
+                if worker.get("operator") not in used_operators and worker.get("region") not in used_regions
+            ),
+            0,
+        )
+        worker = remaining.pop(diverse_index)
+        selected.append(worker)
+        used_operators.add(worker.get("operator"))
+        used_regions.add(worker.get("region"))
+    return [worker["worker_id"] for worker in selected]
 
 
 def create_verification_committee(
@@ -39,10 +64,13 @@ def create_verification_committee(
     quorum_threshold: int = 2,
     metadata: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    committee_metadata = metadata or {}
     verifier_ids = select_verifier_workers(
         db.list_online_workers(),
         assigned_worker_id=assigned_worker_id,
         committee_size=committee_size,
+        seed=committee_metadata.get("selection_seed"),
+        min_reputation=float(committee_metadata.get("min_reputation", 0)),
     )
     committee = {
         "committee_id": str(uuid4()),
@@ -52,7 +80,7 @@ def create_verification_committee(
         "created_at": utc_now_iso(),
         "finalized_at": None,
         "result": None,
-        "metadata": metadata or {},
+        "metadata": committee_metadata,
     }
     db.insert_verification_committee(committee)
     return committee

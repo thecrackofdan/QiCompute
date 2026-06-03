@@ -169,13 +169,25 @@ cluster:
   worker_bind_host: "127.0.0.1"
   worker_bind_port: 8081
   shared_secret: "dev-local-secret"
+  allow_dev_shared_secret: false
   heartbeat_interval_seconds: 10
   request_timeout_seconds: 5
 ```
 
+Current decentralization status: QiCompute is privacy-first and decentralization-ready, but cluster mode is still a trusted LAN controller prototype. The controller is trusted to hold the job queue, registry, local verification decisions, audit logs, and settlement epoch summaries.
+
 The controller accepts signed worker heartbeats, capability claims, receipt submissions, and challenge results. It assigns queued jobs to eligible workers, runs local receipt verification, attaches accepted payouts to active settlement epochs, and writes `cluster_events` audit logs.
 
 The worker sends heartbeat/capability messages, polls for the next job, executes locally through the selected runtime, and submits a receipt with hashes, token counts, timing, energy, and verification metadata. Raw prompts and raw model outputs are not sent back by default.
+
+Cluster hardening features:
+
+- Persistent replay protection stores accepted nonces in SQLite, so replayed messages fail across controller restarts.
+- Worker enrollment records can be `pending`, `active`, or `revoked`.
+- Active workers authenticate with per-worker secrets; raw secrets are not stored, only hashes.
+- The development shared-secret fallback is disabled in `config.yaml` and enabled only in demo config for local demos.
+- Job leases prevent disappeared workers from locking jobs forever. Expired leases can be requeued and reassigned.
+- Controller snapshots export registry, jobs, leases, events, audit logs, and epoch state without raw prompts or raw outputs.
 
 Run a controller:
 
@@ -193,6 +205,12 @@ Run the deterministic single-process cluster demo:
 
 ```bash
 python3 cluster_demo.py
+```
+
+Inspect cluster health:
+
+```bash
+python3 cluster_health.py
 ```
 
 Cluster transport uses standard-library HTTP plus shared-secret HMAC request signing with timestamp, nonce, and body hash. This is for local LAN development only. There is no public networking, blockchain integration, wallet integration, or cloud dependency.

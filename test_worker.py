@@ -30,6 +30,7 @@ from controller import ClusterController
 from customer_receipts import build_customer_receipt, compute_customer_receipt_hash
 from daemon import ClusterWorkerClient, WorkerDaemon
 from doctor import run_checks
+from enrollment import activate_worker_enrollment, create_worker_enrollment, revoke_worker_enrollment
 from demo import run_demo
 from demo_data import demo_prompt
 from db import WorkerDB
@@ -37,6 +38,7 @@ from envelopes import compute_envelope_hash, make_job_envelope, verify_job_envel
 from epochs import active_epoch, finalize_epoch
 from lifecycle import transition_job_status
 from logging_config import redact_payload
+from cluster_health import cluster_health
 from pricing import estimate_job_price
 from registry import heartbeat_local_worker
 from reputation import apply_reputation_decay, update_worker_reputation
@@ -47,6 +49,7 @@ from scheduler import Scheduler
 from simulation import run_marketplace_simulation
 from stress_simulation import run_stress_simulation
 from telemetry import GPUTelemetry
+from snapshot import compute_snapshot_hash, export_controller_snapshot
 from transport import clear_nonce_cache, sign_request, verify_request_signature
 from receipts import make_receipt, utc_now_iso, verify_receipt_hash
 from verifier import verify_inference_receipt
@@ -155,6 +158,95 @@ class WorkerPrototypeTest(unittest.TestCase):
         self.assertFalse(second["accepted"])
         self.assertEqual(second["failure_code"], failures.INVALID_NONCE)
 
+    def test_persistent_nonce_reuse_fails_across_controller_reinitialization(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            db = WorkerDB(str(Path(tmp) / "cluster.db"))
+            config = self._cluster_config(tmp)
+            worker_id = "cluster-worker-a"
+            activate_worker_enrollment(db, worker_id, "worker-secret")
+            config["cluster"]["worker_secrets"] = {worker_id: "worker-secret"}
+            payload = {"worker_id": worker_id}
+            headers = sign_request(payload, "worker-secret", nonce="persisted-nonce")
+
+            first = ClusterController(db, config).verify_headers(payload, headers)
+            second = ClusterController(db, config).verify_headers(payload, headers)
+
+            self.assertTrue(first["accepted"])
+            self.assertFalse(second["accepted"])
+            self.assertEqual(second["failure_code"], failures.INVALID_NONCE)
+            db.close()
+
+    def test_expired_nonce_can_be_pruned(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            db = WorkerDB(str(Path(tmp) / "cluster.db"))
+            db.record_transport_nonce("old", "2020-01-01T00:00:00Z", "2020-01-01T00:00:01Z")
+
+            pruned = db.prune_expired_transport_nonces("2020-01-01T00:00:02Z")
+
+            self.assertEqual(pruned, 1)
+            self.assertFalse(db.transport_nonce_seen("old"))
+            db.close()
+
+    def test_worker_enrollment_created_pending(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            db = WorkerDB(str(Path(tmp) / "cluster.db"))
+
+            enrollment = create_worker_enrollment(db, "worker-enroll")
+
+            self.assertEqual(enrollment["status"], "pending")
+            self.assertIsNone(db.get_worker_enrollment("worker-enroll")["shared_secret_hash"])
+            db.close()
+
+    def test_activation_stores_hash_not_raw_secret(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            db = WorkerDB(str(Path(tmp) / "cluster.db"))
+
+            activate_worker_enrollment(db, "worker-enroll", "super-secret")
+            stored = db.get_worker_enrollment("worker-enroll")
+
+            self.assertEqual(stored["status"], "active")
+            self.assertNotEqual(stored["shared_secret_hash"], "super-secret")
+            self.assertNotIn("super-secret", json.dumps(stored, sort_keys=True))
+            db.close()
+
+    def test_revoked_worker_auth_fails_and_active_worker_passes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            db = WorkerDB(str(Path(tmp) / "cluster.db"))
+            config = self._cluster_config(tmp)
+            config["cluster"]["worker_secrets"] = {"worker-enroll": "super-secret"}
+            activate_worker_enrollment(db, "worker-enroll", "super-secret")
+            controller = ClusterController(db, config)
+            payload = {"worker_id": "worker-enroll"}
+            headers = sign_request(payload, "super-secret", nonce="active-nonce")
+
+            active = controller.verify_headers(payload, headers)
+            revoke_worker_enrollment(db, "worker-enroll")
+            revoked_headers = sign_request(payload, "super-secret", nonce="revoked-nonce")
+            revoked = ClusterController(db, config).verify_headers(payload, revoked_headers)
+
+            self.assertTrue(active["accepted"])
+            self.assertFalse(revoked["accepted"])
+            self.assertEqual(revoked["failure_code"], failures.AUTH_FAILED)
+            db.close()
+
+    def test_worker_a_secret_cannot_authenticate_worker_b_and_missing_worker_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            db = WorkerDB(str(Path(tmp) / "cluster.db"))
+            config = self._cluster_config(tmp)
+            config["cluster"]["worker_secrets"] = {"worker-a": "secret-a", "worker-b": "secret-b"}
+            activate_worker_enrollment(db, "worker-a", "secret-a")
+            activate_worker_enrollment(db, "worker-b", "secret-b")
+            controller = ClusterController(db, config)
+
+            wrong = controller.verify_headers({"worker_id": "worker-b"}, sign_request({"worker_id": "worker-b"}, "secret-a"))
+            missing = controller.verify_headers({}, sign_request({}, "secret-a"))
+
+            self.assertFalse(wrong["accepted"])
+            self.assertEqual(wrong["failure_code"], failures.AUTH_FAILED)
+            self.assertFalse(missing["accepted"])
+            self.assertEqual(missing["failure_code"], failures.AUTH_FAILED)
+            db.close()
+
     def test_controller_accepts_heartbeat(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             db = WorkerDB(str(Path(tmp) / "cluster.db"))
@@ -196,6 +288,31 @@ class WorkerPrototypeTest(unittest.TestCase):
             self.assertTrue(result["accepted"])
             self.assertEqual(result["job"]["assigned_worker_id"], worker["worker_id"])
             self.assertEqual(db.get_customer_job("cluster-job-a")["status"], "routed")
+            self.assertIsNotNone(db.get_customer_job("cluster-job-a")["lease_id"])
+            db.close()
+
+    def test_receipt_with_wrong_lease_rejected_and_expired_lease_requeues(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            db = WorkerDB(str(Path(tmp) / "cluster.db"))
+            config = self._cluster_config(tmp)
+            controller = ClusterController(db, config)
+            worker = self._cluster_worker("cluster-worker-a")
+            controller.handle_capability({"worker_id": worker["worker_id"], "worker": worker, "capability_claim": make_capability_claim(worker)})
+            db.insert_customer_job(self._customer_job("cluster-job-lease"))
+            assigned = controller.handle_next_job(worker["worker_id"])["job"]
+            result = SimulatedRuntime().run(assigned, config)
+            receipt = daemon_module.receipt_from_runtime_result(config, worker["worker_id"], assigned, result)
+
+            rejected = controller.handle_receipt({"worker_id": worker["worker_id"], "job_id": assigned["job_id"], "lease_id": "wrong", "receipt": receipt})
+            db.conn.execute("UPDATE customer_jobs SET lease_expires_at = ? WHERE job_id = ?", ("2020-01-01T00:00:00Z", assigned["job_id"]))
+            db.conn.commit()
+            requeued = db.requeue_expired_leased_jobs("2020-01-01T00:00:01Z")
+
+            self.assertFalse(rejected["accepted"])
+            self.assertEqual(rejected["failure_code"], failures.INVALID_LEASE)
+            self.assertEqual(requeued, 1)
+            self.assertEqual(db.get_customer_job(assigned["job_id"])["status"], "queued")
+            self.assertIsNone(db.get_customer_job(assigned["job_id"])["lease_id"])
             db.close()
 
     def test_worker_client_handles_no_job(self) -> None:
@@ -263,6 +380,52 @@ class WorkerPrototypeTest(unittest.TestCase):
             serialized = json.dumps(result, sort_keys=True)
             self.assertNotIn(demo_prompt("honest"), serialized)
             self.assertNotIn("raw_output", serialized)
+
+    def test_cluster_health_runs_and_reports_expected_fields(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            db = WorkerDB(str(Path(tmp) / "cluster.db"))
+            db.register_worker(self._cluster_worker("worker-health"))
+            db.insert_customer_job(self._customer_job("health-job"))
+
+            summary = cluster_health(db)
+
+            self.assertIn("total_workers", summary)
+            self.assertIn("queued_jobs", summary)
+            self.assertIn("active_epoch", summary)
+            db.close()
+
+    def test_controller_snapshot_exports_deterministic_hash_without_raw_payloads(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            db = WorkerDB(str(Path(tmp) / "cluster.db"))
+            db.register_worker(self._cluster_worker("worker-snapshot"))
+            db.insert_customer_job({**self._customer_job("snapshot-job"), "metadata": {"prompt": "raw secret prompt"}})
+
+            snapshot = export_controller_snapshot(db)
+            snapshot_hash = compute_snapshot_hash(snapshot)
+
+            self.assertEqual(snapshot["snapshot_hash"], snapshot_hash)
+            serialized = json.dumps(snapshot, sort_keys=True)
+            self.assertNotIn("raw secret prompt", serialized)
+            self.assertNotIn("raw_output", serialized)
+            db.close()
+
+    def test_committee_selection_filters_and_diversifies(self) -> None:
+        workers = [
+            {**self._cluster_worker("assigned"), "operator": "op-a", "region": "r1", "reputation_score": 100},
+            {**self._cluster_worker("low"), "operator": "op-b", "region": "r2", "reputation_score": 10},
+            {**self._cluster_worker("same-op"), "operator": "op-a", "region": "r1", "reputation_score": 90},
+            {**self._cluster_worker("diverse"), "operator": "op-c", "region": "r3", "reputation_score": 80},
+            {**self._cluster_worker("failed"), "operator": "op-d", "region": "r4", "reputation_score": 80, "metadata": {"recent_verifier_failure": True}},
+        ]
+
+        first = select_verifier_workers(workers, assigned_worker_id="assigned", committee_size=2, seed=7, min_reputation=50)
+        second = select_verifier_workers(workers, assigned_worker_id="assigned", committee_size=2, seed=7, min_reputation=50)
+
+        self.assertEqual(first, second)
+        self.assertNotIn("assigned", first)
+        self.assertNotIn("low", first)
+        self.assertNotIn("failed", first)
+        self.assertIn("diverse", first)
 
     def test_load_config_without_pyyaml_shape(self) -> None:
         config = load_config("config.yaml")

@@ -208,6 +208,11 @@ def credit_agent_for_verified_worker_job(
     job_id: str | None = None,
     metadata: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
+    """Simulation-only direct agent credit.
+
+    Reconciled marketplace accounting should use the customer escrow settlement
+    path, which updates worker payable balances and treasury totals.
+    """
     _require_positive_amount(qi_amount)
     if not verification.get("accepted"):
         return None

@@ -16,6 +16,7 @@ from db import WorkerDB
 
 
 def run_agent_simulation(db: WorkerDB | None = None) -> dict[str, Any]:
+    """Run a deterministic simulation of agent balances and policy choices."""
     owns_db = db is None
     db = db or WorkerDB(":memory:")
     try:

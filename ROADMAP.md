@@ -26,6 +26,8 @@ QiCompute is currently:
 
 ## Agent Economic Participation
 
+Qi is mined; QiCompute moves Qi.
+
 Qi is only mined. QiCompute does not mint Qi.
 
 Agents can participate by mining Qi with authorized GPU hardware, earning existing Qi from customers through verified inference, earning existing Qi through verification or infrastructure roles, spending Qi on inference jobs, or receiving Qi from a human/operator account. Humans, agents, and organizations share the same economic layer.
@@ -37,7 +39,9 @@ Qi = mined currency / settlement asset
 QiCompute = inference marketplace using Qi as payment
 ```
 
-The roadmap keeps issuance separate from marketplace accounting. Agent mining income is recorded from the mining path; marketplace earnings move existing Qi between participants after verification.
+The roadmap keeps issuance separate from marketplace accounting. Agent mining income is externally-recorded mined Qi from the mining path; marketplace earnings move existing Qi between participants after verification.
+
+Agent direct worker credits are simulation-only in v0.1.0. Future work can reconcile agent-owned worker earnings through the canonical customer escrow, worker payable, and marketplace treasury path.
 
 One currency. One issuance mechanism. Multiple ways to earn and spend it.
 

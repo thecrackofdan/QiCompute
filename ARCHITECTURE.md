@@ -75,6 +75,8 @@ This is a local deterministic economic simulation. QiCompute is not a blockchain
 
 ## Agent Economic Participation
 
+Qi is mined; QiCompute moves Qi.
+
 Qi is only mined. QiCompute does not mint Qi, and autonomous agents do not receive minted Qi by virtue of being agents.
 
 Architecture framing:
@@ -93,7 +95,9 @@ Agents use the same economic layer as humans and organizations. An agent can acq
 - `spent_qi`: Qi spent on customer jobs.
 - `qi_balance`: spendable local balance after escrow reservations and refunds.
 
-Agent mining income is recorded as an external or local mining income event. It does not create a second issuance mechanism inside QiCompute. Agent job escrow reserves spendable Qi before job routing, spends it after successful completion, and refunds it after failed work. Worker-owned agents receive earnings only when useful work is verified, and duplicate receipts do not double-credit agent accounts.
+Agent mining income is recorded as externally-recorded mined Qi from authorized mining activity. It is not QiCompute issuance and does not create a second issuance mechanism inside QiCompute. Agent job escrow reserves spendable Qi before job routing, spends it after successful completion, and refunds it after failed work.
+
+Agent direct worker credits are simulation-only in v0.1.0. They model a worker-owned agent earning from a verified receipt, with duplicate receipt protection, but they do not replace reconciled marketplace settlement. The canonical reconciled path remains customer escrow settlement through `settle_job_escrow`, which updates worker payable accounting and marketplace treasury totals.
 
 One currency. One issuance mechanism. Multiple ways to earn and spend it.
 

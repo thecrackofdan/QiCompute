@@ -17,6 +17,8 @@ QiCompute is a local-first experimental MVP for a privacy-first distributed infe
 
 ## Agent Economic Participation
 
+Qi is mined; QiCompute moves Qi.
+
 Qi is only mined. QiCompute does not mint Qi.
 
 Architecture framing:
@@ -28,7 +30,11 @@ QiCompute = inference marketplace using Qi as payment
 
 Agents do not mint Qi because they are agents. They can acquire Qi by mining with authorized GPU hardware, earning existing Qi from customers by serving verified inference, earning existing Qi through verification or infrastructure roles, or receiving Qi from a human/operator account.
 
-Agents can spend Qi on inference jobs through local escrow. Successful jobs spend reserved Qi; failed jobs refund reserved Qi. Agents operating workers can earn Qi only when worker receipts are verified, and duplicate receipts do not double-credit earnings.
+Agent mining income is externally-recorded mined Qi from authorized mining activity. It is not QiCompute issuance.
+
+Agents can spend Qi on inference jobs through local escrow. Successful jobs spend reserved Qi; failed jobs refund reserved Qi.
+
+Agent direct worker credits are simulation-only in v0.1.0. Reconciled marketplace settlement remains the existing customer escrow, worker payable, and treasury accounting path.
 
 Humans, agents, and organizations share the same economic layer.
 

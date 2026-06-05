@@ -29,6 +29,8 @@ REQUIRED_FILES = (
     "ARCHITECTURE.md",
     "ROADMAP.md",
     "DEVELOPMENT.md",
+    "agents.py",
+    "agent_simulation.py",
     ".github/workflows/smoke.yml",
     ".github/workflows/full_validation.yml",
     "fixtures/epoch_summary.json",

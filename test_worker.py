@@ -332,6 +332,9 @@ class WorkerPrototypeTest(unittest.TestCase):
 
         self.assertTrue(all(check.status != "FAIL" for check in release_checks))
         self.assertTrue(all(check.status != "FAIL" for check in license_checks))
+        release_names = {check.name for check in release_checks}
+        self.assertIn("agents.py", release_names)
+        self.assertIn("agent_simulation.py", release_names)
 
     def test_architecture_docs_present(self) -> None:
         text = Path("ARCHITECTURE.md").read_text(encoding="utf-8")
@@ -1010,6 +1013,7 @@ class WorkerPrototypeTest(unittest.TestCase):
             self.assertEqual(credit["agent_id"], "agent-a")
             self.assertEqual(account["earned_qi"], 1.25)
             self.assertEqual(db.get_settled_balance("worker-a"), 1.25)
+            self.assertEqual(worker_account(db, "worker-a")["payable_qi"], 0)
             db.close()
 
     def test_rejected_worker_job_does_not_credit_agent(self) -> None:

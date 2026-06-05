@@ -1,8 +1,8 @@
-# Qi Compute Pool Worker Prototype
+# QiCompute v0.1.0 Experimental MVP
 
-Local Python prototype for a unified Qi compute/mining pool worker. It runs on a GPU rig and chooses inference work when a local job is available, otherwise it falls back to mining mode.
+Local-first research prototype for a privacy-first QiCompute inference marketplace. The v0.1.0 scope models GPU worker execution, useful-work verification, LAN controller/worker orchestration, settlement accounting, abuse simulation, performance tooling, and deterministic tests.
 
-This MVP has no smart contracts and no real payout rail. It records local receipts, telemetry, estimated energy usage, output, and estimated Qi owed in SQLite.
+This MVP has no smart contracts and no real payout rail. It records local receipts, telemetry, estimated energy usage, output, escrow state, payable balances, and settlement summaries in SQLite.
 
 ## Current Status
 
@@ -619,6 +619,8 @@ The printed settlement summary includes epoch totals, worker reputation, job out
 
 ## Agent Economic Participation
 
+Qi is mined; QiCompute moves Qi.
+
 Qi is only mined. QiCompute does not mint Qi, and agents do not receive Qi just because they are agents.
 
 Agents participate in the same economic layer as humans and organizations:
@@ -635,7 +637,15 @@ Qi = mined currency / settlement asset
 QiCompute = inference marketplace using Qi as payment
 ```
 
-`agents.py` models local agent accounts with mined, earned, spent, and spendable Qi totals. Mining income is recorded as an external or local mining income event; it is not a second issuance path inside QiCompute. Agent job escrow reserves existing Qi, spends it on successful jobs, and refunds it when jobs fail. Verified worker receipts can credit the agent that owns or controls the worker, with duplicate receipt protection.
+`agents.py` models local agent accounts with mined, earned, spent, and spendable Qi totals. Mining income is recorded as externally-recorded mined Qi from authorized mining activity; it is not QiCompute issuance and is not a second issuance path inside QiCompute. Agent job escrow reserves existing Qi, spends it on successful jobs, and refunds it when jobs fail.
+
+Agent direct worker credits are simulation-only in v0.1.0. They are useful for modeling an agent that owns or controls a worker, with duplicate receipt protection, but they do not replace the canonical customer escrow settlement path. Production marketplace accounting remains:
+
+```text
+customer escrow -> verified receipt -> worker payable accounting -> treasury accounting
+```
+
+Use `settle_job_escrow` and the controller receipt path for reconciled worker payable and treasury accounting.
 
 One currency. One issuance mechanism. Multiple ways to earn and spend it.
 

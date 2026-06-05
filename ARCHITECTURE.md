@@ -73,6 +73,30 @@ Worker accounts track earned, payable, disputed, rejected, and refunded Qi. Mark
 
 This is a local deterministic economic simulation. QiCompute is not a blockchain, wallet, token transfer system, or payment processor.
 
+## Agent Economic Participation
+
+Qi is only mined. QiCompute does not mint Qi, and autonomous agents do not receive minted Qi by virtue of being agents.
+
+Architecture framing:
+
+```text
+Qi = mined currency / settlement asset
+QiCompute = inference marketplace using Qi as payment
+```
+
+Agents use the same economic layer as humans and organizations. An agent can acquire Qi by mining with authorized GPU hardware, earning existing Qi from customers by serving verified inference, earning existing Qi through verification or infrastructure roles, or receiving Qi from a human/operator account.
+
+`agent_accounts` records local agent balances:
+
+- `mined_qi`: Qi obtained through the mining path.
+- `earned_qi`: existing Qi earned from verified marketplace services.
+- `spent_qi`: Qi spent on customer jobs.
+- `qi_balance`: spendable local balance after escrow reservations and refunds.
+
+Agent mining income is recorded as an external or local mining income event. It does not create a second issuance mechanism inside QiCompute. Agent job escrow reserves spendable Qi before job routing, spends it after successful completion, and refunds it after failed work. Worker-owned agents receive earnings only when useful work is verified, and duplicate receipts do not double-credit agent accounts.
+
+One currency. One issuance mechanism. Multiple ways to earn and spend it.
+
 ## Threat Model
 
 QiCompute now models adversarial local marketplace behavior: malicious workers, malicious customers, replay attackers, spam, escrow griefing, malicious verifiers, and colluding committees.

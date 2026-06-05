@@ -22,6 +22,24 @@ QiCompute is currently:
 - Receipt hashing, validation, challenge verification, and committee simulation
 - Reputation updates, retries, expiration, stress simulation, and settlement epochs
 - Mining fallback accounting with share and block reward separation
+- Agent accounts with mined, earned, spent, escrowed, and refunded Qi flows
+
+## Agent Economic Participation
+
+Qi is only mined. QiCompute does not mint Qi.
+
+Agents can participate by mining Qi with authorized GPU hardware, earning existing Qi from customers through verified inference, earning existing Qi through verification or infrastructure roles, spending Qi on inference jobs, or receiving Qi from a human/operator account. Humans, agents, and organizations share the same economic layer.
+
+Architecture framing:
+
+```text
+Qi = mined currency / settlement asset
+QiCompute = inference marketplace using Qi as payment
+```
+
+The roadmap keeps issuance separate from marketplace accounting. Agent mining income is recorded from the mining path; marketplace earnings move existing Qi between participants after verification.
+
+One currency. One issuance mechanism. Multiple ways to earn and spend it.
 
 ## Planned Runtime Improvements
 
@@ -77,6 +95,7 @@ QiCompute is currently:
 - Settlement invoice artifacts
 - Accounting reconciliation checks
 - Mining fallback profitability comparisons
+- Agent policy tuning for mining fallback, inference serving, verification, spending, and idle decisions
 
 ## Abuse Resistance Roadmap
 

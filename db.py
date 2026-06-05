@@ -91,6 +91,44 @@ CREATE TABLE IF NOT EXISTS inference_jobs (
     payout_event_id TEXT
 );
 
+CREATE TABLE IF NOT EXISTS agent_accounts (
+    agent_id TEXT PRIMARY KEY,
+    operator_id TEXT NOT NULL,
+    worker_id TEXT,
+    customer_id TEXT,
+    qi_balance REAL NOT NULL DEFAULT 0,
+    mined_qi REAL NOT NULL DEFAULT 0,
+    earned_qi REAL NOT NULL DEFAULT 0,
+    spent_qi REAL NOT NULL DEFAULT 0,
+    role TEXT NOT NULL,
+    status TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    metadata_json TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS agent_escrows (
+    escrow_id TEXT PRIMARY KEY,
+    agent_id TEXT NOT NULL,
+    customer_id TEXT,
+    job_id TEXT NOT NULL,
+    qi_amount REAL NOT NULL,
+    status TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    settled_at TEXT,
+    metadata_json TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS agent_credit_receipts (
+    receipt_id TEXT PRIMARY KEY,
+    agent_id TEXT NOT NULL,
+    worker_id TEXT NOT NULL,
+    job_id TEXT,
+    qi_amount REAL NOT NULL,
+    credited_at TEXT NOT NULL,
+    payout_event_id TEXT,
+    metadata_json TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS worker_registry (
     worker_id TEXT PRIMARY KEY,
     operator TEXT,
@@ -311,6 +349,9 @@ WHERE block_hash IS NOT NULL;
 CREATE UNIQUE INDEX IF NOT EXISTS idx_receipts_receipt_hash
 ON receipts(receipt_hash)
 WHERE receipt_hash IS NOT NULL;
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_escrows_job
+ON agent_escrows(job_id);
 
 CREATE INDEX IF NOT EXISTS idx_customer_jobs_status
 ON customer_jobs(status);

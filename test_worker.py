@@ -16,6 +16,20 @@ import failures
 import daemon as daemon_module
 from abuse import expire_escrows, rate_limit_allowed, record_rate_limit_event, validate_job_escrow_request
 from accounting_checks import run_accounting_checks
+from agent_simulation import run_agent_simulation
+from agents import (
+    agent_balance,
+    agent_can_spend_qi,
+    choose_agent_action,
+    create_agent_account,
+    credit_agent_for_verified_worker_job,
+    fund_agent_job_escrow,
+    get_agent_account,
+    get_agent_escrow,
+    record_agent_mining_income,
+    refund_agent_job_escrow,
+    spend_agent_job_escrow,
+)
 from accounts import (
     create_customer_account,
     credit_available_balance,
@@ -894,6 +908,187 @@ class WorkerPrototypeTest(unittest.TestCase):
             self.assertAlmostEqual(customer_balance(db, "customer-a")["available_qi"], 1)
             self.assertAlmostEqual(worker_account(db, worker["worker_id"])["payable_qi"], 0)
             self.assertAlmostEqual(get_treasury(db)["total_customer_refunds"], 1)
+            db.close()
+
+    def test_agent_account_creation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            _, db = self._scheduler(tmp)
+
+            account = create_agent_account(
+                db,
+                agent_id="agent-a",
+                operator_id="operator-a",
+                worker_id="worker-a",
+                customer_id="customer-a",
+                role="hybrid",
+            )
+
+            self.assertEqual(account["agent_id"], "agent-a")
+            self.assertEqual(account["worker_id"], "worker-a")
+            self.assertEqual(account["qi_balance"], 0)
+            db.close()
+
+    def test_agent_mining_income(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            _, db = self._scheduler(tmp)
+            create_agent_account(db, agent_id="agent-a", operator_id="operator-a", role="miner")
+
+            account = record_agent_mining_income(db, "agent-a", 3)
+
+            self.assertEqual(account["mined_qi"], 3)
+            self.assertEqual(agent_balance(db, "agent-a"), 3)
+            db.close()
+
+    def test_agent_spending_limits(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            _, db = self._scheduler(tmp)
+            create_agent_account(db, agent_id="agent-a", operator_id="operator-a", role="customer")
+            record_agent_mining_income(db, "agent-a", 1)
+
+            self.assertTrue(agent_can_spend_qi(db, "agent-a", 1))
+            self.assertFalse(agent_can_spend_qi(db, "agent-a", 2))
+            with self.assertRaises(ValueError):
+                fund_agent_job_escrow(db, agent_id="agent-a", job_id="overspend-job", qi_amount=2)
+            db.close()
+
+    def test_agent_can_fund_job_escrow(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            _, db = self._scheduler(tmp)
+            create_agent_account(db, agent_id="agent-a", operator_id="operator-a", customer_id="customer-a", role="hybrid")
+            record_agent_mining_income(db, "agent-a", 2)
+
+            escrow = fund_agent_job_escrow(db, agent_id="agent-a", job_id="escrow-job", qi_amount=1.25)
+
+            self.assertEqual(escrow["status"], "reserved")
+            self.assertEqual(escrow["customer_id"], "customer-a")
+            self.assertAlmostEqual(agent_balance(db, "agent-a"), 0.75)
+            db.close()
+
+    def test_refunded_job_restores_spendable_agent_balance(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            _, db = self._scheduler(tmp)
+            create_agent_account(db, agent_id="agent-a", operator_id="operator-a", role="hybrid")
+            record_agent_mining_income(db, "agent-a", 2)
+            fund_agent_job_escrow(db, agent_id="agent-a", job_id="refund-job", qi_amount=1.5)
+
+            escrow = refund_agent_job_escrow(db, "refund-job")
+
+            self.assertEqual(escrow["status"], "refunded")
+            self.assertEqual(agent_balance(db, "agent-a"), 2)
+            db.close()
+
+    def test_successful_job_spends_agent_escrow(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            _, db = self._scheduler(tmp)
+            create_agent_account(db, agent_id="agent-a", operator_id="operator-a", role="hybrid")
+            record_agent_mining_income(db, "agent-a", 2)
+            fund_agent_job_escrow(db, agent_id="agent-a", job_id="spent-job", qi_amount=1.5)
+
+            spend_agent_job_escrow(db, "spent-job")
+
+            account = get_agent_account(db, "agent-a")
+            self.assertEqual(get_agent_escrow(db, "spent-job")["status"], "spent")
+            self.assertEqual(account["spent_qi"], 1.5)
+            self.assertEqual(account["qi_balance"], 0.5)
+            db.close()
+
+    def test_verified_worker_job_credits_agent_earnings(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            _, db = self._scheduler(tmp)
+            create_agent_account(db, agent_id="agent-a", operator_id="operator-a", worker_id="worker-a", role="inference_worker")
+
+            credit = credit_agent_for_verified_worker_job(
+                db,
+                worker_id="worker-a",
+                receipt_id="receipt-a",
+                job_id="job-a",
+                qi_amount=1.25,
+                verification={"accepted": True, "reason": "ok"},
+            )
+
+            account = get_agent_account(db, "agent-a")
+            self.assertEqual(credit["agent_id"], "agent-a")
+            self.assertEqual(account["earned_qi"], 1.25)
+            self.assertEqual(db.get_settled_balance("worker-a"), 1.25)
+            db.close()
+
+    def test_rejected_worker_job_does_not_credit_agent(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            _, db = self._scheduler(tmp)
+            create_agent_account(db, agent_id="agent-a", operator_id="operator-a", worker_id="worker-a", role="inference_worker")
+
+            credit = credit_agent_for_verified_worker_job(
+                db,
+                worker_id="worker-a",
+                receipt_id="receipt-rejected",
+                job_id="job-rejected",
+                qi_amount=1,
+                verification={"accepted": False, "reason": "rejected"},
+            )
+
+            self.assertIsNone(credit)
+            self.assertEqual(get_agent_account(db, "agent-a")["earned_qi"], 0)
+            self.assertEqual(db.get_settled_balance("worker-a"), 0)
+            db.close()
+
+    def test_duplicate_settlement_does_not_double_credit_agent(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            _, db = self._scheduler(tmp)
+            create_agent_account(db, agent_id="agent-a", operator_id="operator-a", worker_id="worker-a", role="inference_worker")
+
+            credit_agent_for_verified_worker_job(
+                db,
+                worker_id="worker-a",
+                receipt_id="receipt-duplicate",
+                job_id="job-duplicate",
+                qi_amount=1,
+                verification={"accepted": True, "reason": "ok"},
+            )
+            credit_agent_for_verified_worker_job(
+                db,
+                worker_id="worker-a",
+                receipt_id="receipt-duplicate",
+                job_id="job-duplicate",
+                qi_amount=1,
+                verification={"accepted": True, "reason": "ok"},
+            )
+
+            self.assertEqual(get_agent_account(db, "agent-a")["earned_qi"], 1)
+            self.assertEqual(db.get_settled_balance("worker-a"), 1)
+            db.close()
+
+    def test_policy_chooses_mining_when_inference_demand_is_low(self) -> None:
+        agent = {"role": "hybrid", "status": "active"}
+
+        action = choose_agent_action(
+            agent,
+            {"inference_demand": 0.01, "inference_qi_per_hour": 1, "mining_qi_per_hour": 0.1},
+            {"minimum_profit_qi_per_hour": 0.001},
+        )
+
+        self.assertEqual(action, "mine")
+
+    def test_policy_chooses_inference_when_demand_is_profitable(self) -> None:
+        agent = {"role": "hybrid", "status": "active"}
+
+        action = choose_agent_action(
+            agent,
+            {"inference_demand": 1, "inference_qi_per_hour": 0.2, "mining_qi_per_hour": 0.1},
+            {"minimum_profit_qi_per_hour": 0.001},
+        )
+
+        self.assertEqual(action, "serve_inference")
+
+    def test_agent_simulation_runs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            _, db = self._scheduler(tmp)
+
+            summary = run_agent_simulation(db)
+
+            self.assertGreater(summary["mined_qi"], 0)
+            self.assertGreater(summary["earned_qi"], 0)
+            self.assertGreater(summary["inference_jobs_served"], 0)
+            self.assertIn("utilization_ratio", summary)
             db.close()
 
     def test_adversary_profiles_are_seeded_and_descriptive(self) -> None:

@@ -35,6 +35,8 @@ The project is released under the MIT License. See `LICENSE`.
 - `router.py`: local inference job routing.
 - `reputation.py`: worker reputation updates.
 - `pricing.py`: local marketplace pricing estimates.
+- `agents.py`: autonomous agent accounts, escrow, earnings, and policy helpers.
+- `agent_simulation.py`: deterministic agent economics simulation.
 - `envelopes.py`: signed job envelope-shaped structures with placeholder signatures.
 - `capabilities.py`: worker capability claim structures.
 - `customer_receipts.py`: customer-facing job receipt structures.
@@ -615,6 +617,34 @@ python3 demo.py --mode malicious
 
 The printed settlement summary includes epoch totals, worker reputation, job outcome, committee outcome, challenge pass rate, committee acceptance rate, settled Qi, rejected Qi, latency, energy per token, and runtime type distribution.
 
+## Agent Economic Participation
+
+Qi is only mined. QiCompute does not mint Qi, and agents do not receive Qi just because they are agents.
+
+Agents participate in the same economic layer as humans and organizations:
+
+- Agents can mine Qi if they control authorized GPU hardware.
+- Agents can earn existing Qi by providing verified marketplace services such as inference, verification, routing, or infrastructure roles.
+- Agents can spend Qi on inference jobs through escrow.
+- Agents can receive Qi from a human or operator account.
+
+Architecture framing:
+
+```text
+Qi = mined currency / settlement asset
+QiCompute = inference marketplace using Qi as payment
+```
+
+`agents.py` models local agent accounts with mined, earned, spent, and spendable Qi totals. Mining income is recorded as an external or local mining income event; it is not a second issuance path inside QiCompute. Agent job escrow reserves existing Qi, spends it on successful jobs, and refunds it when jobs fail. Verified worker receipts can credit the agent that owns or controls the worker, with duplicate receipt protection.
+
+One currency. One issuance mechanism. Multiple ways to earn and spend it.
+
+Run the deterministic agent simulation:
+
+```bash
+python3 agent_simulation.py
+```
+
 ## Accounting Model
 
 Energy:
@@ -777,6 +807,9 @@ Accepted inference jobs are tracked by `job_id`. If the same accepted job appear
 - `receipts`: one row per mining or inference cycle.
 - `payout_events`: payable events that update worker balances.
 - `inference_jobs`: accepted inference job IDs that have already been paid.
+- `agent_accounts`: autonomous agent account balances and role metadata.
+- `agent_escrows`: Qi reserved, spent, or refunded for agent-submitted jobs.
+- `agent_credit_receipts`: idempotent links between verified worker receipts and agent earnings.
 - `worker_registry`: local worker capability, heartbeat, and reputation records.
 - `customer_jobs`: local customer-facing job queue with prompt hashes, not raw prompts.
 - `routing_audit_logs`: local route decision audit records.

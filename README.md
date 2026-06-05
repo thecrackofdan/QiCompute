@@ -37,6 +37,13 @@ The project is released under the MIT License. See `LICENSE`.
 - `pricing.py`: local marketplace pricing estimates.
 - `agents.py`: autonomous agent accounts, escrow, earnings, and policy helpers.
 - `agent_simulation.py`: deterministic agent economics simulation.
+- `economic_scheduler.py`: deterministic agent action scheduler.
+- `market_demand.py`: local marketplace demand model.
+- `mining_economics.py`: simulation-only mining opportunity estimates.
+- `reinvestment.py`: deterministic reinvestment modeling.
+- `economy_simulation.py`: multi-agent economy simulation CLI.
+- `crossover.py`: mining versus inference crossover analysis.
+- `economy_report.py`: aggregate economy reporting.
 - `envelopes.py`: signed job envelope-shaped structures with placeholder signatures.
 - `capabilities.py`: worker capability claim structures.
 - `customer_receipts.py`: customer-facing job receipt structures.
@@ -653,6 +660,31 @@ Run the deterministic agent simulation:
 
 ```bash
 python3 agent_simulation.py
+```
+
+## Autonomous Compute Economy
+
+Qi creates currency. QiCompute allocates currency. Agents decide how to earn and spend it.
+
+Idle hardware mines. Useful hardware earns. Agents choose which is more profitable.
+
+The autonomous economy model is deterministic and local-first:
+
+```text
+customer demand -> inference revenue
+low demand -> mining fallback
+agent treasury -> chooses action
+Qi mined -> enters economy
+Qi transferred -> rewards useful work
+```
+
+`economic_scheduler.py` lets an agent choose between mining, inference, verification, routing, and idle actions from expected revenue, cost, utilization, demand, and treasury policy settings. `market_demand.py` and `mining_economics.py` provide simulation-only signals. `crossover.py` identifies the demand threshold where inference beats mining. `economy_simulation.py` runs a multi-agent local economy without prompts, outputs, public networking, staking, slashing, governance tokens, smart contracts, or additional issuance.
+
+Run the multi-agent simulation:
+
+```bash
+python3 economy_simulation.py
+python3 economy_simulation.py --cycles 1000
 ```
 
 ## Accounting Model

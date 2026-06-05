@@ -101,6 +101,16 @@ Agent direct worker credits are simulation-only in v0.1.0. They model a worker-o
 
 One currency. One issuance mechanism. Multiple ways to earn and spend it.
 
+## Autonomous Compute Economy
+
+Qi creates currency. QiCompute allocates currency. Agents decide how to earn and spend it.
+
+Idle hardware mines. Useful hardware earns. Agents choose which is more profitable.
+
+The autonomous economy layer is simulation and policy logic only. `economic_scheduler.py` compares deterministic opportunities for mining, inference, verification, routing, and idle capacity. `market_demand.py` models queued jobs, waiting customers, latency, revenue, and utilization pressure. `mining_economics.py` estimates local mining profitability without external APIs. `crossover.py` reports the demand threshold where inference becomes more profitable than mining.
+
+No autonomous economy module introduces blockchain integration, staking, governance tokens, slashing, yield farming, smart contracts, public networking, or new issuance.
+
 ## Threat Model
 
 QiCompute now models adversarial local marketplace behavior: malicious workers, malicious customers, replay attackers, spam, escrow griefing, malicious verifiers, and colluding committees.

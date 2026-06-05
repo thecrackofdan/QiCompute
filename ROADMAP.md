@@ -45,6 +45,14 @@ Agent direct worker credits are simulation-only in v0.1.0. Future work can recon
 
 One currency. One issuance mechanism. Multiple ways to earn and spend it.
 
+## Autonomous Compute Economy
+
+Qi creates currency. QiCompute allocates currency. Agents decide how to earn and spend it.
+
+Idle hardware mines. Useful hardware earns. Agents choose which is more profitable.
+
+The next simulation layer models agent-owned operations, treasury policy, reinvestment, market demand, mining fallback, and mining/inference crossover thresholds. This remains deterministic, local-first, privacy-preserving, and simulation-friendly.
+
 ## Planned Runtime Improvements
 
 - Better local Ollama configuration checks

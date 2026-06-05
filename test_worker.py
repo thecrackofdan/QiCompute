@@ -18,9 +18,12 @@ from abuse import expire_escrows, rate_limit_allowed, record_rate_limit_event, v
 from accounting_checks import run_accounting_checks
 from agent_simulation import run_agent_simulation
 from agents import (
+    agent_operations,
     agent_balance,
     agent_can_spend_qi,
+    apply_treasury_policy,
     choose_agent_action,
+    choose_treasury_policy,
     create_agent_account,
     credit_agent_for_verified_worker_job,
     fund_agent_job_escrow,
@@ -58,6 +61,7 @@ from committees import (
 )
 from controller import ClusterController
 from customer_receipts import build_customer_receipt, compute_customer_receipt_hash
+from crossover import analyze_mining_inference_crossover
 from daemon import ClusterWorkerClient, WorkerDaemon
 from doctor import run_checks
 from enrollment import activate_worker_enrollment, create_worker_enrollment, revoke_worker_enrollment
@@ -68,10 +72,16 @@ from db import WorkerDB
 from envelopes import compute_envelope_hash, make_job_envelope, verify_job_envelope
 from epochs import active_epoch, finalize_epoch
 from economics import compare_inference_vs_mining
+from economic_scheduler import choose_economic_action
+from economy_report import build_economy_report
+from economy_simulation import run_economy_simulation
 from invoices import build_settlement_invoice, compute_invoice_hash, duplicate_invoice_detected, verify_invoice_hash
 from lifecycle import transition_job_status
 from lan_smoke_test import run_lan_smoke_test
 from logging_config import redact_payload
+from market_demand import estimate_inference_opportunity, estimate_market_demand
+from mining_economics import estimate_mining_opportunity
+from reinvestment import simulate_reinvestment
 from cluster_health import cluster_health
 from pricing import estimate_job_price
 from privacy import (
@@ -333,8 +343,18 @@ class WorkerPrototypeTest(unittest.TestCase):
         self.assertTrue(all(check.status != "FAIL" for check in release_checks))
         self.assertTrue(all(check.status != "FAIL" for check in license_checks))
         release_names = {check.name for check in release_checks}
-        self.assertIn("agents.py", release_names)
-        self.assertIn("agent_simulation.py", release_names)
+        for filename in {
+            "agents.py",
+            "agent_simulation.py",
+            "economic_scheduler.py",
+            "market_demand.py",
+            "mining_economics.py",
+            "reinvestment.py",
+            "economy_simulation.py",
+            "crossover.py",
+            "economy_report.py",
+        }:
+            self.assertIn(filename, release_names)
 
     def test_architecture_docs_present(self) -> None:
         text = Path("ARCHITECTURE.md").read_text(encoding="utf-8")
@@ -1094,6 +1114,124 @@ class WorkerPrototypeTest(unittest.TestCase):
             self.assertGreater(summary["inference_jobs_served"], 0)
             self.assertIn("utilization_ratio", summary)
             db.close()
+
+    def test_economic_scheduler_prefers_profitable_inference(self) -> None:
+        decision = choose_economic_action(
+            current_qi_balance=1,
+            mining_profitability={"expected_qi_per_hour": 0.1, "expected_cost_per_hour": 0.01},
+            inference_demand={"expected_qi_per_hour": 0.2, "expected_cost_per_hour": 0.02},
+            verification_demand={"expected_qi_per_hour": 0.03, "expected_cost_per_hour": 0.001},
+            routing_demand={"expected_qi_per_hour": 0.01, "expected_cost_per_hour": 0.001},
+            worker_utilization=0.5,
+            energy_cost=0.001,
+            policy_settings={"minimum_profit_qi": 0.0, "reserve_qi": 0.1},
+        )
+
+        self.assertEqual(decision.chosen_action, "serve_inference")
+        self.assertGreater(decision.expected_profit, 0)
+
+    def test_market_demand_estimation_and_inference_opportunity(self) -> None:
+        demand = estimate_market_demand(
+            queued_jobs=12,
+            waiting_customers=7,
+            expected_inference_revenue=0.12,
+            average_queue_latency=140,
+            active_workers=3,
+        )
+        opportunity = estimate_inference_opportunity(demand, worker_count=2, energy_cost_per_hour=0.001)
+
+        self.assertEqual(demand.demand_level, "burst")
+        self.assertEqual(demand.utilization_pressure, 1.0)
+        self.assertGreater(opportunity.expected_profit_per_hour, 0)
+
+    def test_mining_economics_estimates_profit(self) -> None:
+        economics = estimate_mining_opportunity(
+            gpu_count=2,
+            hash_rate_per_gpu=10,
+            network_difficulty=100,
+            power_watts=200,
+            energy_cost_per_kwh=0.01,
+            expected_block_reward_qi=1,
+        )
+
+        self.assertEqual(economics.expected_qi_per_hour, 0.2)
+        self.assertGreater(economics.expected_profit_per_hour, 0)
+
+    def test_agent_operations_and_treasury_policies(self) -> None:
+        operations = agent_operations(
+            {"agent_id": "agent-a", "worker_count": 2},
+            [
+                {"action": "mine", "hours": 2, "energy_cost": 0.01, "profit": 0.05},
+                {"action": "serve_inference", "hours": 1, "energy_cost": 0.01, "profit": 0.08},
+            ],
+        )
+        policy = choose_treasury_policy(
+            {"qi_balance": 10},
+            {"inference_demand": 0.9, "minimum_reserve_qi": 1, "growth_reserve_qi": 5},
+        )
+        applied = apply_treasury_policy(
+            {"qi_balance": 10},
+            policy,
+            {"action": "serve_inference", "expected_profit": 1},
+        )
+
+        self.assertEqual(operations.worker_count, 2)
+        self.assertGreater(operations.total_profit, 0)
+        self.assertEqual(policy, "aggressive")
+        self.assertGreater(applied["growth_budget_qi"], 0)
+
+    def test_reinvestment_logic_models_capacity_growth(self) -> None:
+        result = simulate_reinvestment(
+            qi_balance=10,
+            worker_count=2,
+            verification_capacity=1,
+            expected_profit=0.5,
+            policy={"reserve_qi": 2, "worker_expansion_cost_qi": 3},
+        )
+
+        self.assertEqual(result.action, "expand_worker_count")
+        self.assertGreater(result.worker_count, 2)
+        self.assertGreater(result.simulated_capacity_growth, 0)
+
+    def test_crossover_calculation_identifies_threshold(self) -> None:
+        analysis = analyze_mining_inference_crossover(
+            mining_qi_per_hour=0.1,
+            inference_qi_per_job=0.05,
+            jobs_per_hour_capacity=4,
+            current_inference_demand=3,
+        )
+
+        self.assertEqual(analysis.crossover_threshold, 2)
+        self.assertEqual(analysis.preferred_action, "serve_inference")
+
+    def test_economy_simulation_runs_and_reports_metrics(self) -> None:
+        report = run_economy_simulation(cycles=100)
+
+        self.assertEqual(report["cycles"], 100)
+        self.assertIn("total_qi_mined", report)
+        self.assertIn("total_qi_transferred", report)
+        self.assertGreater(report["market_demand_served"], 0)
+
+    def test_economy_report_aggregates_without_payloads(self) -> None:
+        report = build_economy_report(
+            {
+                "agent_count": 2,
+                "total_cycles": 10,
+                "mined_qi": 1,
+                "earned_qi": 2,
+                "spent_qi": 0.5,
+                "inference_volume": 4,
+                "verification_volume": 0.2,
+                "idle_cycles": 1,
+                "total_profit": 3,
+            }
+        )
+
+        self.assertEqual(report["total_qi_mined"], 1)
+        self.assertEqual(report["total_qi_transferred"], 2.5)
+        self.assertEqual(report["average_agent_profitability"], 1.5)
+        self.assertNotIn("prompt", report)
+        self.assertNotIn("output", report)
 
     def test_adversary_profiles_are_seeded_and_descriptive(self) -> None:
         first = adversary_profiles(seed=7)

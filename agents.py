@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
 from typing import Any
 from uuid import uuid4
 
@@ -20,6 +21,35 @@ AGENT_ROLES = {
 
 AGENT_STATUSES = {"active", "paused", "disabled"}
 AGENT_ACTIONS = {"mine", "serve_inference", "verify", "submit_job", "idle"}
+TREASURY_POLICIES = {
+    "conservative": {"reserve_ratio": 0.75, "mining_bias": 0.00002, "growth_spend_ratio": 0.05},
+    "balanced": {"reserve_ratio": 0.4, "mining_bias": 0.0, "growth_spend_ratio": 0.15},
+    "aggressive": {"reserve_ratio": 0.15, "mining_bias": -0.00001, "growth_spend_ratio": 0.35},
+}
+
+
+@dataclass(frozen=True)
+class AgentOperations:
+    worker_count: int
+    mining_hours: float
+    inference_hours: float
+    verification_hours: float
+    routing_hours: float
+    total_energy_cost: float
+    total_profit: float
+    utilization: float
+
+    def to_dict(self) -> dict[str, float | int]:
+        return {
+            "worker_count": self.worker_count,
+            "mining_hours": self.mining_hours,
+            "inference_hours": self.inference_hours,
+            "verification_hours": self.verification_hours,
+            "routing_hours": self.routing_hours,
+            "total_energy_cost": self.total_energy_cost,
+            "total_profit": self.total_profit,
+            "utilization": self.utilization,
+        }
 
 
 def create_agent_account(
@@ -343,6 +373,60 @@ def choose_agent_action(agent: dict[str, Any], market_state: dict[str, Any], con
     if not ranked or ranked[0][1] < threshold:
         return "idle"
     return ranked[0][0]
+
+
+def agent_operations(agent: dict[str, Any], operation_events: list[dict[str, Any]]) -> AgentOperations:
+    worker_count = int(agent.get("worker_count", 1 if agent.get("worker_id") else 0))
+    hours = {"mine": 0.0, "serve_inference": 0.0, "verify": 0.0, "route": 0.0}
+    total_energy_cost = 0.0
+    total_profit = 0.0
+    for event in operation_events:
+        action = str(event.get("action", ""))
+        duration = max(float(event.get("hours", 0.0)), 0.0)
+        if action in hours:
+            hours[action] += duration
+        total_energy_cost += max(float(event.get("energy_cost", 0.0)), 0.0)
+        total_profit += float(event.get("profit", 0.0))
+    active_hours = sum(hours.values())
+    capacity_hours = max(worker_count, 1) * max(active_hours, 1.0)
+    return AgentOperations(
+        worker_count=worker_count,
+        mining_hours=round(hours["mine"], 12),
+        inference_hours=round(hours["serve_inference"], 12),
+        verification_hours=round(hours["verify"], 12),
+        routing_hours=round(hours["route"], 12),
+        total_energy_cost=round(total_energy_cost, 12),
+        total_profit=round(total_profit, 12),
+        utilization=round(min(active_hours / capacity_hours, 1.0), 12),
+    )
+
+
+def choose_treasury_policy(agent: dict[str, Any], market_state: dict[str, Any]) -> str:
+    balance = float(agent.get("qi_balance", 0.0))
+    demand = float(market_state.get("inference_demand", 0.0))
+    if balance < float(market_state.get("minimum_reserve_qi", 0.0)):
+        return "conservative"
+    if demand >= 0.8 and balance > float(market_state.get("growth_reserve_qi", 0.0)):
+        return "aggressive"
+    return "balanced"
+
+
+def apply_treasury_policy(agent: dict[str, Any], policy_name: str, opportunity: dict[str, Any]) -> dict[str, float | str]:
+    if policy_name not in TREASURY_POLICIES:
+        raise ValueError(f"Unsupported treasury policy: {policy_name}")
+    profile = TREASURY_POLICIES[policy_name]
+    balance = max(float(agent.get("qi_balance", 0.0)), 0.0)
+    reserve = balance * profile["reserve_ratio"]
+    spendable = max(balance - reserve, 0.0)
+    growth_budget = spendable * profile["growth_spend_ratio"]
+    expected_profit = float(opportunity.get("expected_profit", opportunity.get("expected_profit_per_hour", 0.0)))
+    preferred_action = "mine" if expected_profit + profile["mining_bias"] <= 0 else str(opportunity.get("action", "serve_inference"))
+    return {
+        "policy": policy_name,
+        "reserve_qi": round(reserve, 12),
+        "growth_budget_qi": round(growth_budget, 12),
+        "preferred_action": preferred_action,
+    }
 
 
 def _require_positive_amount(amount: float) -> None:

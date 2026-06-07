@@ -46,6 +46,8 @@ from accounts import (
 )
 from adversary import FLAKY, MALICIOUS_RECEIPT, duplicate_job, simulate_capability_claim, simulate_worker_receipt
 from adversaries import adversary_profiles
+from agent_competition import run_agent_competition
+from agent_to_agent import simulate_agent_to_agent_economy
 from audit import duplicate_receipts as audit_duplicate_receipts, recent_attacks, suspicious_committees
 from challenges import create_challenge, verify_challenge_result
 from capabilities import compute_capability_hash, make_capability_claim, verify_capability_claim
@@ -61,6 +63,7 @@ from committees import (
 )
 from controller import ClusterController
 from customer_receipts import build_customer_receipt, compute_customer_receipt_hash
+from customer_demand import choose_customer_provider
 from crossover import analyze_mining_inference_crossover
 from daemon import ClusterWorkerClient, WorkerDaemon
 from doctor import run_checks
@@ -73,14 +76,18 @@ from envelopes import compute_envelope_hash, make_job_envelope, verify_job_envel
 from epochs import active_epoch, finalize_epoch
 from economics import compare_inference_vs_mining
 from economic_scheduler import choose_economic_action
+from economy_dashboard import run_economy_dashboard
 from economy_report import build_economy_report
 from economy_simulation import run_economy_simulation
+from federation_simulation import run_federation_simulation
 from invoices import build_settlement_invoice, compute_invoice_hash, duplicate_invoice_detected, verify_invoice_hash
 from lifecycle import transition_job_status
 from lan_smoke_test import run_lan_smoke_test
 from logging_config import redact_payload
 from market_demand import estimate_inference_opportunity, estimate_market_demand
+from market_pricing import compute_market_price
 from mining_economics import estimate_mining_opportunity
+from monetary_simulation import run_monetary_simulation
 from reinvestment import simulate_reinvestment
 from cluster_health import cluster_health
 from pricing import estimate_job_price
@@ -93,7 +100,9 @@ from privacy import (
     redact_sensitive_fields,
 )
 from registry import heartbeat_local_worker
+from regional_market import simulate_regional_market
 from reputation import apply_reputation_decay, update_worker_reputation
+from reputation_dynamics import run_reputation_dynamics
 from retry import next_retry_status, should_retry
 from router import route_and_audit_inference_job, route_inference_job
 from runtime import OllamaRuntime, RuntimeResult, SimulatedRuntime, SubprocessRuntime, output_hash
@@ -1232,6 +1241,121 @@ class WorkerPrototypeTest(unittest.TestCase):
         self.assertEqual(report["average_agent_profitability"], 1.5)
         self.assertNotIn("prompt", report)
         self.assertNotIn("output", report)
+
+    def test_customer_demand_provider_choice_prefers_private_verified_compute(self) -> None:
+        choice = choose_customer_provider(
+            "privacy_sensitive",
+            {
+                "QiCompute": {
+                    "price": 0.08,
+                    "latency": 180,
+                    "privacy_score": 0.95,
+                    "reliability": 0.9,
+                    "verification_score": 0.94,
+                    "region_match": 0.9,
+                },
+                "centralized_ai_api": {
+                    "price": 0.05,
+                    "latency": 80,
+                    "privacy_score": 0.35,
+                    "reliability": 0.98,
+                    "verification_score": 0.3,
+                    "region_match": 0.6,
+                },
+                "gpu_cloud": {
+                    "price": 0.07,
+                    "latency": 220,
+                    "privacy_score": 0.5,
+                    "reliability": 0.85,
+                    "verification_score": 0.4,
+                    "region_match": 0.5,
+                },
+                "self_hosted": {
+                    "price": 0.14,
+                    "latency": 260,
+                    "privacy_score": 0.99,
+                    "reliability": 0.72,
+                    "verification_score": 0.5,
+                    "region_match": 1,
+                },
+            },
+        )
+
+        self.assertEqual(choice.chosen_provider, "QiCompute")
+        self.assertGreater(choice.willingness_to_pay_qi, 0)
+        self.assertIn("privacy", choice.reason)
+
+    def test_dynamic_pricing_floor_comes_from_mining_profitability(self) -> None:
+        price = compute_market_price(
+            compute_supply=4,
+            customer_demand=9,
+            worker_utilization=0.8,
+            mining_fallback_profitability=0.04,
+            latency_class="low_latency",
+            privacy_class="private",
+            verification_class="verified",
+            regional_scarcity=0.3,
+        )
+
+        self.assertGreaterEqual(price.floor_price_qi, 0.04)
+        self.assertGreater(price.spot_price_qi, price.floor_price_qi)
+        self.assertIn("mining fallback", price.pricing_reason)
+
+    def test_federation_simulation_runs(self) -> None:
+        result = run_federation_simulation(cycles=60)
+
+        self.assertGreater(result["jobs_routed_locally"], 0)
+        self.assertIn("jobs_handed_off", result)
+        self.assertGreaterEqual(result["reconciliation_success_rate"], 0)
+
+    def test_agent_competition_runs(self) -> None:
+        result = run_agent_competition(cycles=120)
+
+        self.assertIn("balanced_operator", result["strategies"])
+        self.assertGreater(result["survival_rate"], 0)
+        self.assertIn("market_share", result)
+
+    def test_reputation_dynamics_runs(self) -> None:
+        result = run_reputation_dynamics(cycles=100)
+
+        reputations = result["average_reputation_by_class"]
+        self.assertGreater(reputations["honest"], reputations["malicious"])
+        self.assertGreaterEqual(result["recovery_time"], 0)
+        self.assertIn("false_positive_penalty_rate", result)
+
+    def test_regional_market_outputs(self) -> None:
+        result = simulate_regional_market(cycles=80)
+
+        self.assertIn("Atlantic Canada", result["regions"])
+        self.assertGreaterEqual(result["regional_job_volume"], 0)
+        self.assertIn("cross_region_routing_rate", result)
+
+    def test_agent_to_agent_economy_outputs(self) -> None:
+        result = simulate_agent_to_agent_economy(cycles=50)
+
+        self.assertGreater(result["service_volume"], 0)
+        self.assertIn("compute_agent", result["agent_profitability"])
+        self.assertIn("qi_velocity_between_agents", result)
+
+    def test_monetary_simulation_outputs(self) -> None:
+        result = run_monetary_simulation(cycles=100)
+
+        self.assertGreater(result["qi_issued"], 0)
+        self.assertGreater(result["qi_circulated"], 0)
+        self.assertIn("demand_vs_issuance_ratio", result)
+
+    def test_economy_dashboard_runs(self) -> None:
+        dashboard = run_economy_dashboard(cycles=50)
+
+        self.assertIn("customer_choice_summary", dashboard)
+        self.assertIn("pricing_crossover_summary", dashboard)
+        self.assertIn("top_risks", dashboard)
+
+    def test_thesis_document_exists(self) -> None:
+        thesis = Path("THESIS.md")
+
+        self.assertTrue(thesis.exists())
+        self.assertIn("Qi is mined. QiCompute moves Qi.", thesis.read_text(encoding="utf-8"))
 
     def test_adversary_profiles_are_seeded_and_descriptive(self) -> None:
         first = adversary_profiles(seed=7)

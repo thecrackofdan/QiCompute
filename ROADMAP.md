@@ -53,6 +53,27 @@ Idle hardware mines. Useful hardware earns. Agents choose which is more profitab
 
 The next simulation layer models agent-owned operations, treasury policy, reinvestment, market demand, mining fallback, and mining/inference crossover thresholds. This remains deterministic, local-first, privacy-preserving, and simulation-friendly.
 
+## Economic Research Layer
+
+The next market-design layer models whether QiCompute can sustain useful monetary circulation:
+
+- Customer demand and provider choice.
+- Dynamic pricing with mining profitability as the floor.
+- Federation handoff and reconciliation without real networking.
+- Agent competition across mining, inference, verification, balanced, aggressive, and conservative strategies.
+- Reputation dynamics for honest, flaky, malicious, falsely accused, and recovering workers.
+- Regional profitability, routing pressure, and mining fallback ratios.
+- Agent-to-agent compute trade in the same Qi settlement layer.
+- Long-term issuance, circulation, hoarding, inference spending, and velocity.
+
+The guiding principle is unchanged:
+
+```text
+Qi creates currency through mining.
+QiCompute allocates currency through useful compute markets.
+Agents and humans participate in the same economic layer.
+```
+
 ## Planned Runtime Improvements
 
 - Better local Ollama configuration checks

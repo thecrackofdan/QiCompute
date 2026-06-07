@@ -687,6 +687,36 @@ python3 economy_simulation.py
 python3 economy_simulation.py --cycles 1000
 ```
 
+## Economic Research Layer
+
+QiCompute now models whether the compute economy can work, not only whether local infrastructure can route and verify jobs.
+
+The research layer is deterministic, local-first, and simulation-only:
+
+- `customer_demand.py` models why privacy-sensitive, cost-sensitive, latency-sensitive, enterprise, agent, and bulk customers choose between QiCompute, centralized APIs, GPU clouds, and self-hosting.
+- `market_pricing.py` models dynamic spot, floor, and premium prices from supply, demand, utilization, mining fallback profitability, latency, privacy, verification, and regional scarcity.
+- `federation_simulation.py` explores controller handoff, verifier handoff, trust boundaries, and settlement reconciliation without real networking.
+- `agent_competition.py` compares mining specialists, inference specialists, verifier specialists, balanced operators, aggressive reinvestors, and conservative reserve holders.
+- `reputation_dynamics.py` tests whether honest, flaky, malicious, falsely accused, and recovering workers converge to useful reputation outcomes.
+- `regional_market.py` compares regional power cost, demand, privacy preference, routing, and mining fallback ratios.
+- `agent_to_agent.py` models research, compute, verifier, router, and operator agents trading in the same Qi layer.
+- `monetary_simulation.py` tracks mined Qi issuance, marketplace circulation, hoarding, inference spending, worker earnings, verifier earnings, treasury fees, and velocity.
+- `economy_dashboard.py` runs the major economic simulations and reports summaries, risks, and opportunities.
+
+The principle remains:
+
+```text
+Qi creates currency through mining.
+QiCompute allocates currency through useful compute markets.
+Agents and humans participate in the same economic layer.
+```
+
+Run the unified economy dashboard:
+
+```bash
+python3 economy_dashboard.py
+```
+
 ## Accounting Model
 
 Energy:

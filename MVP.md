@@ -40,6 +40,23 @@ Humans, agents, and organizations share the same economic layer.
 
 One currency. One issuance mechanism. Multiple ways to earn and spend it.
 
+## Economic Research Layer
+
+The MVP includes deterministic economic simulations for market design questions:
+
+- Customer demand and provider selection.
+- Dynamic pricing from supply, demand, utilization, mining fallback profitability, service class, and regional scarcity.
+- Federation controller handoff and reconciliation without public networking.
+- Agent competition, reinvestment behavior, and treasury survival.
+- Reputation convergence and recovery behavior.
+- Regional market profitability and cross-region routing.
+- Agent-to-agent inference, verification, routing, and operator trade.
+- Monetary issuance, circulation, hoarding, inference spending, and velocity.
+
+These modules answer economic questions in simulation only. They do not add blockchain integration, wallets, smart contracts, staking, governance tokens, public networking, or new issuance.
+
+Qi creates currency through mining. QiCompute allocates currency through useful compute markets. Agents and humans participate in the same economic layer.
+
 ## Not Included
 
 - Blockchain integration.

@@ -111,6 +111,25 @@ The autonomous economy layer is simulation and policy logic only. `economic_sche
 
 No autonomous economy module introduces blockchain integration, staking, governance tokens, slashing, yield farming, smart contracts, public networking, or new issuance.
 
+## Economic Research Layer
+
+The economic research layer asks whether the marketplace incentives work:
+
+```text
+customer demand -> provider choice
+mining fallback -> price floor
+worker utilization -> inference premium
+agent strategy -> market share and survival
+regional conditions -> routing and profitability
+market volume -> Qi circulation or hoarding
+```
+
+`customer_demand.py` scores QiCompute, centralized AI APIs, GPU clouds, and self-hosting for different customer types. `market_pricing.py` keeps mining profitability as the floor so inference must pay more than idle mining fallback to attract workers. `federation_simulation.py` models controller handoff, verifier handoff, trust boundaries, and reconciliation without implementing public networking.
+
+`agent_competition.py`, `reputation_dynamics.py`, `regional_market.py`, `agent_to_agent.py`, and `monetary_simulation.py` model strategy competition, reputation convergence, regional profitability, agent-to-agent trade, and monetary circulation. `economy_dashboard.py` aggregates those simulations into customer choice, pricing crossover, agent competition, regional routing, monetary circulation, risks, and opportunities.
+
+Qi creates currency through mining. QiCompute allocates currency through useful compute markets. Agents and humans participate in the same economic layer.
+
 ## Threat Model
 
 QiCompute now models adversarial local marketplace behavior: malicious workers, malicious customers, replay attackers, spam, escrow griefing, malicious verifiers, and colluding committees.

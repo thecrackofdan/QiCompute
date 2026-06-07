@@ -34,6 +34,29 @@ Useful work should move existing Qi from customers to workers, verifiers, router
 
 The prototype now models customer choice, dynamic pricing, agent competition, reputation dynamics, regional markets, agent-to-agent trade, and monetary circulation. These are local deterministic simulations, not production market infrastructure.
 
+## Current Evidence
+
+Supported claims:
+
+- QiCompute can model local escrow, settlement, refunds, worker payable accounting, and treasury accounting in deterministic tests.
+- QiCompute can run local simulations for agent behavior, mining fallback, customer choice, pricing, reputation, regional markets, and monetary circulation.
+- The prototype can avoid persisting raw prompts and raw outputs in its tested local paths.
+
+Unsupported claims:
+
+- Customers will pay for privacy, verification, local execution, or regional routing.
+- Inference revenue will beat mining revenue on real hardware at realistic utilization.
+- Agents will create enough demand or supply to sustain an autonomous compute economy.
+- Qi will circulate rather than be hoarded.
+
+Unknowns:
+
+- Real verification overhead on actual hardware and realistic workloads.
+- Real mining profitability under authorized Qi mining assumptions.
+- Real customer willingness to pay.
+- Real operator setup friction and uptime.
+- Whether reputation and committees remain useful under adversarial public participation.
+
 ## Open Questions
 
 - Will enough customers pay a premium for privacy, verification, or regional routing?

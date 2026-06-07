@@ -74,6 +74,21 @@ QiCompute allocates currency through useful compute markets.
 Agents and humans participate in the same economic layer.
 ```
 
+## v0.2.0 Validation Phase
+
+Stop expanding architecture. Prioritize validation over implementation.
+
+Next work should collect evidence for:
+
+- Customer willingness to pay for privacy, verification, local execution, and marketplace pricing.
+- Real hardware throughput, utilization, and energy estimates.
+- Real mining versus inference crossover thresholds.
+- Verification overhead as a percentage of inference runtime and revenue.
+- Trusted operator pilot uptime, utilization, disputes, settlement volume, and profitability.
+- Assumptions that are validated, contradicted, or still untested.
+
+Do not add new protocols, networking layers, blockchain integration, staking, governance, wallets, tokenomics changes, or large architecture subsystems during this phase.
+
 ## Planned Runtime Improvements
 
 - Better local Ollama configuration checks

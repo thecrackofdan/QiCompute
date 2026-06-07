@@ -48,6 +48,7 @@ from adversary import FLAKY, MALICIOUS_RECEIPT, duplicate_job, simulate_capabili
 from adversaries import adversary_profiles
 from agent_competition import run_agent_competition
 from agent_to_agent import simulate_agent_to_agent_economy
+from assumption_tracker import summarize_assumptions, track_assumptions
 from audit import duplicate_receipts as audit_duplicate_receipts, recent_attacks, suspicious_committees
 from challenges import create_challenge, verify_challenge_result
 from capabilities import compute_capability_hash, make_capability_claim, verify_capability_claim
@@ -64,6 +65,7 @@ from committees import (
 from controller import ClusterController
 from customer_receipts import build_customer_receipt, compute_customer_receipt_hash
 from customer_demand import choose_customer_provider
+from customer_research import interview_templates
 from crossover import analyze_mining_inference_crossover
 from daemon import ClusterWorkerClient, WorkerDaemon
 from doctor import run_checks
@@ -79,7 +81,9 @@ from economic_scheduler import choose_economic_action
 from economy_dashboard import run_economy_dashboard
 from economy_report import build_economy_report
 from economy_simulation import run_economy_simulation
+from evidence_registry import list_evidence, record_evidence, summarize_evidence
 from federation_simulation import run_federation_simulation
+from hardware_validation import run_hardware_validation
 from invoices import build_settlement_invoice, compute_invoice_hash, duplicate_invoice_detected, verify_invoice_hash
 from lifecycle import transition_job_status
 from lan_smoke_test import run_lan_smoke_test
@@ -88,6 +92,8 @@ from market_demand import estimate_inference_opportunity, estimate_market_demand
 from market_pricing import compute_market_price
 from mining_economics import estimate_mining_opportunity
 from monetary_simulation import run_monetary_simulation
+from pilot_program import run_trusted_operator_pilot
+from real_crossover import measure_real_crossover
 from reinvestment import simulate_reinvestment
 from cluster_health import cluster_health
 from pricing import estimate_job_price
@@ -113,6 +119,8 @@ from telemetry import GPUTelemetry
 from treasury import get_treasury, record_refund, record_settlement
 from snapshot import compute_snapshot_hash, export_controller_snapshot
 from transport import clear_nonce_cache, sign_request, verify_request_signature
+from validation_dashboard import build_validation_dashboard
+from verification_benchmarks import run_verification_benchmarks
 from receipts import make_receipt, utc_now_iso, verify_receipt_hash
 from verifier import verify_inference_receipt
 from worker import _minimal_yaml_load, load_config
@@ -1356,6 +1364,128 @@ class WorkerPrototypeTest(unittest.TestCase):
 
         self.assertTrue(thesis.exists())
         self.assertIn("Qi is mined. QiCompute moves Qi.", thesis.read_text(encoding="utf-8"))
+
+    def test_hardware_validation_framework_outputs_hashes_only(self) -> None:
+        result = run_hardware_validation(
+            gpu_model="test-gpu",
+            runtime_type="simulated",
+            model_name="test-model",
+            power_estimate_watts=120,
+            test_duration_seconds=0.01,
+            requests=2,
+        ).to_dict()
+
+        self.assertGreater(result["tokens_per_second"], 0)
+        self.assertGreater(result["requests_per_second"], 0)
+        self.assertGreater(result["estimated_energy_joules"], 0)
+        self.assertEqual(len(result["output_hashes"]), 2)
+        self.assertNotIn("output", result)
+        self.assertNotIn("prompt", result)
+
+    def test_real_crossover_measurement_prefers_profitable_inference(self) -> None:
+        result = measure_real_crossover(
+            mining_revenue_qi_per_hour=0.05,
+            inference_throughput_requests_per_hour=100,
+            qi_per_inference_request=0.002,
+            power_watts=250,
+            power_cost_per_kwh=0.01,
+            verification_cost_qi_per_request=0.0001,
+            marketplace_fee_percent=5,
+            utilization=0.8,
+        )
+
+        self.assertEqual(result.preferred_action, "serve_inference")
+        self.assertGreater(result.inference_profit_per_hour, result.mining_profit_per_hour)
+        self.assertGreater(result.profitability_ratio, 1)
+
+    def test_verification_benchmark_outputs_overhead_metrics(self) -> None:
+        report = run_verification_benchmarks(iterations=5, inference_duration_ms=100)
+
+        self.assertGreater(report.receipt_verification_ms, 0)
+        self.assertGreater(report.challenge_verification_ms, 0)
+        self.assertGreater(report.throughput_per_second, 0)
+        self.assertGreaterEqual(report.percentage_overhead, 0)
+
+    def test_customer_research_templates_are_questions_only(self) -> None:
+        templates = interview_templates()
+
+        self.assertIn("self_hosters", templates)
+        self.assertTrue(all(question.endswith("?") for questions in templates.values() for question in questions))
+        self.assertIn("agent_operators", templates)
+
+    def test_trusted_operator_pilot_framework_reports_metrics(self) -> None:
+        report = run_trusted_operator_pilot(cycles=25)
+
+        self.assertIn("operator-a", report["operators"])
+        self.assertGreater(report["settlement_volume"], 0)
+        self.assertIn("average_uptime", report)
+        self.assertIn("total_profitability", report)
+
+    def test_evidence_registry_records_and_summarizes_measurements(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "evidence.jsonl"
+
+            record_evidence(
+                source="unit-test",
+                category="benchmark",
+                result={"tokens_per_second": 10, "outcome": "positive"},
+                confidence=0.8,
+                path=path,
+            )
+            records = list_evidence(path)
+            summary = summarize_evidence(path)
+
+            self.assertEqual(len(records), 1)
+            self.assertEqual(records[0].category, "benchmark")
+            self.assertEqual(summary["categories"]["benchmark"]["count"], 1)
+
+    def test_assumption_tracker_links_evidence_to_assumptions(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            assumptions = Path(tmp) / "assumptions.md"
+            evidence = Path(tmp) / "evidence.jsonl"
+            assumptions.write_text(
+                "| Assumption | Why It Matters | Current Evidence | Missing Evidence | Confidence |\n"
+                "| --- | --- | --- | --- | --- |\n"
+                "| Customers value privacy enough to switch providers | matters | none | interviews | 2 |\n",
+                encoding="utf-8",
+            )
+            record_evidence(
+                source="privacy interview",
+                category="customer privacy",
+                result={"outcome": "positive"},
+                confidence=0.8,
+                path=evidence,
+            )
+
+            tracked = track_assumptions(assumptions_path=assumptions, evidence_path=evidence)
+            summary = summarize_assumptions(assumptions_path=assumptions, evidence_path=evidence)
+
+            self.assertEqual(tracked[0].status, "partially validated")
+            self.assertEqual(summary["status_counts"]["partially validated"], 1)
+
+    def test_validation_dashboard_reports_unknown_without_evidence_and_pass_with_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            assumptions = Path(tmp) / "assumptions.md"
+            evidence = Path(tmp) / "evidence.jsonl"
+            assumptions.write_text(
+                "| Assumption | Why It Matters | Current Evidence | Missing Evidence | Confidence |\n"
+                "| --- | --- | --- | --- | --- |\n"
+                "| Verification overhead remains acceptable | matters | none | benchmark | 2 |\n",
+                encoding="utf-8",
+            )
+
+            empty = build_validation_dashboard(assumptions_path=assumptions, evidence_path=evidence)
+            record_evidence(
+                source="verification benchmark",
+                category="verification",
+                result={"percentage_overhead": 1.5, "outcome": "positive"},
+                confidence=0.9,
+                path=evidence,
+            )
+            filled = build_validation_dashboard(assumptions_path=assumptions, evidence_path=evidence)
+
+            self.assertEqual(empty["verification_overhead"], "UNKNOWN")
+            self.assertEqual(filled["verification_overhead"], "PASS")
 
     def test_adversary_profiles_are_seeded_and_descriptive(self) -> None:
         first = adversary_profiles(seed=7)

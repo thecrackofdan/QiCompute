@@ -10,6 +10,8 @@ QiCompute v0.1.0 is an experimental MVP. It is a privacy-first compute marketpla
 
 It is not production-ready, not a blockchain, not a token, not a wallet, not public networking infrastructure, and not audited security software. Current cluster mode uses trusted LAN controller assumptions.
 
+The v0.2.0 direction is validation, not architecture expansion. The project is now prioritizing evidence over new subsystems: real hardware measurements, verification overhead, mining versus inference crossover, trusted-operator pilot data, customer interviews, and assumption tracking.
+
 Version information lives in `VERSION` and can be printed with:
 
 ```bash
@@ -716,6 +718,21 @@ Run the unified economy dashboard:
 ```bash
 python3 economy_dashboard.py
 ```
+
+## v0.2.0 Validation Phase
+
+The validation layer exists to collect evidence for or against the QiCompute thesis:
+
+- `hardware_validation.py` measures local runtime throughput, request rate, utilization, duration, estimated energy, and output hashes only.
+- `real_crossover.py` calculates measured mining versus inference profitability and utilization thresholds.
+- `verification_benchmarks.py` measures receipt, challenge, committee, and settlement overhead.
+- `customer_research.py` generates interview questions for privacy-conscious users, local businesses, AI developers, researchers, self-hosters, and agent operators.
+- `pilot_program.py` models a small trusted operator pilot network without networking.
+- `evidence_registry.py` stores benchmark, profitability, customer, verification, and crossover evidence records.
+- `assumption_tracker.py` links `ECONOMIC_ASSUMPTIONS.md` to evidence and marks assumptions as untested, partially validated, validated, or contradicted.
+- `validation_dashboard.py` reports PASS, WARN, and UNKNOWN indicators for validation status.
+
+The goal is to determine whether the thesis is correct, not to make the prototype larger.
 
 ## Accounting Model
 

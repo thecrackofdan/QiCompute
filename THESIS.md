@@ -14,6 +14,10 @@ Mining is the only issuance mechanism. It gives idle authorized hardware a basel
 
 Qi is reflective of energy, and so is inference. Mining converts joules into Qi at an observable rate, and every inference receipt records the joules the job consumed. That shared unit lets the marketplace anchor inference prices to the energy price of Qi: a joule spent serving a job should settle at least as much Qi as the same joule would have minted through mining. See `ENERGY_MODEL.md` for the implemented model.
 
+## Why Stability Matters
+
+A proof-of-useful-work market needs a unit of account, and a volatile token cannot be one: customers cannot budget, workers cannot compare inference against mining, and agents cannot hold working balances without speculation risk. QiCompute therefore quotes work in joules, which token volatility cannot touch, and converts to Qi at settlement through a smoothed parity oracle whose per-epoch movement is clamped, with spot premiums bounded in a corridor above the energy floor. Qi behaves like an energy-backed settlement medium for useful work, not a speculative asset; price discovery acts on the energy premium, not the currency.
+
 ## Why Inference Demand Matters
 
 Inference demand is what turns idle hardware into useful market capacity. A worker should serve inference when verified job revenue beats the mining fallback floor.

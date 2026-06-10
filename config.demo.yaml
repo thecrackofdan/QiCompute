@@ -64,6 +64,10 @@ energy_anchor:
   reference_power_watts: 250
   worker_share: 0.85
   overhead_multiplier: 1.2
+  smoothing_alpha: 0.2
+  max_step_ratio: 0.1
+  corridor_ceiling_multiplier: 1.5
+  stable_cv_threshold: 0.15
 
 marketplace:
   fee_percent: 2.5

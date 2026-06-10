@@ -103,6 +103,16 @@ from energy_anchor import (
     joules_per_token,
     mining_energy_parity,
 )
+from energy_peg import (
+    apply_stability_corridor,
+    init_parity_oracle,
+    oracle_from_epoch_summaries,
+    peg_settings,
+    price_stability_report,
+    quote_job_in_energy,
+    simulate_peg_stability,
+    update_parity_oracle,
+)
 from pricing import estimate_job_price
 from privacy import (
     decrypt_private_job_payload,
@@ -2116,6 +2126,112 @@ inference:
         empty = epoch_energy_report({"epoch_id": "empty", "total_energy_joules": 0, "total_settled_qi": 0, "total_tokens": 0})
         self.assertEqual(empty["settled_qi_per_joule"], 0.0)
         self.assertNotIn("energy_verdict", empty)
+
+    def test_parity_oracle_smooths_observed_rate(self) -> None:
+        oracle = init_parity_oracle(qi_per_joule=1e-7, smoothing_alpha=0.2, max_step_ratio=0.5)
+
+        updated = update_parity_oracle(oracle, 1.2e-7)
+
+        self.assertAlmostEqual(updated.qi_per_joule, 0.2 * 1.2e-7 + 0.8 * 1e-7, places=18)
+        self.assertEqual(updated.observation_count, 2)
+        self.assertFalse(updated.clamped)
+        self.assertEqual(updated.last_observed_qi_per_joule, 1.2e-7)
+
+    def test_parity_oracle_clamps_large_steps_both_directions(self) -> None:
+        oracle = init_parity_oracle(qi_per_joule=1e-7, smoothing_alpha=1.0, max_step_ratio=0.1)
+
+        spike = update_parity_oracle(oracle, 5e-7)
+        crash = update_parity_oracle(oracle, 1e-9)
+
+        self.assertAlmostEqual(spike.qi_per_joule, 1.1e-7, places=18)
+        self.assertTrue(spike.clamped)
+        self.assertAlmostEqual(crash.qi_per_joule, 0.9e-7, places=18)
+        self.assertTrue(crash.clamped)
+
+    def test_oracle_from_epoch_summaries_skips_empty_epochs(self) -> None:
+        summaries = [
+            {"metadata": {"energy_totals": {"settled_qi_per_joule": 0.0}}},
+            {"metadata": {"energy_totals": {"settled_qi_per_joule": 1.2e-7}}},
+            {"metadata": {}},
+            {"metadata": {"energy_totals": {"settled_qi_per_joule": 1.4e-7}}},
+        ]
+
+        oracle = oracle_from_epoch_summaries(
+            summaries,
+            initial_qi_per_joule=1e-7,
+            smoothing_alpha=0.5,
+            max_step_ratio=1.0,
+        )
+
+        self.assertEqual(oracle.observation_count, 3)
+        self.assertAlmostEqual(oracle.qi_per_joule, 0.5 * 1.4e-7 + 0.5 * (0.5 * 1.2e-7 + 0.5 * 1e-7), places=18)
+
+    def test_energy_quote_is_denominated_in_joules(self) -> None:
+        cheap_token = quote_job_in_energy(
+            energy_joules=750,
+            parity_qi_per_joule=1e-8,
+            overhead_multiplier=1.2,
+            privacy_class="private",
+            latency_class="low_latency",
+        )
+        expensive_token = quote_job_in_energy(
+            energy_joules=750,
+            parity_qi_per_joule=5e-8,
+            overhead_multiplier=1.2,
+            privacy_class="private",
+            latency_class="low_latency",
+        )
+
+        self.assertEqual(cheap_token.price_joules, expensive_token.price_joules)
+        self.assertAlmostEqual(cheap_token.price_joules, 750 * 1.2 * 1.16 * 1.18, places=6)
+        self.assertAlmostEqual(cheap_token.settlement_qi, cheap_token.price_joules * 1e-8, places=12)
+        self.assertAlmostEqual(expensive_token.settlement_qi, expensive_token.price_joules * 5e-8, places=12)
+
+    def test_stability_corridor_clamps_spot_into_band(self) -> None:
+        inside = apply_stability_corridor(spot_price_qi=0.0012, floor_price_qi=0.001, ceiling_multiplier=1.5)
+        above = apply_stability_corridor(spot_price_qi=0.005, floor_price_qi=0.001, ceiling_multiplier=1.5)
+        below = apply_stability_corridor(spot_price_qi=0.0002, floor_price_qi=0.001, ceiling_multiplier=1.5)
+
+        self.assertEqual(inside.spot_price_qi, 0.0012)
+        self.assertFalse(inside.clamped)
+        self.assertEqual(above.spot_price_qi, 0.0015)
+        self.assertTrue(above.clamped)
+        self.assertEqual(above.shed_premium_qi, 0.0035)
+        self.assertEqual(below.spot_price_qi, 0.001)
+        self.assertTrue(below.clamped)
+
+    def test_price_stability_report_verdicts(self) -> None:
+        stable = price_stability_report([1.0, 1.01, 0.99, 1.0, 1.02])
+        volatile = price_stability_report([1.0, 2.0, 0.5, 1.8, 0.6])
+
+        self.assertEqual(stable["verdict"], "stable")
+        self.assertEqual(volatile["verdict"], "volatile")
+        self.assertGreater(volatile["coefficient_of_variation"], stable["coefficient_of_variation"])
+        self.assertAlmostEqual(volatile["max_step_ratio"], 2.6, places=9)
+        self.assertEqual(price_stability_report([])["sample_count"], 0)
+
+    def test_peg_stability_simulation_reduces_volatility(self) -> None:
+        report = simulate_peg_stability(cycles=60)
+
+        self.assertEqual(report["raw_token_pricing"]["verdict"], "volatile")
+        self.assertEqual(report["energy_pegged_pricing"]["verdict"], "stable")
+        self.assertGreater(report["volatility_reduction_ratio"], 0.5)
+        self.assertLessEqual(report["energy_pegged_pricing"]["max_step_ratio"], 0.11)
+        self.assertEqual(report, simulate_peg_stability(cycles=60))
+
+    def test_peg_settings_reads_config_with_defaults(self) -> None:
+        defaults = peg_settings({})
+        configured = peg_settings(
+            {"energy_anchor": {"smoothing_alpha": 0.3, "max_step_ratio": 0.05, "corridor_ceiling_multiplier": 2.0}}
+        )
+
+        self.assertEqual(defaults["smoothing_alpha"], 0.2)
+        self.assertEqual(defaults["max_step_ratio"], 0.1)
+        self.assertEqual(defaults["corridor_ceiling_multiplier"], 1.5)
+        self.assertEqual(defaults["stable_cv_threshold"], 0.15)
+        self.assertEqual(configured["smoothing_alpha"], 0.3)
+        self.assertEqual(configured["max_step_ratio"], 0.05)
+        self.assertEqual(configured["corridor_ceiling_multiplier"], 2.0)
 
     def test_runner_for_type_dispatch_and_unsupported_type(self) -> None:
         from runners import OllamaRunner, SimulatedRunner, runner_for_type

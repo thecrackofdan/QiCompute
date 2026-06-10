@@ -30,6 +30,26 @@ The overhead multiplier covers verification, routing, and operator margin. The f
 - `epochs.finalize_epoch` records `settled_qi_per_joule` in each epoch's `energy_totals` metadata: how much Qi the epoch actually settled per verified joule.
 - `epoch_energy_report` compares an epoch's settled Qi-per-joule against the mining parity rate and emits an `energy_verdict` (`inference_beats_mining_parity` or `mining_parity_beats_inference`). This is the mining-versus-inference crossover question asked in energy units.
 
+## Stability: Pricing Work, Not Speculation
+
+Qi should behave like an energy-backed unit of account for useful work, not a volatile token. `energy_peg.py` adds three mechanisms on top of the anchor, each attacking one source of volatility:
+
+### 1. Energy-denominated quotes
+
+`quote_job_in_energy` prices a job in joules: measured energy times overhead and service-class multipliers. The joule price is invariant to Qi volatility by construction. Qi enters only at settlement, when the joule price converts at the smoothed parity rate. Token swings change the conversion, never the energy price of the work — the same way a contract priced in kWh is unaffected by currency moves until payment.
+
+### 2. The smoothed parity oracle
+
+A raw parity rate would reprice the marketplace instantly on every mining difficulty shock or thin-volume settlement epoch. `update_parity_oracle` publishes an exponential moving average of observed Qi-per-joule rates instead, and clamps any single update to `max_step_ratio` (default 10%) relative to the previous rate — the same damping idea as a difficulty adjustment clamp. `oracle_from_epoch_summaries` replays finalized epochs' `settled_qi_per_joule` into the oracle, so the published rate is reproducible from settlement history.
+
+### 3. The stability corridor
+
+`apply_stability_corridor` bounds spot prices inside `[floor, floor * corridor_ceiling_multiplier]`, where the floor is the energy reservation price (mining fallback). Demand surges raise prices within a known band instead of without limit; the report records how much premium was shed by the ceiling.
+
+### Measured result
+
+`simulate_peg_stability` (run via `make stability-report`) drives both pricing modes through the same deterministic boom/bust pattern in the observed Qi-per-joule rate. With defaults: raw token pricing has a coefficient of variation of 0.35 and a worst single-period jump of 161% (verdict: volatile); energy-pegged pricing has a coefficient of variation of 0.098 with the worst step bounded at the 10% clamp (verdict: stable) — a 72% volatility reduction, while the joule price never moves at all. `price_stability_report` provides the volatility metrics and verdict for any rate series.
+
 ## Configuration
 
 ```yaml
@@ -39,18 +59,25 @@ energy_anchor:
   reference_power_watts: 250
   worker_share: 0.85
   overhead_multiplier: 1.2
+  smoothing_alpha: 0.2
+  max_step_ratio: 0.1
+  corridor_ceiling_multiplier: 1.5
+  stable_cv_threshold: 0.15
 ```
 
-Set `enabled: false` to fall back to the static `pricing.energy_rate_qi_per_joule` value (default 0.0, which disables the energy pricing component entirely).
+Set `enabled: false` to fall back to the static `pricing.energy_rate_qi_per_joule` value (default 0.0, which disables the energy pricing component entirely). The last four keys configure the stability layer (`peg_settings` reads them with these defaults).
 
 ## CLI
 
 ```bash
 make energy-report
 python3 energy_anchor.py --mining-qi-per-hour 0.05 --power-watts 250 --job-energy-joules 750 --job-token-price-qi 0.0001
+
+make stability-report
+python3 energy_peg.py --cycles 60 --smoothing-alpha 0.2 --max-step-ratio 0.1
 ```
 
-Prints the parity rate and an anchored price for a sample job as JSON.
+`energy-report` prints the parity rate and an anchored price for a sample job. `stability-report` prints the raw-versus-pegged volatility comparison.
 
 ## Current Evidence
 
@@ -58,18 +85,23 @@ Supported claims:
 
 - The parity rate, anchored prices, derived pricing rates, and epoch energy reports are deterministic and covered by tests.
 - Energy flows end-to-end in the prototype: telemetry watts -> receipt joules -> epoch totals -> settled Qi per joule.
+- Under the modeled boom/bust rate pattern, energy-pegged quoting with the smoothed oracle reduces Qi cost volatility by more than 70% versus raw token pricing, with single-period moves bounded by the configured clamp (deterministic simulation, covered by tests).
 
 Unsupported claims:
 
 - The reference mining rate (`reference_mining_qi_per_hour`) reflects real Qi mining yield. It is a configured assumption, not a measurement.
 - Telemetry joules approximate true wall-socket energy. `nvidia-smi` power draw excludes CPU, memory, cooling, and PSU losses, and the 250W fallback is a constant.
 - Customers will accept energy-denominated pricing.
+- The simulated boom/bust rate pattern resembles real Qi volatility. The 70%+ reduction is a property of the damping mechanism under that synthetic pattern, not a market measurement.
+- The corridor ceiling will not starve supply. Capping demand premiums during real scarcity may push workers back to mining exactly when capacity is most needed; the right ceiling is an open tuning question.
 
 Unknowns:
 
 - Real joules-per-token on actual hardware and realistic workloads (see `RESEARCH_ROADMAP.md`).
 - How the parity rate should respond to mining difficulty changes over time.
 - Whether a single global reference rig is adequate, or whether the anchor must be regional (energy costs and hardware vary by region).
+- The right smoothing alpha and step clamp for real settlement cadence: too much damping makes the oracle lag genuine cost shifts and misprice work; too little readmits the volatility it exists to remove.
+- Whether an adversary can steer the oracle by feeding it thin or manufactured settlement epochs (oracle manipulation resistance is unmodeled).
 
 ## Limitations
 

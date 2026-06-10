@@ -46,6 +46,12 @@ A raw parity rate would reprice the marketplace instantly on every mining diffic
 
 `apply_stability_corridor` bounds spot prices inside `[floor, floor * corridor_ceiling_multiplier]`, where the floor is the energy reservation price (mining fallback). Demand surges raise prices within a known band instead of without limit; the report records how much premium was shed by the ceiling.
 
+### 4. Standardized energy billing
+
+Billing a worker's *measured* joules would be cost-plus pricing: a wasteful rig bills more than an efficient one for the same output, which rewards burning energy. `energy_standards.py` bills **reference joules** instead: each model class has a benchmark joules-per-token (`energy_anchor.reference_joules_per_token`), and a job's price is its output tokens times that benchmark — the same quote for every worker, the way electricity markets settle delivered power rather than fuel burned.
+
+A worker's measured draw against the benchmark becomes their margin, not their billing basis: `efficiency_margin` and `worker_efficiency_report` (driven by the per-worker `average_energy_per_token` the database already tracks) report the premium an operator earns by beating the benchmark or the penalty for missing it. `recalibrate_reference` drifts the benchmark toward observed fleet efficiency with the same EMA-plus-clamp damping as the oracle, so hardware improvements eventually reach customers as lower prices while workers keep a near-term incentive to beat the current benchmark.
+
 ### Measured result
 
 `simulate_peg_stability` (run via `make stability-report`) drives both pricing modes through the same deterministic boom/bust pattern in the observed Qi-per-joule rate. With defaults: raw token pricing has a coefficient of variation of 0.35 and a worst single-period jump of 161% (verdict: volatile); energy-pegged pricing has a coefficient of variation of 0.098 with the worst step bounded at the 10% clamp (verdict: stable) — a 72% volatility reduction, while the joule price never moves at all. `price_stability_report` provides the volatility metrics and verdict for any rate series.
@@ -63,9 +69,12 @@ energy_anchor:
   max_step_ratio: 0.1
   corridor_ceiling_multiplier: 1.5
   stable_cv_threshold: 0.15
+  reference_joules_per_token:
+    default: 3.0
+    llama-3.1-8b: 3.0
 ```
 
-Set `enabled: false` to fall back to the static `pricing.energy_rate_qi_per_joule` value (default 0.0, which disables the energy pricing component entirely). The last four keys configure the stability layer (`peg_settings` reads them with these defaults).
+Set `enabled: false` to fall back to the static `pricing.energy_rate_qi_per_joule` value (default 0.0, which disables the energy pricing component entirely). `smoothing_alpha` through `stable_cv_threshold` configure the stability layer (`peg_settings` reads them with these defaults); `reference_joules_per_token` is the per-model billing benchmark table used by standardized billing.
 
 ## CLI
 
@@ -75,9 +84,12 @@ python3 energy_anchor.py --mining-qi-per-hour 0.05 --power-watts 250 --job-energ
 
 make stability-report
 python3 energy_peg.py --cycles 60 --smoothing-alpha 0.2 --max-step-ratio 0.1
+
+make efficiency-report
+python3 energy_standards.py --output-tokens 500 --measured-joules-per-token 2.4
 ```
 
-`energy-report` prints the parity rate and an anchored price for a sample job. `stability-report` prints the raw-versus-pegged volatility comparison.
+`energy-report` prints the parity rate and an anchored price for a sample job. `stability-report` prints the raw-versus-pegged volatility comparison. `efficiency-report` prints a standardized quote and the efficiency margin for a sample worker.
 
 ## Current Evidence
 
@@ -94,6 +106,7 @@ Unsupported claims:
 - Customers will accept energy-denominated pricing.
 - The simulated boom/bust rate pattern resembles real Qi volatility. The 70%+ reduction is a property of the damping mechanism under that synthetic pattern, not a market measurement.
 - The corridor ceiling will not starve supply. Capping demand premiums during real scarcity may push workers back to mining exactly when capacity is most needed; the right ceiling is an open tuning question.
+- The 3.0 joules-per-token benchmark resembles real model energy use. It is a configured placeholder; real benchmarks require the hardware measurements in `RESEARCH_ROADMAP.md`.
 
 Unknowns:
 
@@ -102,6 +115,7 @@ Unknowns:
 - Whether a single global reference rig is adequate, or whether the anchor must be regional (energy costs and hardware vary by region).
 - The right smoothing alpha and step clamp for real settlement cadence: too much damping makes the oracle lag genuine cost shifts and misprice work; too little readmits the volatility it exists to remove.
 - Whether an adversary can steer the oracle by feeding it thin or manufactured settlement epochs (oracle manipulation resistance is unmodeled).
+- How benchmark recalibration should be governed: who measures fleet efficiency, how workers prove their reported draw, and whether per-model benchmarks fragment as model variants multiply.
 
 ## Limitations
 

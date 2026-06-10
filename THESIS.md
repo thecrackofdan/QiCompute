@@ -18,6 +18,8 @@ Qi is reflective of energy, and so is inference. Mining converts joules into Qi 
 
 A proof-of-useful-work market needs a unit of account, and a volatile token cannot be one: customers cannot budget, workers cannot compare inference against mining, and agents cannot hold working balances without speculation risk. QiCompute therefore quotes work in joules, which token volatility cannot touch, and converts to Qi at settlement through a smoothed parity oracle whose per-epoch movement is clamped, with spot premiums bounded in a corridor above the energy floor. Qi behaves like an energy-backed settlement medium for useful work, not a speculative asset; price discovery acts on the energy premium, not the currency.
 
+Energy pricing must also not become cost-plus. Jobs are billed at a per-model benchmark joules-per-token rather than a worker's measured draw, so the price depends on the work, not on how wastefully a rig produced it. Beating the benchmark is the operator's efficiency margin, and the benchmark drifts toward fleet efficiency over time so hardware gains eventually reach customers.
+
 ## Why Inference Demand Matters
 
 Inference demand is what turns idle hardware into useful market capacity. A worker should serve inference when verified job revenue beats the mining fallback floor.

@@ -1,7 +1,7 @@
 .PHONY: test test-smoke test-unit test-integration test-simulation test-slow test-profile demo stress lint clean
 .PHONY: smoke
 .PHONY: load-small load-medium bottleneck perf determinism reliability dev-health release-check license-check
-.PHONY: energy-report stability-report
+.PHONY: energy-report stability-report efficiency-report
 
 PYTHON ?= python3
 
@@ -55,6 +55,9 @@ energy-report:
 
 stability-report:
 	$(PYTHON) energy_peg.py
+
+efficiency-report:
+	$(PYTHON) energy_standards.py
 
 determinism:
 	$(PYTHON) determinism.py

@@ -39,6 +39,7 @@ The project is released under the MIT License. See `LICENSE`.
 - `pricing.py`: local marketplace pricing estimates.
 - `energy_anchor.py`: energy parity rate from mining issuance and energy-anchored job pricing.
 - `energy_peg.py`: smoothed parity oracle, joule-denominated quotes, stability corridor, and volatility reporting.
+- `energy_standards.py`: per-model reference joules-per-token billing, worker efficiency margins, and clamped benchmark recalibration.
 - `agents.py`: autonomous agent accounts, escrow, earnings, and policy helpers.
 - `agent_simulation.py`: deterministic agent economics simulation.
 - `economic_scheduler.py`: deterministic agent action scheduler.
@@ -883,9 +884,12 @@ Qi is reflective of energy, and so is inference. Mining converts joules into Qi 
 
 To keep Qi behaving like an energy-backed unit of account rather than a volatile token, `energy_peg.py` quotes jobs in joules (invariant to token swings), converts to Qi at settlement through a smoothed parity oracle with a clamped per-epoch step, bounds spot premiums in a corridor above the energy floor, and measures price volatility. Its deterministic simulation shows the peg cutting Qi cost volatility by more than 70% versus raw token pricing under the same rate swings.
 
+Jobs are billed at a per-model benchmark joules-per-token (`energy_standards.py`), not at a worker's measured draw, so energy pricing never becomes cost-plus: every worker gets the same quote for the same work, beating the benchmark is the operator's efficiency margin, and the benchmark recalibrates toward fleet efficiency with the same clamped damping as the oracle.
+
 ```bash
 make energy-report
 make stability-report
+make efficiency-report
 ```
 
 ## Receipt Hashing

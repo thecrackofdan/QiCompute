@@ -113,6 +113,14 @@ from energy_peg import (
     simulate_peg_stability,
     update_parity_oracle,
 )
+from energy_standards import (
+    efficiency_margin,
+    recalibrate_reference,
+    reference_joules_per_token,
+    standardized_energy_quote,
+    standardized_job_joules,
+    worker_efficiency_report,
+)
 from pricing import estimate_job_price
 from privacy import (
     decrypt_private_job_payload,
@@ -2232,6 +2240,79 @@ inference:
         self.assertEqual(configured["smoothing_alpha"], 0.3)
         self.assertEqual(configured["max_step_ratio"], 0.05)
         self.assertEqual(configured["corridor_ceiling_multiplier"], 2.0)
+
+    def test_reference_joules_per_token_uses_model_table_with_default(self) -> None:
+        config = {"energy_anchor": {"reference_joules_per_token": {"default": 3.0, "efficient-model": 1.5}}}
+
+        self.assertEqual(reference_joules_per_token("efficient-model", config), 1.5)
+        self.assertEqual(reference_joules_per_token("unknown-model", config), 3.0)
+        self.assertEqual(reference_joules_per_token("any-model", {}), 3.0)
+        self.assertEqual(standardized_job_joules(model="unknown-model", output_tokens=500, config=config), 1500.0)
+
+    def test_standardized_quote_is_invariant_to_worker_efficiency(self) -> None:
+        config = {"energy_anchor": {"reference_joules_per_token": {"default": 3.0}}}
+
+        quote = standardized_energy_quote(
+            model="llama-3.1-8b",
+            output_tokens=500,
+            parity_qi_per_joule=5e-8,
+            config=config,
+            overhead_multiplier=1.2,
+        )
+
+        self.assertEqual(quote.price_joules, 500 * 3.0 * 1.2)
+        self.assertAlmostEqual(quote.settlement_qi, quote.price_joules * 5e-8, places=12)
+        self.assertEqual(quote.metadata["billing_basis"], "reference_joules")
+        self.assertNotIn("measured", quote.pricing_basis)
+
+    def test_efficiency_margin_rewards_beating_the_benchmark(self) -> None:
+        efficient = efficiency_margin(reference_joules=1500, measured_joules=1200, parity_qi_per_joule=1e-7)
+        wasteful = efficiency_margin(reference_joules=1500, measured_joules=2000, parity_qi_per_joule=1e-7)
+
+        self.assertEqual(efficient.verdict, "efficiency_premium")
+        self.assertAlmostEqual(efficient.margin_qi, 300 * 1e-7, places=12)
+        self.assertEqual(efficient.efficiency_ratio, 1.25)
+        self.assertEqual(wasteful.verdict, "efficiency_penalty")
+        self.assertAlmostEqual(wasteful.margin_qi, -500 * 1e-7, places=12)
+
+    def test_worker_efficiency_report_flags_unmeasured_workers(self) -> None:
+        config = {"energy_anchor": {"reference_joules_per_token": {"default": 3.0}}}
+
+        measured = worker_efficiency_report(
+            {"worker_id": "worker-a", "average_energy_per_token": 2.4},
+            model="llama-3.1-8b",
+            config=config,
+            parity_qi_per_joule=1e-7,
+        )
+        unmeasured = worker_efficiency_report(
+            {"worker_id": "worker-b", "average_energy_per_token": 0},
+            model="llama-3.1-8b",
+            config=config,
+            parity_qi_per_joule=1e-7,
+        )
+
+        self.assertEqual(measured["verdict"], "efficiency_premium")
+        self.assertAlmostEqual(measured["margin_qi_per_token"], 0.6 * 1e-7, places=12)
+        self.assertEqual(unmeasured["verdict"], "unmeasured")
+
+    def test_recalibrate_reference_clamps_benchmark_drift(self) -> None:
+        gradual = recalibrate_reference(
+            current_reference=3.0,
+            observed_fleet_joules_per_token=2.9,
+            adjustment_alpha=0.2,
+            max_step_ratio=0.1,
+        )
+        shock = recalibrate_reference(
+            current_reference=3.0,
+            observed_fleet_joules_per_token=0.5,
+            adjustment_alpha=1.0,
+            max_step_ratio=0.1,
+        )
+
+        self.assertAlmostEqual(gradual["new_reference"], 0.2 * 2.9 + 0.8 * 3.0, places=9)
+        self.assertFalse(gradual["clamped"])
+        self.assertAlmostEqual(shock["new_reference"], 2.7, places=9)
+        self.assertTrue(shock["clamped"])
 
     def test_runner_for_type_dispatch_and_unsupported_type(self) -> None:
         from runners import OllamaRunner, SimulatedRunner, runner_for_type

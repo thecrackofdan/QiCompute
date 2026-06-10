@@ -78,6 +78,9 @@ energy_anchor:
   max_step_ratio: 0.1
   corridor_ceiling_multiplier: 1.5
   stable_cv_threshold: 0.15
+  reference_joules_per_token:
+    default: 3.0
+    llama-3.1-8b: 3.0
 
 marketplace:
   fee_percent: 2.5

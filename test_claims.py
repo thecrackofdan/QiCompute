@@ -126,6 +126,27 @@ class FetchShapingTest(unittest.TestCase):
         data = {"response": {"data": [{"price": 12.5}]}}
         self.assertEqual(dig(data, "response.data.0.price"), 12.5)
 
+    def test_difficulty_both_mode_falls_back_to_rpc_on_explorer_error(self) -> None:
+        import fetch_data
+        from unittest import mock
+
+        config = {
+            "difficulty": {
+                "mode": "both",
+                "explorer_url": "http://example.invalid/charts",
+                "explorer_json_path": "items",
+                "rpc_url": "http://example.invalid/rpc",
+            }
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.object(fetch_data, "http_get_json", side_effect=OSError("explorer down")), \
+                 mock.patch.object(fetch_data, "fetch_difficulty_rpc_scan", return_value="difficulty: rpc ok") as rpc:
+                message = fetch_data.fetch_difficulty(config, Path(tmp))
+            self.assertEqual(message, "difficulty: rpc ok")
+            rpc.assert_called_once()
+        with self.assertRaises(ValueError):
+            fetch_data.fetch_difficulty({"difficulty": {"mode": "explorer", "explorer_url": ""}}, Path("."))
+
     def test_sample_fixtures_are_marked_synthetic(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             for path in sample_data.write_sample_dir(tmp):

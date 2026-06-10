@@ -17,11 +17,13 @@ prices:
   volume_json_path: "total_volumes"
 
 difficulty:
-  # mode "explorer": GET a charts endpoint returning difficulty history;
-  # set url + json_path to a list of [ms_epoch_or_date, difficulty] pairs.
-  # mode "rpc_scan": sample block headers from a Quai RPC node (slower,
-  # needs no explorer API). Verify json fields against your node.
-  mode: "rpc_scan"
+  # CONFIRMED SOURCE PLAN: explorer endpoint for deep history when one is
+  # available, automatic fallback to RPC header sampling on any explorer
+  # error ("both"). Set explorer_url + explorer_json_path to a charts
+  # endpoint returning [ms_epoch_or_date, difficulty] pairs; until then,
+  # "both" effectively means rpc_scan. Verify the rpc field paths below
+  # against one real quai_getBlockByNumber response.
+  mode: "both"
   explorer_url: ""
   explorer_json_path: ""
   rpc_url: "https://rpc.quai.network/cyprus1"

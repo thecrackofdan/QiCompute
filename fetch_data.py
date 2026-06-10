@@ -108,14 +108,34 @@ def fetch_price(config: dict[str, Any], data_dir: Path, name: str, url_key: str)
 
 
 def fetch_difficulty(config: dict[str, Any], data_dir: Path) -> str:
+    """Difficulty history: explorer endpoint first, RPC header sampling as fallback.
+
+    mode "explorer": explorer only (fails loudly). mode "rpc_scan": RPC only.
+    mode "both": try the explorer for deep history; on any error, report it
+    and fall back to RPC sampling.
+    """
     diff_cfg = config["difficulty"]
-    if diff_cfg.get("mode") == "explorer" and diff_cfg.get("explorer_url"):
-        data = http_get_json(diff_cfg["explorer_url"])
-        pairs = dig(data, diff_cfg.get("explorer_json_path", ""))
-        series = pairs_to_daily([[p[0], float(p[1])] for p in pairs])
-        write_cache(data_dir, "difficulty", series, diff_cfg["explorer_url"])
-        return f"difficulty: {len(series)} points (explorer)"
+    mode = str(diff_cfg.get("mode", "both"))
+    if mode in {"explorer", "both"} and diff_cfg.get("explorer_url"):
+        try:
+            return _fetch_difficulty_explorer(diff_cfg, data_dir)
+        except Exception as exc:
+            if mode == "explorer":
+                raise
+            print(f"difficulty: explorer failed ({type(exc).__name__}: {exc}); falling back to rpc scan")
+    elif mode == "explorer":
+        raise ValueError("difficulty.mode is 'explorer' but explorer_url is not configured")
     return fetch_difficulty_rpc_scan(diff_cfg, data_dir)
+
+
+def _fetch_difficulty_explorer(diff_cfg: dict[str, Any], data_dir: Path) -> str:
+    data = http_get_json(diff_cfg["explorer_url"])
+    pairs = dig(data, diff_cfg.get("explorer_json_path", ""))
+    series = pairs_to_daily([[p[0], float(p[1])] for p in pairs])
+    if len(series) < 2:
+        raise ValueError(f"explorer returned {len(series)} points")
+    write_cache(data_dir, "difficulty", series, diff_cfg["explorer_url"])
+    return f"difficulty: {len(series)} points (explorer)"
 
 
 def fetch_difficulty_rpc_scan(diff_cfg: dict[str, Any], data_dir: Path) -> str:

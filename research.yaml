@@ -10,8 +10,11 @@ prices:
   # longest continuous public series available. Swap URLs to change source.
   qi_url: "https://api.coingecko.com/api/v3/coins/quai-network/market_chart?vs_currency=usd&days=max&interval=daily"
   btc_url: "https://api.coingecko.com/api/v3/coins/bitcoin/market_chart?vs_currency=usd&days=max&interval=daily"
-  # CoinGecko market_chart returns {"prices": [[ms_epoch, usd], ...]}
+  # CoinGecko market_chart returns {"prices": [[ms_epoch, usd], ...],
+  # "total_volumes": [[ms_epoch, usd], ...]} - volumes are cached for the
+  # liquidity honesty section (OBJECTIONS.md item d).
   json_path: "prices"
+  volume_json_path: "total_volumes"
 
 difficulty:
   # mode "explorer": GET a charts endpoint returning difficulty history;

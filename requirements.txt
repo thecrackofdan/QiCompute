@@ -1,5 +1,3 @@
-# QiCompute is standard-library first.
-# PyYAML is required by the crossover daemon's config loading.
+# Stdlib-first. PyYAML for config; matplotlib for the claim charts.
 PyYAML>=6.0
-# Optional: only needed for the report.py revenue chart PNG.
-# matplotlib>=3.5
+matplotlib>=3.5

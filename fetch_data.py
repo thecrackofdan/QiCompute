@@ -62,16 +62,20 @@ def pairs_to_daily(pairs: list[list[float]]) -> dict[str, float]:
     return series
 
 
-def write_cache(data_dir: Path, name: str, series: dict[str, float], source: str) -> Path:
+def write_cache(data_dir: Path, name: str, series: dict[str, float], source: str, *, synthetic: bool = False) -> Path:
+    """Write a dataset as JSON (with provenance) plus a CSV mirror for inspection."""
     data_dir.mkdir(parents=True, exist_ok=True)
     path = data_dir / f"{name}.json"
+    ordered = dict(sorted(series.items()))
     payload = {
-        "fetched_at": datetime.now(timezone.utc).isoformat(),
+        "fetched_at": "synthetic" if synthetic else datetime.now(timezone.utc).isoformat(),
         "source": source,
-        "synthetic": False,
-        "series": dict(sorted(series.items())),
+        "synthetic": synthetic,
+        "series": ordered,
     }
     path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    csv_lines = ["date,value"] + [f"{date},{value}" for date, value in ordered.items()]
+    (data_dir / f"{name}.csv").write_text("\n".join(csv_lines) + "\n", encoding="utf-8")
     return path
 
 
@@ -91,7 +95,16 @@ def fetch_price(config: dict[str, Any], data_dir: Path, name: str, url_key: str)
     if len(series) < 2:
         raise ValueError(f"{name}: feed returned {len(series)} points")
     write_cache(data_dir, name, series, url)
-    return f"{name}: {len(series)} daily points"
+    extra = ""
+    if name == "qi_usd":
+        # liquidity context for OBJECTIONS.md: thin volume is a finding, not a problem to hide
+        try:
+            volumes = pairs_to_daily(dig(data, prices_cfg.get("volume_json_path", "total_volumes")))
+            write_cache(data_dir, "qi_volume_usd", volumes, url)
+            extra = f"; volume series: {len(volumes)} points"
+        except Exception as exc:
+            extra = f"; volume series unavailable ({type(exc).__name__})"
+    return f"{name}: {len(series)} daily points{extra}"
 
 
 def fetch_difficulty(config: dict[str, Any], data_dir: Path) -> str:

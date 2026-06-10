@@ -85,9 +85,26 @@ joules/token.
 Why Qi and not just a kWh index? A kWh index quotes; money settles. The
 minimal escrow/settlement logic salvaged from QiCompute (with its audit fixes:
 integer micro-Qi everywhere, idempotent writes, WAL) prices an inference job
-from the live index, escrows the quote, records served output (prompt hash +
-token counts only), and settles pro-rata with refund — conservation checked,
-re-settlement provably a no-op.
+in Qi at the joule-derived rate, escrows the quote, records served output
+(prompt hash + token counts only), settles pro-rata with refund —
+conservation checked, re-settlement provably a no-op — and **emits a
+receipt** to `results/`. The settlement layer is a **clearly-marked mock**
+(`settlement_layer: MOCK_LOCAL_SQLITE`); a Quai testnet port is pending
+tooling confirmation, and the receipt format isolates that change to one
+field plus a transaction reference.
+
+## Research documents
+
+- **`PREDICTIONS.md`** — falsifiable numeric predictions with failure
+  conditions, written before results; candidate thresholds flagged for
+  review and frozen before interpretation.
+- **`OBJECTIONS.md`** — the steelmanned case against, including the
+  Qi/token confusion, regional electricity variance (the explicit global
+  marginal miner assumption), why-not-USD/futures, thin liquidity, and the
+  Bitcoin causality lesson.
+- **`PAPER.md`** — the paper skeleton: thesis, lineage (Ford's energy
+  dollar, Technocracy's energy certificates, Fuller's kWh currency), method,
+  results sections wired to `results/` artifacts.
 
 ## Run it
 

@@ -6,12 +6,20 @@ from the QiCompute marketplace with its audit fixes applied: integer micro-Qi
 everywhere, SQLite in WAL mode with check_same_thread=False, and idempotent
 writes (re-running a settlement cannot double-pay).
 
-    python3 claim4_settlement.py --demo      # full job lifecycle, printed ledger
+SETTLEMENT LAYER: this is a CLEARLY-MARKED MOCK - a local SQLite ledger, not
+Quai testnet. Every receipt it emits carries
+"settlement_layer": "MOCK_LOCAL_SQLITE". Porting settlement to Quai testnet
+is pending confirmation that the testnet tooling supports it; the receipt
+format is designed so only the settlement_layer field and a transaction
+reference need to change.
 
-Flow: price an inference job from the live index (claim 1's Qi/joule x
-claim 3's joules/token) -> escrow the quote from the customer -> record the
-served output (prompt hash + token counts only) -> settle pro-rata to tokens
-actually served, refunding the customer the difference.
+    python3 claim4_settlement.py --demo      # full job lifecycle, printed ledger + receipt
+
+Flow: price an inference job in Qi at the joule-derived rate (claim 1's
+Qi/joule x claim 3's joules/token) -> escrow the quote from the customer ->
+record the served output (prompt hash + token counts only) -> settle pro-rata
+to tokens actually served, refunding the customer the difference -> emit a
+receipt to results/.
 """
 from __future__ import annotations
 
@@ -20,10 +28,47 @@ import hashlib
 import json
 import sqlite3
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 from fetch_data import load_research_config
 from qi_index import MICRO, current_index, qi_micro_for_tokens
+
+
+SETTLEMENT_LAYER = "MOCK_LOCAL_SQLITE"  # not Quai testnet; see module docstring
+
+
+def emit_receipt(job: dict[str, Any], index: dict[str, Any], out_dir: str = "results") -> Path:
+    """Write the settlement receipt: the artifact a customer or auditor keeps."""
+    receipt = {
+        "settlement_layer": SETTLEMENT_LAYER,
+        "job_id": job["job_id"],
+        "created_ts": job["created_ts"],
+        "settled_ts": job["settled_ts"],
+        "customer_id": job["customer_id"],
+        "worker_id": job["worker_id"],
+        "prompt_hash": job["prompt_hash"],
+        "quoted_tokens": job["quoted_tokens"],
+        "served_tokens": job["served_tokens"],
+        "quoted_micro_qi": job["quoted_micro_qi"],
+        "settled_micro_qi": job["settled_micro_qi"],
+        "refunded_micro_qi": job["refunded_micro_qi"],
+        "pricing_basis": {
+            "joules_per_token": index["joules_per_token"],
+            "joules_per_token_source": index["joules_per_token_source"],
+            "joules_per_qi": index["joules_per_qi"],
+            "difficulty_as_of": index["as_of"],
+            "synthetic_index": bool(index.get("synthetic", False)),
+        },
+    }
+    receipt["receipt_hash"] = hashlib.sha256(
+        json.dumps(receipt, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    path = Path(out_dir)
+    path.mkdir(parents=True, exist_ok=True)
+    receipt_path = path / f"receipt_{job['job_id']}.json"
+    receipt_path.write_text(json.dumps(receipt, indent=2), encoding="utf-8")
+    return receipt_path
 
 
 SCHEMA = """
@@ -214,6 +259,8 @@ def run_demo(config: dict[str, Any], *, db_path: str, sample: bool) -> int:
     print(f"customer balance: {ledger.balance('customer-demo')} micro-Qi")
     print(f"worker balance:   {ledger.balance('worker-demo')} micro-Qi")
     print(f"conservation: {before} micro-Qi before == {after} after: {before == after}")
+    receipt_path = emit_receipt(settled, index)
+    print(f"receipt: {receipt_path} (settlement_layer={SETTLEMENT_LAYER})")
     print("why Qi and not a kWh index: the index produced the quote; only money could escrow and settle it.")
     ledger.close()
     return 0

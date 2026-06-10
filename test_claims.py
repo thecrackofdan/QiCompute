@@ -142,6 +142,68 @@ class QiIndexTest(unittest.TestCase):
         self.assertEqual(qi_micro_for_tokens(tokens=1, joules_per_token=0.5, joules_per_qi_value=0.0), 0)
 
 
+class ReceiptAndCacheTest(unittest.TestCase):
+    def test_receipt_emission_marks_mock_layer(self) -> None:
+        from claim4_settlement import emit_receipt
+
+        with tempfile.TemporaryDirectory() as tmp:
+            job = {
+                "job_id": "job-r1",
+                "created_ts": "2026-06-10T00:00:00+00:00",
+                "settled_ts": "2026-06-10T00:01:00+00:00",
+                "customer_id": "c",
+                "worker_id": "w",
+                "prompt_hash": "ab" * 32,
+                "quoted_tokens": 100,
+                "served_tokens": 80,
+                "quoted_micro_qi": 1000,
+                "settled_micro_qi": 800,
+                "refunded_micro_qi": 200,
+            }
+            index = {
+                "joules_per_token": 0.5,
+                "joules_per_token_source": "test",
+                "joules_per_qi": 2_500_000.0,
+                "as_of": "2026-06-09",
+                "synthetic": True,
+            }
+            path = emit_receipt(job, index, out_dir=tmp)
+            receipt = json.loads(path.read_text(encoding="utf-8"))
+            self.assertEqual(receipt["settlement_layer"], "MOCK_LOCAL_SQLITE")
+            self.assertTrue(receipt["pricing_basis"]["synthetic_index"])
+            self.assertEqual(receipt["settled_micro_qi"] + receipt["refunded_micro_qi"], receipt["quoted_micro_qi"])
+            self.assertEqual(len(receipt["receipt_hash"]), 64)
+
+    def test_cache_writes_csv_mirror(self) -> None:
+        from fetch_data import write_cache
+
+        with tempfile.TemporaryDirectory() as tmp:
+            write_cache(Path(tmp), "demo", {"2026-01-02": 2.0, "2026-01-01": 1.0}, "test", synthetic=True)
+            csv_text = (Path(tmp) / "demo.csv").read_text(encoding="utf-8")
+            self.assertEqual(csv_text.splitlines(), ["date,value", "2026-01-01,1.0", "2026-01-02,2.0"])
+            payload = json.loads((Path(tmp) / "demo.json").read_text(encoding="utf-8"))
+            self.assertTrue(payload["synthetic"])
+
+    def test_claim1_reports_liquidity_when_volume_present(self) -> None:
+        series = sample_data.generate_series()
+        result = claim1_analyze(
+            qi_usd=series["qi_usd"],
+            btc_usd=series["btc_usd"],
+            difficulty=series["difficulty"],
+            config=RESEARCH_CONFIG,
+            qi_volume_usd=series["qi_volume_usd"],
+        )
+        self.assertTrue(result["liquidity"]["available"])
+        self.assertGreater(result["liquidity"]["median_daily_volume_usd"], 0)
+        without = claim1_analyze(
+            qi_usd=series["qi_usd"],
+            btc_usd=series["btc_usd"],
+            difficulty=series["difficulty"],
+            config=RESEARCH_CONFIG,
+        )
+        self.assertFalse(without["liquidity"]["available"])
+
+
 class SettlementTest(unittest.TestCase):
     def _ledger(self, tmp: str) -> SettlementLedger:
         ledger = SettlementLedger(str(Path(tmp) / "settlement.db"))
@@ -205,6 +267,31 @@ class SettlementTest(unittest.TestCase):
             self.assertEqual(ledger.balance("customer"), balance_after_first)
             mode = ledger.conn.execute("PRAGMA journal_mode").fetchone()[0]
             self.assertEqual(mode.lower(), "wal")
+            ledger.close()
+
+
+class SettlementConservationFuzzTest(unittest.TestCase):
+    def test_randomized_cycles_conserve_micro_qi_exactly(self) -> None:
+        """Seeded version of PREDICTIONS.md P4: many random job cycles, zero drift."""
+        import random
+
+        rng = random.Random(20260610)
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger = SettlementLedger(str(Path(tmp) / "fuzz.db"))
+            ledger.ensure_account("customer", opening_micro_qi=10**12)
+            ledger.ensure_account("worker", opening_micro_qi=0)
+            before = ledger.total_micro_qi()
+            for cycle in range(300):
+                tokens = rng.randint(1, 2_000_000)
+                ledger.quote_and_escrow(
+                    job_id=f"fuzz-{cycle}", customer_id="customer", worker_id="worker", prompt=f"p{cycle}",
+                    tokens=tokens, joules_per_token=0.5, joules_per_qi_value=2_500_000.0,
+                )
+                ledger.record_served(f"fuzz-{cycle}", served_tokens=rng.randint(0, tokens))
+                ledger.settle(f"fuzz-{cycle}")
+                if cycle % 7 == 0:
+                    ledger.settle(f"fuzz-{cycle}")  # random re-settlements must be no-ops
+                self.assertEqual(ledger.total_micro_qi(), before, f"drift at cycle {cycle}")
             ledger.close()
 
 

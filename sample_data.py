@@ -14,7 +14,6 @@ what the tests assert.
 """
 from __future__ import annotations
 
-import json
 import math
 from datetime import date, timedelta
 from pathlib import Path
@@ -54,27 +53,27 @@ def generate_series() -> dict[str, dict[str, float]]:
         cost_factor = cost_values[i] / cost_values[0]
         btc_factor = btc_values[i] / btc_values[0]
         qi[day] = 0.08 * (cost_factor ** 0.85) * (btc_factor ** 0.15)
+    volume = {
+        day: 250_000.0 * (1.0 + 0.4 * math.sin(i / 11.0)) for i, day in enumerate(dates)
+    }
     return {
         "qi_usd": qi,
         "btc_usd": btc,
         "difficulty": difficulty,
         "electricity_usd_per_kwh": electricity,
+        "qi_volume_usd": volume,
     }
 
 
 def write_sample_dir(path: str = "data/sample") -> list[str]:
+    from fetch_data import write_cache
+
     out_dir = Path(path)
-    out_dir.mkdir(parents=True, exist_ok=True)
     written = []
     for name, series in generate_series().items():
-        payload = {
-            "fetched_at": "synthetic",
-            "source": "sample_data.py (deterministic synthetic generator)",
-            "synthetic": True,
-            "series": series,
-        }
-        file_path = out_dir / f"{name}.json"
-        file_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        file_path = write_cache(
+            out_dir, name, series, "sample_data.py (deterministic synthetic generator)", synthetic=True
+        )
         written.append(str(file_path))
     return written
 

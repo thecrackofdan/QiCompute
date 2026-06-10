@@ -55,12 +55,29 @@ def cost_series(difficulty_series: dict[str, float], config: dict[str, Any]) -> 
     }
 
 
+def liquidity_stats(volume_usd: dict[str, float] | None) -> dict[str, Any]:
+    """Honest liquidity context: thin volume weakens any price-based conclusion."""
+    if not volume_usd:
+        return {"available": False, "note": "no volume series cached; liquidity unassessed"}
+    values = sorted(volume_usd.values())
+    n = len(values)
+    median = values[n // 2] if n % 2 else (values[n // 2 - 1] + values[n // 2]) / 2
+    return {
+        "available": True,
+        "days": n,
+        "median_daily_volume_usd": round(median, 2),
+        "min_daily_volume_usd": round(values[0], 2),
+        "max_daily_volume_usd": round(values[-1], 2),
+    }
+
+
 def analyze(
     *,
     qi_usd: dict[str, float],
     btc_usd: dict[str, float],
     difficulty: dict[str, float],
     config: dict[str, Any],
+    qi_volume_usd: dict[str, float] | None = None,
 ) -> dict[str, Any]:
     cost_usd = cost_series(difficulty, config)
     dates, (qi, btc, cost) = align_by_date(qi_usd, btc_usd, cost_usd)
@@ -82,6 +99,7 @@ def analyze(
         "returns_regression_qi_on_energy_cost": energy_regression,
         "returns_regression_qi_on_btc": btc_regression,
         "min_samples_for_verdict": min_samples,
+        "liquidity": liquidity_stats(qi_volume_usd),
     }
     if n < min_samples:
         result["verdict"] = "insufficient_data"
@@ -134,6 +152,19 @@ def render_markdown(result: dict[str, Any], *, synthetic: bool) -> str:
         result["verdict_reason"],
         "",
     ]
+    liquidity = result.get("liquidity", {})
+    if liquidity.get("available"):
+        lines += [
+            "## Liquidity context",
+            "",
+            f"Median daily Qi volume: ${liquidity['median_daily_volume_usd']:,.0f} "
+            f"(min ${liquidity['min_daily_volume_usd']:,.0f}, max ${liquidity['max_daily_volume_usd']:,.0f}, "
+            f"{liquidity['days']} days). Thin volume weakens any price-based conclusion in either "
+            "direction; see OBJECTIONS.md.",
+            "",
+        ]
+    else:
+        lines += ["## Liquidity context", "", liquidity.get("note", ""), ""]
     return "\n".join(lines)
 
 
@@ -182,6 +213,9 @@ def load_inputs(config: dict[str, Any], *, sample: bool) -> dict[str, dict[str, 
             )
             return None
         out[name] = {date: float(value) for date, value in cached["series"].items()}
+    volume = read_cache(data_dir, "qi_volume_usd")
+    if volume is not None:
+        out["qi_volume_usd"] = {date: float(value) for date, value in volume["series"].items()}
     return out
 
 
@@ -195,7 +229,11 @@ def main() -> int:
     if inputs is None:
         return 1
     result = analyze(
-        qi_usd=inputs["qi_usd"], btc_usd=inputs["btc_usd"], difficulty=inputs["difficulty"], config=config
+        qi_usd=inputs["qi_usd"],
+        btc_usd=inputs["btc_usd"],
+        difficulty=inputs["difficulty"],
+        config=config,
+        qi_volume_usd=inputs.get("qi_volume_usd"),
     )
     results_dir = Path(config.get("results_dir", "results"))
     results_dir.mkdir(parents=True, exist_ok=True)

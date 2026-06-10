@@ -96,6 +96,13 @@ from pilot_program import run_trusted_operator_pilot
 from real_crossover import measure_real_crossover
 from reinvestment import simulate_reinvestment
 from cluster_health import cluster_health
+from energy_anchor import (
+    derive_energy_rate,
+    energy_anchored_price,
+    epoch_energy_report,
+    joules_per_token,
+    mining_energy_parity,
+)
 from pricing import estimate_job_price
 from privacy import (
     decrypt_private_job_payload,
@@ -2014,6 +2021,133 @@ inference:
         self.assertGreater(estimate.estimated_price_qi, 0)
         self.assertEqual(estimate.pricing_basis, "tokens+privacy+latency+reputation+energy")
 
+    def test_mining_energy_parity_reports_qi_per_joule(self) -> None:
+        parity = mining_energy_parity(mining_qi_per_hour=0.05, power_watts=250)
+
+        self.assertAlmostEqual(parity.qi_per_joule, 0.05 / (250 * 3600), places=15)
+        self.assertAlmostEqual(parity.qi_per_kwh, parity.qi_per_joule * 3_600_000, places=10)
+        self.assertEqual(parity.basis, "mining_issuance")
+        self.assertGreater(parity.joules_per_qi, 0)
+
+    def test_mining_energy_parity_handles_zero_power(self) -> None:
+        parity = mining_energy_parity(mining_qi_per_hour=0.05, power_watts=0)
+
+        self.assertEqual(parity.qi_per_joule, 0.0)
+        self.assertEqual(parity.joules_per_qi, 0.0)
+
+    def test_energy_anchored_price_reports_premium_over_parity(self) -> None:
+        parity = mining_energy_parity(mining_qi_per_hour=0.05, power_watts=250)
+
+        price = energy_anchored_price(
+            energy_joules=750,
+            qi_per_joule=parity.qi_per_joule,
+            overhead_multiplier=1.2,
+            token_price_qi=0.0001,
+        )
+
+        expected_anchor = 750 * parity.qi_per_joule * 1.2
+        self.assertAlmostEqual(price.anchored_price_qi, expected_anchor, places=12)
+        self.assertAlmostEqual(price.premium_over_energy_parity, 0.0001 / expected_anchor, places=6)
+        self.assertGreater(price.premium_over_energy_parity, 1.0)
+        self.assertEqual(price.pricing_basis, "energy_parity*overhead")
+
+    def test_derive_energy_rate_uses_anchor_when_enabled(self) -> None:
+        disabled = derive_energy_rate({"pricing": {"energy_rate_qi_per_joule": 0.000000001}})
+        enabled = derive_energy_rate(
+            {
+                "pricing": {"energy_rate_qi_per_joule": 0.0},
+                "energy_anchor": {
+                    "enabled": True,
+                    "reference_mining_qi_per_hour": 0.05,
+                    "reference_power_watts": 250,
+                    "worker_share": 0.85,
+                },
+            }
+        )
+
+        self.assertEqual(disabled, 0.000000001)
+        self.assertAlmostEqual(enabled, (0.05 / (250 * 3600)) * 0.85, places=15)
+
+    def test_pricing_estimate_uses_derived_energy_anchor_rate(self) -> None:
+        config = {
+            "pricing": {"energy_rate_qi_per_joule": 0.0},
+            "energy_anchor": {
+                "enabled": True,
+                "reference_mining_qi_per_hour": 0.05,
+                "reference_power_watts": 250,
+                "worker_share": 1.0,
+            },
+        }
+
+        with_energy = estimate_job_price(
+            input_tokens=0,
+            output_tokens=0,
+            model="llama-3.1-8b",
+            privacy_level="standard",
+            latency_target=None,
+            energy_joules=750,
+            worker_reputation=50,
+            config=config,
+        )
+
+        self.assertAlmostEqual(with_energy.estimated_price_qi, 750 * (0.05 / (250 * 3600)), places=12)
+        self.assertGreater(with_energy.metadata["energy_rate_qi_per_joule"], 0)
+
+    def test_joules_per_token_handles_zero_tokens(self) -> None:
+        self.assertEqual(joules_per_token(energy_joules=500, tokens=0), 0.0)
+        self.assertAlmostEqual(joules_per_token(energy_joules=500, tokens=250), 2.0, places=9)
+
+    def test_epoch_energy_report_compares_settlement_to_mining_parity(self) -> None:
+        parity = mining_energy_parity(mining_qi_per_hour=0.05, power_watts=250)
+        summary = {
+            "epoch_id": "epoch-energy-test",
+            "total_energy_joules": 1500.0,
+            "total_settled_qi": 0.001,
+            "total_tokens": 750.0,
+        }
+
+        report = epoch_energy_report(summary, parity=parity)
+
+        self.assertAlmostEqual(report["settled_qi_per_joule"], 0.001 / 1500.0, places=15)
+        self.assertAlmostEqual(report["joules_per_token"], 2.0, places=9)
+        self.assertEqual(report["energy_verdict"], "inference_beats_mining_parity")
+        self.assertGreater(report["settlement_vs_mining_parity"], 1.0)
+
+        empty = epoch_energy_report({"epoch_id": "empty", "total_energy_joules": 0, "total_settled_qi": 0, "total_tokens": 0})
+        self.assertEqual(empty["settled_qi_per_joule"], 0.0)
+        self.assertNotIn("energy_verdict", empty)
+
+    def test_runner_for_type_dispatch_and_unsupported_type(self) -> None:
+        from runners import OllamaRunner, SimulatedRunner, runner_for_type
+
+        self.assertIsInstance(runner_for_type("simulated"), SimulatedRunner)
+        self.assertIsInstance(runner_for_type("ollama"), OllamaRunner)
+        with self.assertRaises(ValueError):
+            runner_for_type("unsupported-runtime")
+
+    def test_summary_printers_handle_minimal_records(self) -> None:
+        from summary import print_committee_summary, print_epoch_summary, print_job_summary, print_worker_summary
+
+        out = StringIO()
+        with redirect_stdout(out):
+            print_epoch_summary({"epoch_id": "epoch-1", "total_settled_qi": 0.5})
+            print_worker_summary({"worker_id": "worker-1", "reputation_score": 50})
+            print_job_summary({"job_id": "job-1", "status": "completed"})
+            print_committee_summary({})
+        text = out.getvalue()
+        self.assertIn("epoch-1", text)
+        self.assertIn("worker-1", text)
+        self.assertIn("job-1", text)
+        self.assertIn("result: not run", text)
+
+    def test_market_placeholder_prompt_hash_is_deterministic(self) -> None:
+        from market import _placeholder_prompt_hash
+
+        first = _placeholder_prompt_hash("job-a")
+        self.assertEqual(first, _placeholder_prompt_hash("job-a"))
+        self.assertNotEqual(first, _placeholder_prompt_hash("job-b"))
+        self.assertEqual(len(first), 64)
+
     def test_customer_account_debit_credit_and_escrow(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             db = WorkerDB(str(Path(tmp) / "accounts.db"))
@@ -2740,6 +2874,7 @@ inference:
             self.assertEqual(summary["total_tokens"], receipt["output"]["amount"])
             self.assertGreater(summary["total_settled_qi"], 0)
             self.assertIn("test-worker", summary["metadata"]["worker_totals"])
+            self.assertGreater(summary["metadata"]["energy_totals"]["settled_qi_per_joule"], 0)
             db.close()
 
     def test_epoch_excludes_failed_challenge_and_duplicate_jobs(self) -> None:

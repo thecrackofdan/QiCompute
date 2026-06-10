@@ -68,6 +68,13 @@ pricing:
   low_latency_premium_multiplier: 1.15
   energy_rate_qi_per_joule: 0.0
 
+energy_anchor:
+  enabled: true
+  reference_mining_qi_per_hour: 0.05
+  reference_power_watts: 250
+  worker_share: 0.85
+  overhead_multiplier: 1.2
+
 marketplace:
   fee_percent: 2.5
   max_outstanding_escrow_qi: 1000

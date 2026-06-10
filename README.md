@@ -37,6 +37,7 @@ The project is released under the MIT License. See `LICENSE`.
 - `router.py`: local inference job routing.
 - `reputation.py`: worker reputation updates.
 - `pricing.py`: local marketplace pricing estimates.
+- `energy_anchor.py`: energy parity rate from mining issuance and energy-anchored job pricing.
 - `agents.py`: autonomous agent accounts, escrow, earnings, and policy helpers.
 - `agent_simulation.py`: deterministic agent economics simulation.
 - `economic_scheduler.py`: deterministic agent action scheduler.
@@ -874,6 +875,14 @@ energy -> inference work -> receipt -> challenge -> committee -> payout event ->
 ```
 
 QiCompute is evolving toward useful-work verification, batched settlement, distributed trust, and private distributed inference markets. Qi remains the settlement and incentive layer beneath the compute marketplace.
+
+## Energy-Anchored Pricing
+
+Qi is reflective of energy, and so is inference. Mining converts joules into Qi at an observable rate, and every receipt records the joules a job consumed, so the marketplace can price inference against the energy price of Qi. `energy_anchor.py` computes the mining parity rate (Qi per joule implied by a reference rig), prices jobs from measured energy, derives the `energy_rate_qi_per_joule` used by `pricing.py` when the `energy_anchor` config section is enabled, and reports each finalized epoch's settled Qi per joule against the parity rate. See `ENERGY_MODEL.md` for the model, its configuration, and its limitations.
+
+```bash
+make energy-report
+```
 
 ## Receipt Hashing
 

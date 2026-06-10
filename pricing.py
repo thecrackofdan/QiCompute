@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+from energy_anchor import derive_energy_rate
+
 
 @dataclass(frozen=True)
 class PriceEstimate:
@@ -37,7 +39,7 @@ def estimate_job_price(
     if latency_target and latency_target <= float(pricing_cfg.get("low_latency_threshold_ms", 2000)):
         latency_multiplier = float(pricing_cfg.get("low_latency_premium_multiplier", 1.15))
     reputation_multiplier = 1.0 + max(worker_reputation - 50, 0) / 1000
-    energy_rate = float(pricing_cfg.get("energy_rate_qi_per_joule", 0.0))
+    energy_rate = derive_energy_rate(config)
 
     token_price = input_tokens * input_rate + output_tokens * output_rate
     estimated = token_price * privacy_multiplier * latency_multiplier * reputation_multiplier
@@ -54,5 +56,6 @@ def estimate_job_price(
             "latency_multiplier": latency_multiplier,
             "reputation_multiplier": reputation_multiplier,
             "energy_joules": energy_joules,
+            "energy_rate_qi_per_joule": energy_rate,
         },
     )

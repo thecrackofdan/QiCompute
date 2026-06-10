@@ -82,7 +82,7 @@ def finalize_epoch(db: WorkerDB, epoch_id: str) -> dict[str, Any]:
         "accepted_committee_count": committee_counts["accepted"],
         "rejected_committee_count": committee_counts["rejected"],
         "disputed_committee_count": committee_counts["disputed"],
-        "energy_totals": {"total_energy_joules": sum(float(receipt["energy_joules"]) for receipt in valid_receipts)},
+        "energy_totals": _energy_totals(valid_receipts, settled_payouts),
         "payout_totals": {"total_settled_qi": sum(float(payout["qi_amount"]) for payout in settled_payouts)},
     }
     summary = {
@@ -120,6 +120,15 @@ def _worker_totals(receipts: list[dict[str, Any]], payouts: list[dict[str, Any]]
     for payout in payouts:
         totals[payout["worker_id"]]["settled_qi"] += float(payout["qi_amount"])
     return {worker: {key: round(value, 12) for key, value in data.items()} for worker, data in sorted(totals.items())}
+
+
+def _energy_totals(receipts: list[dict[str, Any]], payouts: list[dict[str, Any]]) -> dict[str, float]:
+    total_joules = sum(float(receipt["energy_joules"]) for receipt in receipts)
+    settled_qi = sum(float(payout["qi_amount"]) for payout in payouts)
+    return {
+        "total_energy_joules": total_joules,
+        "settled_qi_per_joule": round(settled_qi / total_joules, 18) if total_joules > 0 else 0.0,
+    }
 
 
 def _committee_counts(db: WorkerDB, epoch_id: str) -> dict[str, int]:

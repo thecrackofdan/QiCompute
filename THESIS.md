@@ -10,6 +10,10 @@ Qi creates currency through mining. QiCompute allocates currency through useful 
 
 Mining is the only issuance mechanism. It gives idle authorized hardware a baseline economic role without requiring QiCompute to mint, stake, slash, or issue a second asset.
 
+## Why Energy Is the Common Unit
+
+Qi is reflective of energy, and so is inference. Mining converts joules into Qi at an observable rate, and every inference receipt records the joules the job consumed. That shared unit lets the marketplace anchor inference prices to the energy price of Qi: a joule spent serving a job should settle at least as much Qi as the same joule would have minted through mining. See `ENERGY_MODEL.md` for the implemented model.
+
 ## Why Inference Demand Matters
 
 Inference demand is what turns idle hardware into useful market capacity. A worker should serve inference when verified job revenue beats the mining fallback floor.

@@ -1,6 +1,7 @@
 .PHONY: test test-smoke test-unit test-integration test-simulation test-slow test-profile demo stress lint clean
 .PHONY: smoke
 .PHONY: load-small load-medium bottleneck perf determinism reliability dev-health release-check license-check
+.PHONY: energy-report
 
 PYTHON ?= python3
 
@@ -48,6 +49,9 @@ bottleneck:
 
 perf:
 	$(PYTHON) benchmarks.py
+
+energy-report:
+	$(PYTHON) energy_anchor.py
 
 determinism:
 	$(PYTHON) determinism.py

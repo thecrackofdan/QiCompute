@@ -2,6 +2,16 @@
 
 All notable changes to QiCompute are documented here. This project follows the spirit of Keep a Changelog and uses semantic versioning for experimental MVP releases.
 
+## [Unreleased]
+
+### Added
+
+- Energy anchor layer (`energy_anchor.py`): mining-issuance energy parity rate (Qi per joule), energy-anchored job pricing with premium-over-parity reporting, and epoch energy reports comparing settled Qi per joule against the mining parity rate. Documented in `ENERGY_MODEL.md`.
+- `energy_anchor` configuration section in `config.yaml` and `config.demo.yaml`; `pricing.estimate_job_price` now derives its energy rate from the anchor when enabled instead of the static `energy_rate_qi_per_joule` value.
+- Finalized epochs record `settled_qi_per_joule` in their `energy_totals` metadata.
+- `make energy-report` target printing the parity rate and a sample anchored price.
+- Tests for the energy anchor layer and first coverage for `market.py`, `runners.py`, and `summary.py` helpers.
+
 ## [0.1.0] - 2026-06-03
 
 ### Added

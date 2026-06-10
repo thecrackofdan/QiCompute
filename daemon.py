@@ -1,435 +1,621 @@
+"""Crossover daemon: point one GPU at whichever pays more, mining Quai or serving inference.
+
+Standalone: `python3 daemon.py`. One config file, one SQLite log, no controller/worker split.
+All money math is integer micro-USD and micro-Qi (1 unit = 1,000,000 micro). On any Quai
+feed error the daemon defaults to mining.
+"""
 from __future__ import annotations
 
 import argparse
+import hashlib
+import json
+import signal
+import sqlite3
+import subprocess
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
+import urllib.request
+from datetime import datetime, timezone
+from decimal import Decimal
+from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-import failures
-from accounts import record_worker_rejected, refund_job_escrow, settle_job_escrow
-from capabilities import make_capability_claim
-from challenges import build_challenge_result, create_challenge, should_attach_challenge, verify_challenge_result
-from committees import ACCEPTED, create_verification_committee, run_verification_committee
-from db import WorkerDB
-from epochs import active_epoch
-from logging_config import configure_logging, log_event
-from privacy import redact_sensitive_fields
-from receipts import compute_receipt_hash, make_receipt, utc_now_iso
-from registry import heartbeat_local_worker, register_local_worker, worker_from_config
-from reputation import update_worker_reputation
-from runners import runner_for_type
 from telemetry import GPUTelemetry
-from treasury import record_refund, record_settlement
-from transport import get_json, post_json
-from verifier import verify_inference_receipt
-from worker import load_config
 
 
-class WorkerDaemon:
+MICRO = 1_000_000
+SECONDS_PER_DAY = 86_400
+MODE_MINING = "mining"
+MODE_INFERENCE = "inference"
+
+SCHEMA = """
+CREATE TABLE IF NOT EXISTS decisions (
+    decision_id TEXT PRIMARY KEY,
+    ts TEXT NOT NULL,
+    mode_before TEXT NOT NULL,
+    mode_after TEXT NOT NULL,
+    switched INTEGER NOT NULL,
+    reason TEXT NOT NULL,
+    mining_net_usd_micro_per_day INTEGER NOT NULL,
+    inference_net_usd_micro_per_day INTEGER NOT NULL,
+    power_cost_usd_micro_per_day INTEGER NOT NULL,
+    feeds_ok INTEGER NOT NULL,
+    details_json TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_decisions_ts ON decisions(ts);
+
+CREATE TABLE IF NOT EXISTS samples (
+    sample_id TEXT PRIMARY KEY,
+    ts TEXT NOT NULL,
+    mode TEXT NOT NULL,
+    power_watts REAL,
+    gpu_utilization_percent REAL,
+    hashrate_hps INTEGER,
+    tokens_per_second REAL
+);
+CREATE INDEX IF NOT EXISTS idx_samples_ts ON samples(ts);
+
+CREATE TABLE IF NOT EXISTS inference_requests (
+    request_id TEXT PRIMARY KEY,
+    ts TEXT NOT NULL,
+    prompt_hash TEXT NOT NULL,
+    input_tokens INTEGER NOT NULL,
+    output_tokens INTEGER NOT NULL,
+    duration_ms INTEGER NOT NULL
+);
+"""
+
+
+def utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+# ---------------------------------------------------------------------------
+# Integer money helpers. Feeds and config hand us decimal strings or JSON
+# numbers; convert once at the boundary via Decimal, integers everywhere else.
+# ---------------------------------------------------------------------------
+
+def to_micro(value: Any) -> int:
+    return int(Decimal(str(value)) * MICRO)
+
+
+def micro_to_str(micro: int) -> str:
+    sign = "-" if micro < 0 else ""
+    micro = abs(int(micro))
+    return f"{sign}{micro // MICRO}.{micro % MICRO:06d}"
+
+
+# ---------------------------------------------------------------------------
+# Economics (pure integer functions; report.py and benchmark.py reuse these).
+# ---------------------------------------------------------------------------
+
+def mining_gross_usd_micro_per_day(
+    *,
+    hashrate_hps: int,
+    network_difficulty: int,
+    block_reward_micro_qi: int,
+    qi_price_micro_usd: int,
+) -> int:
+    """Expected mining revenue: share of blocks/day times reward times price.
+
+    Difficulty is the expected hashes per block, so blocks/day for this rig is
+    hashrate * 86400 / difficulty.
+    """
+    if network_difficulty <= 0 or hashrate_hps <= 0:
+        return 0
+    micro_qi_per_day = hashrate_hps * SECONDS_PER_DAY * block_reward_micro_qi // network_difficulty
+    return micro_qi_per_day * qi_price_micro_usd // MICRO
+
+
+def inference_gross_usd_micro_per_day(*, rate_micro_usd_per_hour: int, utilization_percent: int) -> int:
+    utilization = min(max(int(utilization_percent), 0), 100)
+    return max(int(rate_micro_usd_per_hour), 0) * 24 * utilization // 100
+
+
+def power_cost_usd_micro_per_day(*, watts: int, usd_per_kwh_micro: int) -> int:
+    return max(int(watts), 0) * 24 * max(int(usd_per_kwh_micro), 0) // 1000
+
+
+# ---------------------------------------------------------------------------
+# Switching logic with hysteresis. Pure state machine, no I/O: this is the
+# part under test.
+# ---------------------------------------------------------------------------
+
+class CrossoverEngine:
+    """Decide which mode the GPU should be in, without flapping.
+
+    A challenger must beat the incumbent by ``margin_percent`` of the
+    incumbent's absolute net (or by ``margin_floor_usd_micro`` when the
+    incumbent is near zero), for ``consecutive_decisions`` evaluations in a
+    row, and no switch happens within ``min_dwell_seconds`` of the last one.
+    Any Quai feed failure forces mining: the status quo a miner already runs.
+    """
+
     def __init__(
         self,
-        config: dict[str, Any],
-        db: WorkerDB,
-        telemetry: GPUTelemetry | None = None,
-        job_overrides: dict[str, dict[str, Any]] | None = None,
+        *,
+        margin_percent: int = 15,
+        consecutive_decisions: int = 3,
+        min_dwell_seconds: int = 1800,
+        margin_floor_usd_micro: int = 50_000,
+        initial_mode: str = MODE_MINING,
     ):
-        self.config = config
-        self.db = db
-        self.worker_id = config["worker"]["id"]
-        self.job_overrides = job_overrides or {}
-        self.telemetry = telemetry or GPUTelemetry(
-            nvidia_smi_path=config.get("telemetry", {}).get("nvidia_smi_path", "nvidia-smi"),
-            fallback_watts=float(config["worker"].get("fallback_watts", 0)),
-        )
+        self.mode = initial_mode
+        self.margin_percent = max(int(margin_percent), 0)
+        self.consecutive_decisions = max(int(consecutive_decisions), 1)
+        self.min_dwell_seconds = max(int(min_dwell_seconds), 0)
+        self.margin_floor_usd_micro = max(int(margin_floor_usd_micro), 0)
+        self.streak = 0
+        self.last_switch_seconds: float | None = None
 
-    def run_once(self, runtime_type: str | None = None) -> dict[str, Any] | None:
-        worker = register_local_worker(self.db, self.config)
-        heartbeat_local_worker(self.db, self.worker_id, {"source": "daemon", "total_watts": self.telemetry.total_watts()})
-        self.db.expire_stale_customer_jobs(utc_now_iso())
-        jobs = self.db.list_assigned_jobs(self.worker_id, limit=1)
-        if not jobs:
-            return None
-        stored_job = jobs[0]
-        job = {**stored_job, **self.job_overrides.get(stored_job["job_id"], {})}
-        self.db.update_customer_job_status(stored_job["job_id"], "running", {})
-        self.db.increment_worker_load(self.worker_id)
-        try:
-            runtime_cfg = dict(self.config.get("runtime", {}))
-            selected_runtime_type = runtime_type or runtime_cfg.get("type", "simulated")
-            self.config["runtime"] = {**runtime_cfg, "type": selected_runtime_type}
-            runtime = runner_for_type(selected_runtime_type)
-            result = runtime.run(job, self.config)
-            challenge = None
-            challenge_result = None
-            receipt = self._receipt_from_result(job, result)
-            if result.accepted and should_attach_challenge(_job_for_challenge(job), self.config):
-                challenge = create_challenge(_job_for_challenge(job), self.worker_id, self.config)
-                self.db.insert_challenge(challenge)
-                receipt["metadata"]["challenge_id"] = challenge["challenge_id"]
-                receipt["metadata"]["challenge_response_hash"] = job.get("challenge_response_hash") or challenge[
-                    "expected_hash"
-                ]
-                receipt["receipt_hash"] = _refresh_receipt_hash(receipt)
-            verification = verify_inference_receipt(receipt, _job_for_verifier(job), self.config)
-            if not result.accepted:
-                verification = _verification_failure(
-                    result.error_code or failures.COMMAND_FAILED,
-                    job,
-                    receipt,
-                    {
-                        "runtime": receipt["metadata"].get("runtime", {}),
-                        "payout_eligible": False,
-                    },
-                )
-            if challenge:
-                challenge_verification = verify_challenge_result(challenge, receipt)
-                challenge_result = build_challenge_result(challenge, receipt, challenge_verification)
-                self.db.record_challenge_result(challenge_result)
-                receipt["metadata"]["challenge_verification"] = challenge_verification.to_dict()
-                if not challenge_verification.accepted:
-                    verification = _verification_failure(
-                        failures.CHALLENGE_FAILED
-                        if challenge_verification.reason != failures.CHALLENGE_EXPIRED
-                        else failures.CHALLENGE_EXPIRED,
-                        job,
-                        receipt,
-                        {"challenge": challenge_verification.to_dict(), "payout_eligible": False},
-                    )
-            if result.accepted and verification.accepted and self.config.get("committees", {}).get("enabled", False):
-                receipt["receipt_hash"] = _refresh_receipt_hash(receipt)
-                committee_cfg = self.config.get("committees", {})
-                epoch = active_epoch(self.db)
-                committee = create_verification_committee(
-                    self.db,
-                    challenge_id=challenge["challenge_id"] if challenge else None,
-                    assigned_worker_id=self.worker_id,
-                    committee_size=int(committee_cfg.get("committee_size", 3)),
-                    quorum_threshold=int(committee_cfg.get("quorum_threshold", 2)),
-                    metadata={"job_id": job["job_id"], "epoch_id": epoch["epoch_id"]},
-                )
-                committee_result = run_verification_committee(
-                    self.db,
-                    committee,
-                    receipt=receipt,
-                    challenge_result=challenge_result,
-                    forced_votes=committee_cfg.get("forced_votes"),
-                )
-                receipt["metadata"]["committee_verification"] = {
-                    "committee_id": committee_result["committee_id"],
-                    "result": committee_result["result"],
-                    "vote_counts": committee_result["metadata"].get("vote_counts", {}),
-                }
-                if committee_result["result"] != ACCEPTED:
-                    verification = _verification_failure(
-                        failures.COMMITTEE_REJECTED
-                        if committee_result["result"] == "rejected"
-                        else failures.COMMITTEE_DISPUTED,
-                        job,
-                        receipt,
-                        {"committee": receipt["metadata"]["committee_verification"], "payout_eligible": False},
-                    )
-            receipt["metadata"]["verification"] = verification.to_dict()
-            receipt["receipt_hash"] = _refresh_receipt_hash(receipt)
-            self.db.insert_receipt(receipt)
-            update_worker_reputation(
-                self.db,
-                worker_id=self.worker_id,
-                verification=verification.to_dict(),
-                receipt=receipt,
-            )
-            payout_eligible = result.accepted and verification.accepted
-            if payout_eligible:
-                epoch = active_epoch(self.db)
-                settlement = settle_job_escrow(
-                    self.db,
-                    job["job_id"],
-                    self.worker_id,
-                    receipt["estimated_qi_owed"],
-                    float(self.config.get("marketplace", {}).get("fee_percent", 0)),
-                )
-                record_settlement(
-                    self.db,
-                    fee_qi=settlement["fee_qi"],
-                    worker_payout_qi=settlement["worker_payout_qi"],
-                    settled_qi=settlement["settled_qi"],
-                )
-                payout_event = {
-                    "event_id": str(uuid4()),
-                    "worker_id": self.worker_id,
-                    "event_type": "inference_job",
-                    "basis": "daemon_verified_runtime",
-                    "qi_amount": settlement["worker_payout_qi"],
-                    "created_at": utc_now_iso(),
-                    "source_id": receipt["receipt_id"],
-                    "epoch_id": epoch["epoch_id"],
-                    "metadata": {
-                        "job_id": job["job_id"],
-                        "runtime_type": result.metadata.get("runtime_type"),
-                        "verification_reason": verification.reason,
-                        "challenge_id": receipt["metadata"].get("challenge_id"),
-                        "committee_id": receipt["metadata"].get("committee_verification", {}).get("committee_id"),
-                        "settled_qi": settlement["settled_qi"],
-                        "fee_qi": settlement["fee_qi"],
-                    },
-                }
-                self.db.insert_payout_event(payout_event)
-                self.db.record_inference_job_paid(
-                    job_id=job["job_id"],
-                    worker_id=self.worker_id,
-                    receipt_id=receipt["receipt_id"],
-                    accepted_at=payout_event["created_at"],
-                    payout_event_id=payout_event["event_id"],
-                )
-                self.db.update_customer_job_status(job["job_id"], "completed", {"receipt_id": receipt["receipt_id"]})
-            else:
-                refund = refund_job_escrow(
-                    self.db,
-                    job["job_id"],
-                    "disputed" if verification.reason == failures.COMMITTEE_DISPUTED else verification.reason or failures.VERIFICATION_FAILED,
-                )
-                record_refund(self.db, refund_qi=refund.get("refund_qi", 0), disputed=verification.reason == failures.COMMITTEE_DISPUTED)
-                record_worker_rejected(self.db, self.worker_id, receipt.get("estimated_qi_owed", 0), disputed=verification.reason == failures.COMMITTEE_DISPUTED)
-                self.db.mark_customer_job_failure(
-                    job["job_id"],
-                    result.error_code or verification.reason or failures.VERIFICATION_FAILED,
-                    result.error_message or verification.metadata.get("reason_detail", "runtime verification failed"),
-                )
-            return receipt
-        finally:
-            self.db.decrement_worker_load(self.worker_id)
-            heartbeat_local_worker(self.db, self.worker_id, {"source": "daemon", "total_watts": self.telemetry.total_watts()})
+    def evaluate(
+        self,
+        *,
+        mining_net_usd_micro: int,
+        inference_net_usd_micro: int,
+        feeds_ok: bool,
+        now_seconds: float,
+    ) -> dict[str, Any]:
+        mode_before = self.mode
+        if not feeds_ok:
+            switched = self.mode != MODE_MINING
+            if switched:
+                self._switch(MODE_MINING, now_seconds)
+            self.streak = 0
+            return self._decision(mode_before, switched, "feed_failure_default_to_mining")
 
-    def run_loop(self, runtime_type: str | None = None) -> None:
-        interval = float(self.config["worker"].get("loop_interval_seconds", 5))
-        while True:
-            self.run_once(runtime_type=runtime_type)
-            time.sleep(interval)
-
-    def _receipt_from_result(self, job: dict[str, Any], result: Any) -> dict[str, Any]:
-        return receipt_from_runtime_result(self.config, self.worker_id, job, result)
-
-
-class ClusterWorkerClient:
-    def __init__(self, config: dict[str, Any], telemetry: GPUTelemetry | None = None):
-        self.config = config
-        self.worker_id = config["worker"]["id"]
-        cluster_cfg = config.get("cluster", {})
-        self.controller_url = cluster_cfg.get("controller_url", "http://127.0.0.1:8080").rstrip("/")
-        self.secret = cluster_cfg.get("shared_secret", "dev-local-secret")
-        self.timeout = float(cluster_cfg.get("request_timeout_seconds", 5))
-        self.telemetry = telemetry or GPUTelemetry(
-            nvidia_smi_path=config.get("telemetry", {}).get("nvidia_smi_path", "nvidia-smi"),
-            fallback_watts=float(config["worker"].get("fallback_watts", 0)),
-        )
-
-    def register_capability(self) -> dict[str, Any]:
-        worker = worker_from_config(self.config)
-        claim = make_capability_claim(worker)
-        return post_json(
-            f"{self.controller_url}/capability",
-            {"worker_id": self.worker_id, "worker": worker, "capability_claim": claim},
-            self.secret,
-            timeout=self.timeout,
-        )
-
-    def heartbeat(self) -> dict[str, Any]:
-        return post_json(
-            f"{self.controller_url}/heartbeat",
-            {"worker_id": self.worker_id, "telemetry": {"last_seen_at": utc_now_iso(), "total_watts": self.telemetry.total_watts()}},
-            self.secret,
-            timeout=self.timeout,
-        )
-
-    def next_job(self) -> dict[str, Any]:
-        return get_json(
-            f"{self.controller_url}/job/next?worker_id={self.worker_id}",
-            {"worker_id": self.worker_id},
-            self.secret,
-            timeout=self.timeout,
-        )
-
-    def submit_receipt(self, receipt: dict[str, Any], lease_id: str | None = None) -> dict[str, Any]:
-        return post_json(
-            f"{self.controller_url}/receipt",
-            {
-                "worker_id": self.worker_id,
-                "job_id": receipt.get("metadata", {}).get("job_id"),
-                "lease_id": lease_id,
-                "receipt": _redact_receipt_for_cluster(receipt),
-            },
-            self.secret,
-            timeout=self.timeout,
-        )
-
-    def run_once(self, runtime_type: str | None = None) -> dict[str, Any]:
-        capability = self.register_capability()
-        heartbeat = self.heartbeat()
-        next_job = self.next_job()
-        job = next_job.get("job")
-        if not job:
-            return {"accepted": True, "status": "no_job", "capability": capability, "heartbeat": heartbeat, "next_job": next_job}
-        result = self._execute_job(job, runtime_type=runtime_type)
-        return {"accepted": bool(result["submission"].get("accepted")), "status": "submitted", **result}
-
-    def run_available(self, runtime_type: str | None = None, max_jobs: int | None = None) -> list[dict[str, Any]]:
-        self.register_capability()
-        self.heartbeat()
-        slots = max_jobs or int(self.config.get("runtime", {}).get("max_concurrent_jobs", self.config.get("worker", {}).get("max_concurrent_jobs", 1)))
-        jobs = []
-        for _ in range(max(1, slots)):
-            next_job = self.next_job()
-            if not next_job.get("job"):
-                break
-            jobs.append(next_job["job"])
-        if not jobs:
-            return [{"accepted": True, "status": "no_job"}]
-        results: list[dict[str, Any]] = []
-        with ThreadPoolExecutor(max_workers=len(jobs)) as executor:
-            futures = [executor.submit(self._execute_job, job, runtime_type) for job in jobs]
-            for future in as_completed(futures):
-                try:
-                    result = future.result()
-                    results.append({"accepted": bool(result["submission"].get("accepted")), "status": "submitted", **result})
-                except Exception as exc:
-                    results.append({"accepted": False, "status": "failed", "error": str(exc)})
-        return results
-
-    def _execute_job(self, job: dict[str, Any], runtime_type: str | None = None) -> dict[str, Any]:
-        runtime_cfg = dict(self.config.get("runtime", {}))
-        selected_runtime_type = runtime_type or runtime_cfg.get("type", "simulated")
-        self.config["runtime"] = {**runtime_cfg, "type": selected_runtime_type}
-        runtime = runner_for_type(selected_runtime_type)
-        result = runtime.run(job, self.config)
-        receipt = receipt_from_runtime_result(self.config, self.worker_id, job, result)
-        submission = self.submit_receipt(receipt, lease_id=job.get("lease_id"))
-        return {"job": job, "receipt": receipt, "submission": submission}
-
-
-def main() -> None:
-    parser = argparse.ArgumentParser(description="Local QiCompute worker daemon")
-    parser.add_argument("--config", default="config.yaml")
-    parser.add_argument("--once", action="store_true")
-    parser.add_argument("--loop", action="store_true")
-    parser.add_argument("--cluster-worker", action="store_true")
-    parser.add_argument("--runtime", choices=["simulated", "subprocess", "ollama", "ollama_placeholder", "llama_cpp_placeholder"])
-    parser.add_argument("--verbose", action="store_true")
-    parser.add_argument("--quiet", action="store_true")
-    args = parser.parse_args()
-    logger = configure_logging(verbose=args.verbose, quiet=args.quiet)
-
-    config = load_config(args.config)
-    if args.runtime:
-        config["runtime"] = {**config.get("runtime", {}), "type": args.runtime}
-    if args.cluster_worker:
-        client = ClusterWorkerClient(config)
-        result = client.run_once(runtime_type=args.runtime)
-        log_event(logger, "cluster_worker.once.complete", worker_id=config["worker"]["id"], status=result.get("status"), accepted=result.get("accepted"))
-        return
-    db = WorkerDB(config["worker"]["db_path"])
-    try:
-        daemon = WorkerDaemon(config, db)
-        if args.loop:
-            log_event(logger, "daemon.loop.start", worker_id=config["worker"]["id"], runtime=args.runtime or config.get("runtime", {}).get("type"))
-            daemon.run_loop(runtime_type=args.runtime)
+        challenger = MODE_INFERENCE if self.mode == MODE_MINING else MODE_MINING
+        nets = {MODE_MINING: int(mining_net_usd_micro), MODE_INFERENCE: int(inference_net_usd_micro)}
+        incumbent_net = nets[self.mode]
+        challenger_net = nets[challenger]
+        required_gain = max(abs(incumbent_net) * self.margin_percent // 100, self.margin_floor_usd_micro)
+        if challenger_net >= incumbent_net + required_gain:
+            self.streak += 1
         else:
-            receipt = daemon.run_once(runtime_type=args.runtime)
-            log_event(
-                logger,
-                "daemon.once.complete",
-                worker_id=config["worker"]["id"],
-                runtime=args.runtime or config.get("runtime", {}).get("type"),
-                receipt_id=receipt.get("receipt_id") if receipt else None,
+            self.streak = 0
+            return self._decision(mode_before, False, "incumbent_holds")
+        if self.streak < self.consecutive_decisions:
+            return self._decision(mode_before, False, f"challenger_streak_{self.streak}_of_{self.consecutive_decisions}")
+        if (
+            self.last_switch_seconds is not None
+            and now_seconds - self.last_switch_seconds < self.min_dwell_seconds
+        ):
+            return self._decision(mode_before, False, "dwell_time_not_elapsed")
+        self._switch(challenger, now_seconds)
+        return self._decision(mode_before, True, f"{challenger}_beats_{mode_before}_by_margin")
+
+    def _switch(self, mode: str, now_seconds: float) -> None:
+        self.mode = mode
+        self.streak = 0
+        self.last_switch_seconds = now_seconds
+
+    def _decision(self, mode_before: str, switched: bool, reason: str) -> dict[str, Any]:
+        return {
+            "mode_before": mode_before,
+            "mode_after": self.mode,
+            "switched": switched,
+            "reason": reason,
+            "streak": self.streak,
+        }
+
+
+# ---------------------------------------------------------------------------
+# Feeds. Generic JSON-over-HTTP with a dotted path; any error returns ok=False.
+# ---------------------------------------------------------------------------
+
+def json_path(data: Any, path: str) -> Any:
+    current = data
+    for part in path.split("."):
+        if isinstance(current, list):
+            current = current[int(part)]
+        else:
+            current = current[part]
+    return current
+
+
+def fetch_feed(feed_cfg: dict[str, Any], timeout_seconds: float = 10.0) -> tuple[Any, bool, str]:
+    """Fetch one configured feed. Returns (value, ok, error)."""
+    url = str(feed_cfg.get("url", "") or "")
+    if not url:
+        return None, False, "feed url not configured"
+    try:
+        if str(feed_cfg.get("type", "get")) == "jsonrpc":
+            payload = json.dumps(
+                {
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": feed_cfg.get("method", ""),
+                    "params": feed_cfg.get("params", []),
+                }
+            ).encode("utf-8")
+            request = urllib.request.Request(url, data=payload, headers={"Content-Type": "application/json"})
+        else:
+            request = urllib.request.Request(url, headers={"User-Agent": "qicompute-crossover-daemon"})
+        with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
+            data = json.loads(response.read().decode("utf-8"))
+        value = json_path(data, str(feed_cfg.get("json_path", "")))
+        return value, True, ""
+    except Exception as exc:  # any feed problem is a fallback-to-mining event, never a crash
+        return None, False, f"{type(exc).__name__}: {exc}"
+
+
+def parse_difficulty(value: Any) -> int:
+    if isinstance(value, str) and value.startswith("0x"):
+        return int(value, 16)
+    return int(Decimal(str(value)))
+
+
+# ---------------------------------------------------------------------------
+# SQLite log: WAL, cross-thread safe, idempotent writes via INSERT OR IGNORE
+# on caller-supplied primary keys.
+# ---------------------------------------------------------------------------
+
+class CrossoverDB:
+    def __init__(self, path: str):
+        self.conn = sqlite3.connect(path, check_same_thread=False)
+        self.conn.row_factory = sqlite3.Row
+        self.conn.execute("PRAGMA journal_mode=WAL")
+        self.conn.executescript(SCHEMA)
+        self.conn.commit()
+
+    def record_decision(self, row: dict[str, Any]) -> None:
+        with self.conn:
+            self.conn.execute(
+                """
+                INSERT OR IGNORE INTO decisions (
+                    decision_id, ts, mode_before, mode_after, switched, reason,
+                    mining_net_usd_micro_per_day, inference_net_usd_micro_per_day,
+                    power_cost_usd_micro_per_day, feeds_ok, details_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    row["decision_id"],
+                    row["ts"],
+                    row["mode_before"],
+                    row["mode_after"],
+                    1 if row["switched"] else 0,
+                    row["reason"],
+                    int(row["mining_net_usd_micro_per_day"]),
+                    int(row["inference_net_usd_micro_per_day"]),
+                    int(row["power_cost_usd_micro_per_day"]),
+                    1 if row["feeds_ok"] else 0,
+                    json.dumps(row.get("details", {}), sort_keys=True),
+                ),
             )
-    finally:
-        db.close()
+
+    def record_sample(self, row: dict[str, Any]) -> None:
+        with self.conn:
+            self.conn.execute(
+                """
+                INSERT OR IGNORE INTO samples (
+                    sample_id, ts, mode, power_watts, gpu_utilization_percent,
+                    hashrate_hps, tokens_per_second
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    row["sample_id"],
+                    row["ts"],
+                    row["mode"],
+                    row.get("power_watts"),
+                    row.get("gpu_utilization_percent"),
+                    row.get("hashrate_hps"),
+                    row.get("tokens_per_second"),
+                ),
+            )
+
+    def record_inference_request(self, row: dict[str, Any]) -> None:
+        with self.conn:
+            self.conn.execute(
+                """
+                INSERT OR IGNORE INTO inference_requests (
+                    request_id, ts, prompt_hash, input_tokens, output_tokens, duration_ms
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    row["request_id"],
+                    row["ts"],
+                    row["prompt_hash"],
+                    int(row["input_tokens"]),
+                    int(row["output_tokens"]),
+                    int(row["duration_ms"]),
+                ),
+            )
+
+    def decisions(self) -> list[dict[str, Any]]:
+        rows = self.conn.execute("SELECT * FROM decisions ORDER BY ts ASC").fetchall()
+        return [dict(row) for row in rows]
+
+    def latest_decision(self) -> dict[str, Any] | None:
+        row = self.conn.execute("SELECT * FROM decisions ORDER BY ts DESC LIMIT 1").fetchone()
+        return dict(row) if row else None
+
+    def close(self) -> None:
+        self.conn.close()
 
 
-def _job_for_verifier(job: dict[str, Any]) -> dict[str, Any]:
-    return {
-        "id": job["job_id"],
-        "input_tokens": job.get("input_tokens", 0),
-        "output_tokens": job.get("expected_output_tokens", 0),
-    }
+# ---------------------------------------------------------------------------
+# Subprocess management for the miner / inference backend.
+# ---------------------------------------------------------------------------
+
+class ManagedProcess:
+    def __init__(self, name: str, command: list[str]):
+        self.name = name
+        self.command = [str(part) for part in (command or [])]
+        self.process: subprocess.Popen | None = None
+
+    @property
+    def running(self) -> bool:
+        return self.process is not None and self.process.poll() is None
+
+    def start(self) -> None:
+        if not self.command or self.running:
+            return
+        self.process = subprocess.Popen(
+            self.command,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+
+    def stop(self) -> None:
+        if self.process is None or self.process.poll() is not None:
+            self.process = None
+            return
+        self.process.terminate()
+        try:
+            self.process.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            self.process.kill()
+            self.process.wait(timeout=10)
+        self.process = None
 
 
-def _job_for_challenge(job: dict[str, Any]) -> dict[str, Any]:
-    return {
-        "id": job["job_id"],
-        "input_tokens": job.get("input_tokens", 0),
-        "output_tokens": job.get("expected_output_tokens", 0),
-        "tokens": job.get("expected_output_tokens", 0),
-        "challenge_response_hash": job.get("challenge_response_hash"),
-    }
+# ---------------------------------------------------------------------------
+# Ollama probe: measures serving throughput and logs hash + token counts only.
+# ---------------------------------------------------------------------------
+
+def probe_ollama(db: CrossoverDB, inference_cfg: dict[str, Any], timeout_seconds: float = 120.0) -> float | None:
+    """Run one generation against local Ollama; returns tokens/sec or None.
+
+    Only the prompt hash, token counts, and duration are persisted.
+    """
+    url = str(inference_cfg.get("ollama_url", "http://127.0.0.1:11434")).rstrip("/") + "/api/generate"
+    prompt = str(inference_cfg.get("probe_prompt", "Briefly explain what a hash function does."))
+    payload = json.dumps(
+        {"model": inference_cfg.get("model", "llama3.1:8b"), "prompt": prompt, "stream": False}
+    ).encode("utf-8")
+    request = urllib.request.Request(url, data=payload, headers={"Content-Type": "application/json"})
+    started = time.perf_counter()
+    try:
+        with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
+            data = json.loads(response.read().decode("utf-8"))
+    except Exception:
+        return None
+    duration_ms = int((time.perf_counter() - started) * 1000)
+    output_tokens = int(data.get("eval_count", 0))
+    eval_duration_ns = int(data.get("eval_duration", 0))
+    tokens_per_second = output_tokens / (eval_duration_ns / 1e9) if eval_duration_ns > 0 else 0.0
+    db.record_inference_request(
+        {
+            "request_id": str(uuid4()),
+            "ts": utc_now_iso(),
+            "prompt_hash": hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
+            "input_tokens": int(data.get("prompt_eval_count", 0)),
+            "output_tokens": output_tokens,
+            "duration_ms": duration_ms,
+        }
+    )
+    return round(tokens_per_second, 3)
 
 
-def _verification_failure(reason: str, job: dict[str, Any], receipt: dict[str, Any], metadata: dict[str, Any]) -> Any:
-    from verifier import VerificationResult
+# ---------------------------------------------------------------------------
+# Config
+# ---------------------------------------------------------------------------
 
-    return VerificationResult(
-        accepted=False,
-        reason=reason,
-        score=0.0,
-        metadata={
-            "job_id": job.get("job_id"),
-            "worker_id": receipt.get("worker_id"),
-            **metadata,
-        },
+def load_config(path: str) -> dict[str, Any]:
+    text = Path(path).read_text(encoding="utf-8")
+    import yaml  # type: ignore
+
+    return yaml.safe_load(text)
+
+
+# ---------------------------------------------------------------------------
+# One decision cycle: gather inputs, evaluate, act, log.
+# ---------------------------------------------------------------------------
+
+def gather_economics(config: dict[str, Any], watts: int) -> dict[str, Any]:
+    """Fetch feeds and compute integer net $/day for both paths.
+
+    feeds_ok covers the Quai price and difficulty feeds only: without them
+    mining cannot be priced, so the daemon falls back to mining. A failed
+    inference market-rate feed degrades to the configured fallback rate.
+    """
+    mining_cfg = config.get("mining", {})
+    inference_cfg = config.get("inference", {})
+    power_cfg = config.get("power", {})
+    usd_per_kwh_micro = to_micro(power_cfg.get("usd_per_kwh", "0.12"))
+    power_cost = power_cost_usd_micro_per_day(watts=watts, usd_per_kwh_micro=usd_per_kwh_micro)
+
+    price_value, price_ok, price_error = fetch_feed(mining_cfg.get("price_feed", {}))
+    difficulty_value, difficulty_ok, difficulty_error = fetch_feed(mining_cfg.get("difficulty_feed", {}))
+    feeds_ok = price_ok and difficulty_ok
+
+    mining_gross = 0
+    if feeds_ok:
+        try:
+            mining_gross = mining_gross_usd_micro_per_day(
+                hashrate_hps=int(mining_cfg.get("fallback_hashrate_hps", 0)),
+                network_difficulty=parse_difficulty(difficulty_value),
+                block_reward_micro_qi=to_micro(mining_cfg.get("block_reward_qi", "0")),
+                qi_price_micro_usd=to_micro(price_value),
+            )
+        except Exception as exc:
+            feeds_ok = False
+            price_error = price_error or f"{type(exc).__name__}: {exc}"
+
+    rate_value, rate_ok, rate_error = fetch_feed(inference_cfg.get("market_rate_feed", {}))
+    if rate_ok:
+        try:
+            rate_micro = to_micro(rate_value)
+            rate_source = "feed"
+        except Exception:
+            rate_ok = False
+    if not rate_ok:
+        rate_micro = to_micro(inference_cfg.get("fallback_usd_per_hour", "0"))
+        rate_source = "config_fallback"
+    inference_gross = inference_gross_usd_micro_per_day(
+        rate_micro_usd_per_hour=rate_micro,
+        utilization_percent=int(inference_cfg.get("utilization_percent", 50)),
     )
 
-
-def _estimated_qi(job: dict[str, Any], result: Any, config: dict[str, Any]) -> float:
-    inference_cfg = config.get("inference", {})
-    fallback_rate = float(inference_cfg.get("estimated_qi_per_token", 0))
-    input_rate = float(inference_cfg.get("estimated_qi_per_input_token", fallback_rate))
-    output_rate = float(inference_cfg.get("estimated_qi_per_output_token", fallback_rate))
-    return float(result.input_tokens) * input_rate + float(result.output_tokens) * output_rate
-
-
-def _refresh_receipt_hash(receipt: dict[str, Any]) -> str:
-    receipt.pop("receipt_hash", None)
-    return compute_receipt_hash(receipt)
-
-
-def receipt_from_runtime_result(config: dict[str, Any], worker_id: str, job: dict[str, Any], result: Any) -> dict[str, Any]:
-    estimated_qi = _estimated_qi(job, result, config) if result.accepted else 0.0
-    metadata = {
-        "job_id": result.job_id,
-        "accepted": result.accepted,
-        "input_tokens": result.input_tokens,
-        "output_tokens": result.output_tokens,
-        "output_hash": result.output_hash,
-        "runtime": {
-            "type": result.metadata.get("runtime_type"),
-            "exit_code": result.exit_code,
-            "error_code": result.error_code,
-            "error_message": result.error_message,
-        },
-        "telemetry": {
-            "total_watts": result.metadata.get("total_watts"),
-            "energy_joules": result.metadata.get("energy_joules"),
-            "tokens_per_second": result.metadata.get("tokens_per_second"),
-            "model_load_cold_start": result.metadata.get("model_load_cold_start"),
-            "cache_hit": result.metadata.get("cache_hit"),
+    return {
+        "feeds_ok": feeds_ok,
+        "mining_net_usd_micro_per_day": mining_gross - power_cost,
+        "inference_net_usd_micro_per_day": inference_gross - power_cost,
+        "power_cost_usd_micro_per_day": power_cost,
+        "details": {
+            "watts": watts,
+            "qi_price_feed_ok": price_ok,
+            "qi_price_feed_error": price_error,
+            "difficulty_feed_ok": difficulty_ok,
+            "difficulty_feed_error": difficulty_error,
+            "inference_rate_source": rate_source,
+            "inference_rate_feed_error": rate_error if not rate_ok else "",
+            "inference_rate_usd_micro_per_hour": rate_micro,
         },
     }
-    return make_receipt(
-        worker_id=worker_id,
-        mode="inference",
-        started_at=result.started_at,
-        ended_at=result.ended_at,
-        duration_seconds=max(result.duration_seconds, 0.001),
-        average_watts=float(result.metadata.get("total_watts") or config["worker"].get("fallback_watts", 0)),
-        output_type="tokens",
-        output_amount=result.output_tokens,
-        estimated_qi_owed=estimated_qi,
-        metadata=metadata,
-    ).to_dict()
 
 
-def _redact_receipt_for_cluster(receipt: dict[str, Any]) -> dict[str, Any]:
-    return redact_sensitive_fields(receipt)
+def run_cycle(
+    *,
+    config: dict[str, Any],
+    db: CrossoverDB,
+    engine: CrossoverEngine,
+    telemetry: GPUTelemetry,
+    miner: ManagedProcess,
+    inference_backend: ManagedProcess,
+    now_seconds: float,
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    watts = int(round(telemetry.total_watts()))
+    economics = gather_economics(config, watts)
+    decision = engine.evaluate(
+        mining_net_usd_micro=economics["mining_net_usd_micro_per_day"],
+        inference_net_usd_micro=economics["inference_net_usd_micro_per_day"],
+        feeds_ok=economics["feeds_ok"],
+        now_seconds=now_seconds,
+    )
+    if decision["switched"] and not dry_run:
+        if decision["mode_after"] == MODE_MINING:
+            inference_backend.stop()
+            miner.start()
+        else:
+            miner.stop()
+            inference_backend.start()
+    row = {
+        "decision_id": str(uuid4()),
+        "ts": utc_now_iso(),
+        **decision,
+        "mining_net_usd_micro_per_day": economics["mining_net_usd_micro_per_day"],
+        "inference_net_usd_micro_per_day": economics["inference_net_usd_micro_per_day"],
+        "power_cost_usd_micro_per_day": economics["power_cost_usd_micro_per_day"],
+        "feeds_ok": economics["feeds_ok"],
+        "details": economics["details"],
+    }
+    db.record_decision(row)
+    db.record_sample(
+        {
+            "sample_id": str(uuid4()),
+            "ts": row["ts"],
+            "mode": decision["mode_after"],
+            "power_watts": float(watts),
+            "gpu_utilization_percent": None,
+            "hashrate_hps": int(config.get("mining", {}).get("fallback_hashrate_hps", 0))
+            if decision["mode_after"] == MODE_MINING
+            else None,
+            "tokens_per_second": None,
+        }
+    )
+    return row
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Quai mining vs inference crossover daemon")
+    parser.add_argument("--config", default="config.yaml")
+    parser.add_argument("--once", action="store_true", help="Run one decision cycle and exit")
+    parser.add_argument("--status", action="store_true", help="Print the latest decision and exit")
+    parser.add_argument("--dry-run", action="store_true", help="Decide and log, but never start/stop processes")
+    args = parser.parse_args()
+    config = load_config(args.config)
+    daemon_cfg = config.get("daemon", {})
+    db = CrossoverDB(str(daemon_cfg.get("db_path", "crossover.db")))
+
+    if args.status:
+        latest = db.latest_decision()
+        print(json.dumps(latest, indent=2) if latest else "no decisions logged yet")
+        db.close()
+        return 0
+
+    switching_cfg = config.get("switching", {})
+    engine = CrossoverEngine(
+        margin_percent=int(switching_cfg.get("margin_percent", 15)),
+        consecutive_decisions=int(switching_cfg.get("consecutive_decisions", 3)),
+        min_dwell_seconds=int(switching_cfg.get("min_dwell_seconds", 1800)),
+        margin_floor_usd_micro=to_micro(switching_cfg.get("margin_floor_usd_per_day", "0.05")),
+    )
+    telemetry = GPUTelemetry(
+        nvidia_smi_path=str(config.get("gpu", {}).get("nvidia_smi_path", "nvidia-smi")),
+        fallback_watts=float(config.get("power", {}).get("fallback_watts", 300)),
+    )
+    miner = ManagedProcess("miner", config.get("mining", {}).get("miner_command", []))
+    inference_backend = ManagedProcess("inference", config.get("inference", {}).get("backend_command", []))
+    interval = max(int(daemon_cfg.get("decision_interval_seconds", 60)), 5)
+    probe_interval = max(int(config.get("inference", {}).get("probe_interval_seconds", 300)), interval)
+    last_probe = 0.0
+
+    if not args.dry_run and engine.mode == MODE_MINING:
+        miner.start()
+
+    stop_requested = False
+
+    def _handle_signal(_signum, _frame):
+        nonlocal stop_requested
+        stop_requested = True
+
+    signal.signal(signal.SIGINT, _handle_signal)
+    signal.signal(signal.SIGTERM, _handle_signal)
+
+    try:
+        while True:
+            now = time.monotonic()
+            row = run_cycle(
+                config=config,
+                db=db,
+                engine=engine,
+                telemetry=telemetry,
+                miner=miner,
+                inference_backend=inference_backend,
+                now_seconds=now,
+                dry_run=args.dry_run,
+            )
+            print(
+                f"{row['ts']} mode={row['mode_after']} switched={row['switched']} "
+                f"reason={row['reason']} mining=${micro_to_str(row['mining_net_usd_micro_per_day'])}/day "
+                f"inference=${micro_to_str(row['inference_net_usd_micro_per_day'])}/day"
+            )
+            if engine.mode == MODE_INFERENCE and now - last_probe >= probe_interval and not args.dry_run:
+                tokens_per_second = probe_ollama(db, config.get("inference", {}))
+                last_probe = now
+                if tokens_per_second is not None:
+                    print(f"  inference probe: {tokens_per_second} tokens/sec")
+            if args.once or stop_requested:
+                break
+            time.sleep(interval)
+    finally:
+        miner.stop()
+        inference_backend.stop()
+        db.close()
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

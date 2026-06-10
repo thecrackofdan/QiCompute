@@ -1,6 +1,43 @@
-# QiCompute v0.1.0 Experimental MVP
+# QiCompute
 
-Local-first research prototype for a privacy-first QiCompute inference marketplace. The v0.1.0 scope models GPU worker execution, useful-work verification, LAN controller/worker orchestration, settlement accounting, abuse simulation, performance tooling, and deterministic tests.
+**Current focus: the crossover daemon** — a single process a Quai GPU miner installs that continuously compares what the GPU earns mining Quai against what it could earn serving open-model inference, and switches to whichever pays more. The marketplace, escrow, and committee layers from the v0.1.0 MVP remain in the repo (see below) but are out of the critical path.
+
+## Install in 10 minutes
+
+Target: one RTX 3090 on Linux, your existing Quai miner binary, and (optionally) Ollama for the inference side.
+
+```bash
+git clone <this repo> && cd QiCompute
+pip install -r requirements.txt        # PyYAML; matplotlib only needed for report charts
+
+# 1. Edit config.yaml:
+#    - mining.miner_command: your Quai miner invocation
+#    - power.usd_per_kwh: your electricity price
+#    - inference.fallback_usd_per_hour: current 3090 $/hr on Vast.ai/RunPod
+
+# 2. Get real numbers off this rig first (5 min mining + 5 min inference):
+python3 benchmark.py --minutes 5
+#    Prints the crossover table: hashrate, tokens/sec, watts, net $/day each path.
+#    Needs Ollama running with the model pulled (`ollama pull llama3.1:8b`),
+#    or use --skip-inference to benchmark mining alone.
+
+# 3. Run the daemon:
+python3 daemon.py                      # starts the miner, evaluates every 60s
+python3 daemon.py --dry-run            # decide and log only, never touch processes
+python3 daemon.py --status             # print the latest decision
+
+# 4. After a day or two:
+python3 report.py                      # report.md + revenue_comparison.png:
+                                       # daemon revenue vs mining-only, per day
+```
+
+How it decides: every cycle the daemon reads live Quai price (CoinGecko) and network difficulty (configurable JSON-RPC), prices mining at your measured hashrate and watts, prices inference at the market $/hr rate (live feed if configured, else the config fallback) times your expected utilization, subtracts power cost from a configurable $/kWh, and switches only with hysteresis: the challenger must win by `switching.margin_percent` for `consecutive_decisions` evaluations, and never within `min_dwell_seconds` of the last switch. **On any Quai feed error the daemon defaults to mining.** All money math is integer micro-USD/micro-Qi. Every decision is logged to SQLite (WAL mode, idempotent writes); inference served is logged as prompt hash + token counts only.
+
+---
+
+# QiCompute v0.1.0 Experimental MVP (legacy layers)
+
+Local-first research prototype for a privacy-first QiCompute inference marketplace. The v0.1.0 scope models GPU worker execution, useful-work verification, LAN controller/worker orchestration, settlement accounting, abuse simulation, performance tooling, and deterministic tests. These layers are retained but no longer the critical path; the old worker daemon now lives at `worker_daemon.py` and its config at `config.marketplace.yaml`.
 
 This MVP has no smart contracts and no real payout rail. It records local receipts, telemetry, estimated energy usage, output, escrow state, payable balances, and settlement summaries in SQLite.
 

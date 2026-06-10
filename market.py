@@ -20,7 +20,7 @@ from worker import load_config
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Local QiCompute marketplace prototype")
-    parser.add_argument("--config", default="config.yaml")
+    parser.add_argument("--config", default="config.marketplace.yaml")
     parser.add_argument("--register-worker", action="store_true")
     parser.add_argument("--workers", action="store_true")
     parser.add_argument("--submit-job", action="store_true")

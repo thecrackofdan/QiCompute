@@ -1,107 +1,60 @@
-worker:
-  id: "local-gpu-rig-001"
-  operator: "local-operator"
-  public_key: "placeholder-public-key"
-  region: "local"
-  hardware_profile:
-    gpu_count: 1
-    gpu_names: ["local-gpu-placeholder"]
-    total_vram_gb: 24
-    total_watts_capacity: 250
-  supported_modes: ["inference", "mining"]
-  supported_models: ["llama-3.1-8b"]
-  db_path: "worker.db"
-  loop_interval_seconds: 5
-  fallback_watts: 250
+# Crossover daemon configuration. All money values are decimal strings,
+# converted once to integer micro-USD/micro-Qi; no float math on money.
 
-telemetry:
-  poll_interval_seconds: 5
+daemon:
+  db_path: "crossover.db"
+  decision_interval_seconds: 60
+
+power:
+  usd_per_kwh: "0.12"        # your electricity price
+  fallback_watts: 300        # used when nvidia-smi is unavailable
+
+gpu:
   nvidia_smi_path: "nvidia-smi"
 
-jobs:
-  queue_dir: "jobs"
-  completed_dir: "jobs_done"
-  failed_dir: "jobs_failed"
-
 mining:
-  enabled: true
-  command: []
-  cycle_seconds: 15
-  payout_policy: "PPLNS"
-  pplns_window_weight: 1000
-  pool_fee_percent: 2
-  share_difficulty: 1
-  estimated_shares_per_second: 0.05
+  # The daemon starts/stops your existing Quai miner binary. Example:
+  # miner_command: ["./quai-gpu-miner", "-P", "stratum://wallet@pool:3333"]
+  miner_command: []
+  # Measured with benchmark.py; RTX 3090 ProgPoW is typically ~45 MH/s.
+  fallback_hashrate_hps: 45000000
+  # Regex applied to miner stdout by benchmark.py to read live hashrate.
+  hashrate_regex: "([0-9]+(?:\\.[0-9]+)?)\\s*[Mm][Hh]/s"
+  hashrate_unit_multiplier: 1000000
+  block_reward_qi: "3"       # verify against current Quai emission
+  price_feed:
+    type: "get"
+    url: "https://api.coingecko.com/api/v3/simple/price?ids=quai-network&vs_currencies=usd"
+    json_path: "quai-network.usd"
+  difficulty_feed:
+    type: "jsonrpc"
+    url: "https://rpc.quai.network/cyprus1"
+    method: "quai_getBlockByNumber"
+    params: ["latest", false]
+    # Verify this path against your node/explorer output; on any feed error
+    # the daemon defaults to mining.
+    json_path: "result.woHeader.difficulty"
 
 inference:
-  enabled: true
-  command: []
-  default_tokens: 256
-  seconds_per_job: 3
-  estimated_qi_per_input_token: 0.00000005
-  estimated_qi_per_output_token: 0.0000002
+  # Empty if Ollama already runs as a service; otherwise e.g. ["ollama", "serve"]
+  backend_command: []
+  ollama_url: "http://127.0.0.1:11434"
+  model: "llama3.1:8b"
+  probe_interval_seconds: 300
+  probe_prompt: "Briefly explain what a hash function does."
+  # Fraction of the day you expect to actually sell at the market rate.
+  utilization_percent: 50
+  # Optional live $/hr feed (point at a Vast.ai/RunPod proxy returning JSON).
+  market_rate_feed:
+    type: "get"
+    url: ""
+    json_path: ""
+  # Used when the market rate feed is empty or failing (Vast.ai RTX 3090
+  # listings commonly sit around this; adjust to current listings).
+  fallback_usd_per_hour: "0.20"
 
-runtime:
-  type: "simulated"
-  timeout_seconds: 300
-  max_concurrent_jobs: 1
-  command: []
-  redact_outputs: true
-  store_output_hash_only: true
-  ollama_url: "http://127.0.0.1:11434/api/generate"
-  ollama_model: "llama3.1:8b"
-
-privacy:
-  mode: "strict"
-  store_raw_prompts: false
-  store_raw_outputs: false
-  encrypt_job_payloads: true
-  controller_blind_prompts: true
-  zero_retention_runtime: true
-  allow_debug_prompt_logging: false
-
-pricing:
-  base_input_token_rate_qi: 0.00000005
-  base_output_token_rate_qi: 0.0000002
-  privacy_premium_multiplier: 1.25
-  low_latency_threshold_ms: 2000
-  low_latency_premium_multiplier: 1.15
-  energy_rate_qi_per_joule: 0.0
-
-energy_anchor:
-  enabled: true
-  reference_mining_qi_per_hour: 0.05
-  reference_power_watts: 250
-  worker_share: 0.85
-  overhead_multiplier: 1.2
-  smoothing_alpha: 0.2
-  max_step_ratio: 0.1
-  corridor_ceiling_multiplier: 1.5
-  stable_cv_threshold: 0.15
-  min_epoch_energy_joules: 100.0
-  full_weight_energy_joules: 10000.0
-  reference_joules_per_token:
-    default: 3.0
-    llama-3.1-8b: 3.0
-
-marketplace:
-  fee_percent: 2.5
-  max_outstanding_escrow_qi: 1000
-  min_job_escrow_qi: 0.01
-  escrow_expiry_seconds: 600
-
-rate_limits:
-  max_jobs_per_minute: 60
-  max_receipts_per_minute: 120
-  max_failed_auth_per_minute: 20
-
-cluster:
-  enabled: false
-  node_role: "controller"
-  controller_url: "http://127.0.0.1:8080"
-  worker_bind_host: "127.0.0.1"
-  worker_bind_port: 8081
-  shared_secret: "dev-local-secret"
-  allow_dev_shared_secret: false
-  heartbeat_interval_seconds: 10
-  request_timeout_seconds: 5
+switching:
+  margin_percent: 15           # challenger must beat incumbent by this much
+  consecutive_decisions: 3     # ...for this many evaluations in a row
+  min_dwell_seconds: 1800      # ...and no switch within 30 min of the last
+  margin_floor_usd_per_day: "0.05"

@@ -13,7 +13,7 @@ from accounting_checks import run_accounting_checks
 from accounts import create_customer_account, escrow_job_funds, refund_job_escrow
 from capabilities import make_capability_claim
 from controller import ClusterController
-from daemon import receipt_from_runtime_result
+from worker_daemon import receipt_from_runtime_result
 from db import WorkerDB
 from epochs import active_epoch, finalize_epoch
 from perf import MetricsAccumulator, bottleneck_summary, timer

@@ -246,7 +246,7 @@ def run_server(host: str, port: int, config: dict[str, Any], db: WorkerDB) -> No
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="QiCompute local LAN controller")
-    parser.add_argument("--config", default="config.yaml")
+    parser.add_argument("--config", default="config.marketplace.yaml")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8080)
     args = parser.parse_args()

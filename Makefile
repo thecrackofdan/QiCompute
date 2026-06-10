@@ -80,4 +80,4 @@ license-check:
 clean:
 	find . -type d -name __pycache__ -prune -exec rm -rf {} +
 	find . -type f -name "*.pyc" -delete
-	rm -f worker.db demo_worker.db
+	rm -f worker.db demo_worker.db crossover.db crossover.db-wal crossover.db-shm

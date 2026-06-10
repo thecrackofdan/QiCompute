@@ -4,6 +4,13 @@ All notable changes to QiCompute are documented here. This project follows the s
 
 ## [Unreleased]
 
+### Changed
+
+- Pivot to a minimal provable core: the crossover daemon. `daemon.py` is now a standalone process for Quai GPU miners that prices mining (live Quai price + difficulty feeds, measured hashrate and watts) against open-model inference (live market rate feed or config fallback), computes integer micro-USD net $/day for both, and switches the GPU with hysteresis (margin, consecutive decisions, minimum dwell). On any Quai feed error it defaults to mining. Decisions, samples, and inference request hashes/token-counts are logged to SQLite (WAL, check_same_thread=False, idempotent writes). The marketplace/escrow/committee layers are retained but out of the critical path: the old worker daemon moved to `worker_daemon.py`, its config to `config.marketplace.yaml`.
+- `benchmark.py`: one-shot N-minutes-each mining and inference measurement printing the crossover table (hashrate, tokens/sec, watts, net $/day per path).
+- `report.py`: renders the SQLite log into `report.md` and `revenue_comparison.png` (daemon revenue vs mining-only revenue, per day).
+- `test_daemon.py`: hysteresis/no-flap behavior, dwell, margin floor, feed-failure fallback to mining, integer money math, WAL + idempotent writes, report integration.
+
 ### Added
 
 - Energy anchor layer (`energy_anchor.py`): mining-issuance energy parity rate (Qi per joule), energy-anchored job pricing with premium-over-parity reporting, and epoch energy reports comparing settled Qi per joule against the mining parity rate. Documented in `ENERGY_MODEL.md`.

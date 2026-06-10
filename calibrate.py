@@ -136,7 +136,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(
         description="Calibrate energy_anchor config values from hardware measurements"
     )
-    parser.add_argument("--config", default="config.yaml")
+    parser.add_argument("--config", default="config.marketplace.yaml")
     parser.add_argument("--mining-qi-per-hour", type=float, default=0.05)
     parser.add_argument("--tokens-per-second", type=float, default=None, help="Skip the validation run and use this measurement")
     parser.add_argument("--power-watts", type=float, default=None, help="Required with --tokens-per-second")

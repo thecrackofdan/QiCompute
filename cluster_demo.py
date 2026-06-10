@@ -8,7 +8,7 @@ from typing import Any
 from accounts import create_customer_account, escrow_job_funds
 from capabilities import make_capability_claim
 from controller import ClusterController
-from daemon import receipt_from_runtime_result
+from worker_daemon import receipt_from_runtime_result
 from db import WorkerDB
 from demo_data import demo_job, demo_workers
 from epochs import active_epoch, finalize_epoch

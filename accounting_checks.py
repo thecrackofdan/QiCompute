@@ -123,7 +123,7 @@ def _sum(db: WorkerDB, sql: str) -> float:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Check local QiCompute marketplace accounting")
-    parser.add_argument("--config", default="config.yaml")
+    parser.add_argument("--config", default="config.marketplace.yaml")
     parser.add_argument("--quick", action="store_true", help="Run aggregate reconciliation checks only")
     parser.add_argument("--full", action="store_true", help="Run aggregate plus replay/duplicate checks")
     args = parser.parse_args()

@@ -1,3 +1,5 @@
 # QiCompute is standard-library first.
-# PyYAML is optional; worker.py includes a small fallback parser for bundled configs.
+# PyYAML is required by the crossover daemon's config loading.
 PyYAML>=6.0
+# Optional: only needed for the report.py revenue chart PNG.
+# matplotlib>=3.5

@@ -7,7 +7,7 @@ from typing import Any
 
 import failures
 from accounts import create_customer_account, escrow_job_funds
-from daemon import WorkerDaemon
+from worker_daemon import WorkerDaemon
 from db import WorkerDB
 from demo_data import demo_job, demo_prompt, demo_workers
 from epochs import active_epoch, finalize_epoch

@@ -60,7 +60,7 @@ def print_rows(rows: list[dict[str, Any]]) -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Audit local QiCompute abuse and accounting signals")
-    parser.add_argument("--config", default="config.yaml")
+    parser.add_argument("--config", default="config.marketplace.yaml")
     parser.add_argument("--recent-attacks", action="store_true")
     parser.add_argument("--reconciliation", action="store_true")
     parser.add_argument("--suspicious-committees", action="store_true")

@@ -38,7 +38,7 @@ def command_rows(db: WorkerDB, command: str) -> tuple[list[dict[str, Any]], list
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Inspect local QiCompute cluster state")
-    parser.add_argument("--config", default="config.yaml")
+    parser.add_argument("--config", default="config.marketplace.yaml")
     parser.add_argument("command", choices=["workers", "jobs", "epochs", "receipts", "committees", "events"])
     args = parser.parse_args()
     config = load_config(args.config)

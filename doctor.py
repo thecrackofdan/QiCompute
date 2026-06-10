@@ -20,7 +20,7 @@ class CheckResult:
     message: str
 
 
-def run_checks(config_path: str = "config.yaml") -> list[CheckResult]:
+def run_checks(config_path: str = "config.marketplace.yaml") -> list[CheckResult]:
     results: list[CheckResult] = []
     results.append(
         CheckResult(
@@ -82,7 +82,7 @@ def print_results(results: list[CheckResult]) -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Validate local QiCompute development/runtime environment")
-    parser.add_argument("--config", default="config.yaml")
+    parser.add_argument("--config", default="config.marketplace.yaml")
     args = parser.parse_args()
     print_results(run_checks(args.config))
     return 0

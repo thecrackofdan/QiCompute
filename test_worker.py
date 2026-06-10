@@ -13,7 +13,7 @@ from pathlib import Path
 from uuid import uuid4
 
 import failures
-import daemon as daemon_module
+import worker_daemon as daemon_module
 from abuse import expire_escrows, rate_limit_allowed, record_rate_limit_event, validate_job_escrow_request
 from accounting_checks import run_accounting_checks
 from agent_simulation import run_agent_simulation
@@ -67,7 +67,7 @@ from customer_receipts import build_customer_receipt, compute_customer_receipt_h
 from customer_demand import choose_customer_provider
 from customer_research import interview_templates
 from crossover import analyze_mining_inference_crossover
-from daemon import ClusterWorkerClient, WorkerDaemon
+from worker_daemon import ClusterWorkerClient, WorkerDaemon
 from doctor import run_checks
 from enrollment import activate_worker_enrollment, create_worker_enrollment, revoke_worker_enrollment
 from enroll import activate_worker, config_snippet, create_worker, revoke_worker, write_worker_config
@@ -170,7 +170,7 @@ from version import current_version
 
 class WorkerPrototypeTest(unittest.TestCase):
     def test_doctor_runs_successfully(self) -> None:
-        results = run_checks("config.yaml")
+        results = run_checks("config.marketplace.yaml")
         statuses = {result.status for result in results}
 
         self.assertIn("PASS", statuses)
@@ -1623,7 +1623,7 @@ class WorkerPrototypeTest(unittest.TestCase):
         self.assertIn("diverse", first)
 
     def test_load_config_without_pyyaml_shape(self) -> None:
-        config = load_config("config.yaml")
+        config = load_config("config.marketplace.yaml")
 
         self.assertEqual(config["worker"]["id"], "local-gpu-rig-001")
         self.assertIn("mining", config)

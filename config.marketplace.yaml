@@ -1,0 +1,107 @@
+worker:
+  id: "local-gpu-rig-001"
+  operator: "local-operator"
+  public_key: "placeholder-public-key"
+  region: "local"
+  hardware_profile:
+    gpu_count: 1
+    gpu_names: ["local-gpu-placeholder"]
+    total_vram_gb: 24
+    total_watts_capacity: 250
+  supported_modes: ["inference", "mining"]
+  supported_models: ["llama-3.1-8b"]
+  db_path: "worker.db"
+  loop_interval_seconds: 5
+  fallback_watts: 250
+
+telemetry:
+  poll_interval_seconds: 5
+  nvidia_smi_path: "nvidia-smi"
+
+jobs:
+  queue_dir: "jobs"
+  completed_dir: "jobs_done"
+  failed_dir: "jobs_failed"
+
+mining:
+  enabled: true
+  command: []
+  cycle_seconds: 15
+  payout_policy: "PPLNS"
+  pplns_window_weight: 1000
+  pool_fee_percent: 2
+  share_difficulty: 1
+  estimated_shares_per_second: 0.05
+
+inference:
+  enabled: true
+  command: []
+  default_tokens: 256
+  seconds_per_job: 3
+  estimated_qi_per_input_token: 0.00000005
+  estimated_qi_per_output_token: 0.0000002
+
+runtime:
+  type: "simulated"
+  timeout_seconds: 300
+  max_concurrent_jobs: 1
+  command: []
+  redact_outputs: true
+  store_output_hash_only: true
+  ollama_url: "http://127.0.0.1:11434/api/generate"
+  ollama_model: "llama3.1:8b"
+
+privacy:
+  mode: "strict"
+  store_raw_prompts: false
+  store_raw_outputs: false
+  encrypt_job_payloads: true
+  controller_blind_prompts: true
+  zero_retention_runtime: true
+  allow_debug_prompt_logging: false
+
+pricing:
+  base_input_token_rate_qi: 0.00000005
+  base_output_token_rate_qi: 0.0000002
+  privacy_premium_multiplier: 1.25
+  low_latency_threshold_ms: 2000
+  low_latency_premium_multiplier: 1.15
+  energy_rate_qi_per_joule: 0.0
+
+energy_anchor:
+  enabled: true
+  reference_mining_qi_per_hour: 0.05
+  reference_power_watts: 250
+  worker_share: 0.85
+  overhead_multiplier: 1.2
+  smoothing_alpha: 0.2
+  max_step_ratio: 0.1
+  corridor_ceiling_multiplier: 1.5
+  stable_cv_threshold: 0.15
+  min_epoch_energy_joules: 100.0
+  full_weight_energy_joules: 10000.0
+  reference_joules_per_token:
+    default: 3.0
+    llama-3.1-8b: 3.0
+
+marketplace:
+  fee_percent: 2.5
+  max_outstanding_escrow_qi: 1000
+  min_job_escrow_qi: 0.01
+  escrow_expiry_seconds: 600
+
+rate_limits:
+  max_jobs_per_minute: 60
+  max_receipts_per_minute: 120
+  max_failed_auth_per_minute: 20
+
+cluster:
+  enabled: false
+  node_role: "controller"
+  controller_url: "http://127.0.0.1:8080"
+  worker_bind_host: "127.0.0.1"
+  worker_bind_port: 8081
+  shared_secret: "dev-local-secret"
+  allow_dev_shared_secret: false
+  heartbeat_interval_seconds: 10
+  request_timeout_seconds: 5

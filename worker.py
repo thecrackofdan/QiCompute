@@ -13,7 +13,7 @@ from telemetry import GPUTelemetry
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Unified Qi compute/mining pool worker")
-    parser.add_argument("--config", default="config.yaml", help="Path to config.yaml")
+    parser.add_argument("--config", default="config.marketplace.yaml", help="Path to config.yaml")
     parser.add_argument("--once", action="store_true", help="Run one scheduler cycle and exit")
     parser.add_argument("--balance", action="store_true", help="Print local estimated Qi balance and exit")
     parser.add_argument("--recent", type=int, default=0, help="Print recent receipts and exit")

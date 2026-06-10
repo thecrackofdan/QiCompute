@@ -47,7 +47,7 @@ def list_workers(db: WorkerDB) -> list[dict[str, Any]]:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Enroll QiCompute LAN workers")
-    parser.add_argument("--config", default="config.yaml")
+    parser.add_argument("--config", default="config.marketplace.yaml")
     parser.add_argument("--create-worker")
     parser.add_argument("--activate-worker")
     parser.add_argument("--revoke-worker")

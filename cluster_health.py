@@ -52,7 +52,7 @@ def print_cluster_health(summary: dict[str, Any]) -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Show local QiCompute cluster health")
-    parser.add_argument("--config", default="config.yaml")
+    parser.add_argument("--config", default="config.marketplace.yaml")
     args = parser.parse_args()
     config = load_config(args.config)
     db = WorkerDB(config["worker"]["db_path"])

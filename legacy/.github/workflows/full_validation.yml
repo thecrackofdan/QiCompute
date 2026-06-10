@@ -18,16 +18,16 @@ jobs:
           python-version: ${{ matrix.python-version }}
       - name: Install dependencies
         run: python -m pip install -r requirements-dev.txt
-      - name: Root test suites
+      - name: Full test suite
         run: python -m unittest -v
-      - name: Sample pipeline
-        run: python reproduce.py --sample
-      - name: Legacy full suite
-        run: cd legacy && python -m unittest -v
-      - name: Legacy accounting summary
-        run: cd legacy && python accounting_checks.py --quick > ../accounting-summary.txt
-      - name: Legacy load sanity
-        run: cd legacy && python load_test.py --workers 3 --jobs 10 > ../load-summary.txt
+      - name: Accounting summary
+        run: python accounting_checks.py --quick > accounting-summary.txt
+      - name: Load sanity
+        run: python load_test.py --workers 3 --jobs 10 > load-summary.txt
+      - name: Bottleneck summary
+        run: python bottleneck_report.py --workers 3 --jobs 10 > bottleneck-summary.txt
+      - name: Reliability summary
+        run: python reliability_report.py > reliability-summary.txt
       - name: Upload aggregate reports
         uses: actions/upload-artifact@v4
         with:
@@ -35,3 +35,5 @@ jobs:
           path: |
             accounting-summary.txt
             load-summary.txt
+            bottleneck-summary.txt
+            reliability-summary.txt

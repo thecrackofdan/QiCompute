@@ -19,7 +19,7 @@ jobs:
         run: python -m pip install -r requirements-dev.txt
       - name: Compile
         run: python -m compileall -q .
-      - name: Legacy smoke tests
-        run: cd legacy && python run_tests.py --smoke
-      - name: Validate legacy test categories
-        run: cd legacy && python run_tests.py --validate-categories
+      - name: Smoke tests
+        run: python run_tests.py --smoke
+      - name: Validate test categories
+        run: python run_tests.py --validate-categories

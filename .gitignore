@@ -13,3 +13,5 @@ jobs_done/
 jobs_failed/
 report.md
 revenue_comparison.png
+results/
+data/*.json

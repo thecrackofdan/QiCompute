@@ -17,5 +17,9 @@ jobs:
           python-version: ${{ matrix.python-version }}
       - name: Install dependencies
         run: python -m pip install -r requirements-dev.txt
-      - name: Run tests
+      - name: Claims and daemon tests
         run: python -m unittest -v
+      - name: Sample pipeline runs end-to-end
+        run: python reproduce.py --sample
+      - name: Legacy suite
+        run: cd legacy && python -m unittest

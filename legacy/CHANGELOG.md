@@ -4,15 +4,6 @@ All notable changes to QiCompute are documented here. This project follows the s
 
 ## [Unreleased]
 
-### Changed (research pivot)
-
-- The repo is now an empirical test of the energy-money thesis, structured bottom-up around four claims with a built-in null hypothesis and a neutrality contract (see README). The QiCompute marketplace prototype is shelved, frozen, and runnable under `legacy/` (its 241-test suite passes from that directory).
-- Claim 1 (`claim1_peg.py`): Qi market price vs modeled energy cost of production (difficulty -> joules/Qi for a reference RTX 3090 x $/kWh), regressed on returns against both the energy model and BTC beta; verdicts are `supports_energy_thesis`, `energy_thesis_not_supported`, or `insufficient_data` below a minimum sample count.
-- Claim 2 (`claim2_stability.py`): rolling 30-day volatility of fixed compute bundles (1 kWh; 1M tokens) denominated in USD, BTC, and Qi, with the Qi/joule-vs-Qi/token corollary stated in every output.
-- Claim 3: `benchmark.py --store` records tokens/sec, watts, and joules/token with GPU metadata into `measurements.db` (public-dataset schema); `qi_index.py` derives the live "Qi cost of 1M tokens today".
-- Claim 4 (`claim4_settlement.py`): minimal escrow/settlement salvaged from QiCompute with audit fixes (integer micro-Qi, WAL, idempotent settle), pricing a job from the live index with conservation checked.
-- `fetch_data.py` caches Qi/BTC prices (CoinGecko proposed), Quai difficulty (resumable RPC header sampling or explorer endpoint), and EIA electricity into `data/`; analysis only ever reads the cache. `sample_data.py` generates labeled SYNTHETIC fixtures for offline pipeline tests. `reproduce.py` is the one-command run; `test_claims.py` adds 16 deterministic tests.
-
 ### Changed
 
 - Pivot to a minimal provable core: the crossover daemon. `daemon.py` is now a standalone process for Quai GPU miners that prices mining (live Quai price + difficulty feeds, measured hashrate and watts) against open-model inference (live market rate feed or config fallback), computes integer micro-USD net $/day for both, and switches the GPU with hysteresis (margin, consecutive decisions, minimum dwell). On any Quai feed error it defaults to mining. Decisions, samples, and inference request hashes/token-counts are logged to SQLite (WAL, check_same_thread=False, idempotent writes). The marketplace/escrow/committee layers are retained but out of the critical path: the old worker daemon moved to `worker_daemon.py`, its config to `config.marketplace.yaml`.

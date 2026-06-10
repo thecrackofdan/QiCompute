@@ -14,11 +14,14 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import sqlite3
 import subprocess
 import threading
 import time
 import urllib.request
+from datetime import datetime, timezone
 from typing import Any
+from uuid import uuid4
 
 from daemon import (
     MICRO,
@@ -32,6 +35,91 @@ from daemon import (
     to_micro,
 )
 from telemetry import GPUTelemetry
+
+
+MEASUREMENTS_SCHEMA = """
+CREATE TABLE IF NOT EXISTS measurements (
+    measurement_id TEXT PRIMARY KEY,
+    ts TEXT NOT NULL,
+    gpu_name TEXT,
+    gpu_count INTEGER,
+    driver_version TEXT,
+    vram_total_mb REAL,
+    backend TEXT NOT NULL,
+    model_name TEXT NOT NULL,
+    minutes REAL NOT NULL,
+    requests INTEGER NOT NULL,
+    output_tokens INTEGER NOT NULL,
+    tokens_per_second REAL NOT NULL,
+    avg_watts REAL NOT NULL,
+    joules_per_token REAL NOT NULL,
+    contributor TEXT,
+    notes TEXT
+);
+"""
+
+
+def gpu_metadata(nvidia_smi_path: str = "nvidia-smi") -> dict[str, Any]:
+    try:
+        result = subprocess.run(
+            [nvidia_smi_path, "--query-gpu=name,driver_version,memory.total", "--format=csv,noheader,nounits"],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        rows = [line.split(", ") for line in result.stdout.splitlines() if line.strip()]
+        if rows:
+            return {
+                "gpu_name": rows[0][0],
+                "gpu_count": len(rows),
+                "driver_version": rows[0][1] if len(rows[0]) > 1 else None,
+                "vram_total_mb": float(rows[0][2]) if len(rows[0]) > 2 else None,
+            }
+    except Exception:
+        pass
+    return {"gpu_name": None, "gpu_count": None, "driver_version": None, "vram_total_mb": None}
+
+
+def store_measurement(db_path: str, row: dict[str, Any]) -> None:
+    """Append one benchmark row to the public-dataset-shaped SQLite store.
+
+    WAL, cross-thread safe, idempotent on measurement_id.
+    """
+    conn = sqlite3.connect(db_path, check_same_thread=False)
+    try:
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.executescript(MEASUREMENTS_SCHEMA)
+        with conn:
+            conn.execute(
+                """
+                INSERT OR IGNORE INTO measurements (
+                    measurement_id, ts, gpu_name, gpu_count, driver_version, vram_total_mb,
+                    backend, model_name, minutes, requests, output_tokens,
+                    tokens_per_second, avg_watts, joules_per_token, contributor, notes
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    row["measurement_id"],
+                    row["ts"],
+                    row.get("gpu_name"),
+                    row.get("gpu_count"),
+                    row.get("driver_version"),
+                    row.get("vram_total_mb"),
+                    row["backend"],
+                    row["model_name"],
+                    float(row["minutes"]),
+                    int(row["requests"]),
+                    int(row["output_tokens"]),
+                    float(row["tokens_per_second"]),
+                    float(row["avg_watts"]),
+                    float(row["joules_per_token"]),
+                    row.get("contributor"),
+                    row.get("notes"),
+                ),
+            )
+    finally:
+        conn.close()
 
 
 class WattSampler(threading.Thread):
@@ -118,9 +206,11 @@ def run_inference_phase(config: dict[str, Any], minutes: float, telemetry: GPUTe
             total_output_tokens += eval_count
     watts = sampler.stop()
     tokens_per_second = sum(rates) / len(rates) if rates else 0.0
+    joules_per_token = watts / tokens_per_second if tokens_per_second > 0 else 0.0
     return {
         "tokens_per_second": round(tokens_per_second, 3),
         "watts": watts,
+        "joules_per_token": round(joules_per_token, 6),
         "requests": len(rates),
         "output_tokens": total_output_tokens,
         "measured": bool(rates),
@@ -192,6 +282,10 @@ def main() -> int:
     parser.add_argument("--minutes", type=float, default=5.0, help="Minutes per phase")
     parser.add_argument("--skip-mining", action="store_true")
     parser.add_argument("--skip-inference", action="store_true")
+    parser.add_argument("--store", action="store_true", help="Append the inference measurement to measurements.db (claim 3 dataset)")
+    parser.add_argument("--measurements-db", default="measurements.db")
+    parser.add_argument("--contributor", default="", help="Handle to credit in the public dataset")
+    parser.add_argument("--notes", default="")
     args = parser.parse_args()
     config = load_config(args.config)
     telemetry = GPUTelemetry(
@@ -203,10 +297,33 @@ def main() -> int:
     else:
         mining = run_mining_phase(config, args.minutes, telemetry)
     if args.skip_inference:
-        inference = {"tokens_per_second": 0.0, "watts": 0.0, "requests": 0, "output_tokens": 0, "measured": False}
+        inference = {"tokens_per_second": 0.0, "watts": 0.0, "joules_per_token": 0.0, "requests": 0, "output_tokens": 0, "measured": False}
     else:
         inference = run_inference_phase(config, args.minutes, telemetry)
     print(crossover_table(config, mining, inference))
+    if inference["measured"]:
+        print(f"joules/token: {inference['joules_per_token']}")
+    if args.store:
+        if not inference["measured"]:
+            print("--store skipped: no successful inference measurement to record")
+        else:
+            row = {
+                "measurement_id": str(uuid4()),
+                "ts": datetime.now(timezone.utc).isoformat(),
+                **gpu_metadata(str(config.get("gpu", {}).get("nvidia_smi_path", "nvidia-smi"))),
+                "backend": "ollama",
+                "model_name": str(config.get("inference", {}).get("model", "unknown")),
+                "minutes": args.minutes,
+                "requests": inference["requests"],
+                "output_tokens": inference["output_tokens"],
+                "tokens_per_second": inference["tokens_per_second"],
+                "avg_watts": inference["watts"],
+                "joules_per_token": inference["joules_per_token"],
+                "contributor": args.contributor or None,
+                "notes": args.notes or None,
+            }
+            store_measurement(args.measurements_db, row)
+            print(f"stored measurement {row['measurement_id']} in {args.measurements_db}")
     return 0
 
 

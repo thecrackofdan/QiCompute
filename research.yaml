@@ -1,0 +1,56 @@
+# Configuration for the empirical claims. All data is fetched into data/ and
+# cached; analysis always runs from the cache so results are reproducible.
+
+data_dir: "data"
+results_dir: "results"
+
+prices:
+  # Proposed source: CoinGecko - free, no API key, aggregates exchanges, and
+  # carries QUAI's full daily history since listing (early 2024), which is the
+  # longest continuous public series available. Swap URLs to change source.
+  qi_url: "https://api.coingecko.com/api/v3/coins/quai-network/market_chart?vs_currency=usd&days=max&interval=daily"
+  btc_url: "https://api.coingecko.com/api/v3/coins/bitcoin/market_chart?vs_currency=usd&days=max&interval=daily"
+  # CoinGecko market_chart returns {"prices": [[ms_epoch, usd], ...]}
+  json_path: "prices"
+
+difficulty:
+  # mode "explorer": GET a charts endpoint returning difficulty history;
+  # set url + json_path to a list of [ms_epoch_or_date, difficulty] pairs.
+  # mode "rpc_scan": sample block headers from a Quai RPC node (slower,
+  # needs no explorer API). Verify json fields against your node.
+  mode: "rpc_scan"
+  explorer_url: ""
+  explorer_json_path: ""
+  rpc_url: "https://rpc.quai.network/cyprus1"
+  rpc_block_step: 3000          # sample one block in every N
+  rpc_difficulty_path: "result.woHeader.difficulty"
+  rpc_timestamp_path: "result.woHeader.timestamp"
+
+electricity:
+  # EIA v2 API (https://www.eia.gov/opendata/) - requires a free API key.
+  # Without a key, claim 2 uses the flat fallback and labels it as such.
+  eia_api_key: ""
+  eia_url_template: "https://api.eia.gov/v2/electricity/retail-sales/data/?api_key={key}&frequency=monthly&data[0]=price&facets[sectorid][]=IND&facets[stateid][]=US&sort[0][column]=period&sort[0][direction]=asc"
+  fallback_usd_per_kwh: "0.12"
+
+reference_gpu:
+  # The modeled cost-of-production rig. RTX 3090 on ProgPoW.
+  name: "RTX 3090"
+  hashrate_hps: 45000000
+  watts: 300
+
+network:
+  block_reward_qi: "3"          # verify against current Quai emission schedule
+  usd_per_kwh: "0.12"           # production electricity price for the cost model
+
+claim2:
+  rolling_window_days: 30
+  token_bundle: 1000000
+  # Used ONLY until measurements.db has real joules/token rows from
+  # benchmark.py --store; outputs are labeled when this fallback is active.
+  joules_per_token_fallback: "0.5"
+
+verdict:
+  # Below this many aligned daily observations, claim 1 reports
+  # "insufficient_data" rather than a verdict either way.
+  min_samples: 90

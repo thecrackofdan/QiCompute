@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from energy_anchor import mining_energy_parity
+from market_pricing import compute_market_price
 
 
 PRIVACY_JOULE_MULTIPLIERS = {"standard": 1.0, "private": 1.16, "confidential": 1.30}
@@ -15,6 +16,8 @@ DEFAULT_SMOOTHING_ALPHA = 0.2
 DEFAULT_MAX_STEP_RATIO = 0.1
 DEFAULT_CORRIDOR_CEILING_MULTIPLIER = 1.5
 DEFAULT_STABLE_CV_THRESHOLD = 0.15
+DEFAULT_MIN_EPOCH_ENERGY_JOULES = 100.0
+DEFAULT_FULL_WEIGHT_ENERGY_JOULES = 10000.0
 
 
 @dataclass(frozen=True)
@@ -89,7 +92,12 @@ def init_parity_oracle(
     )
 
 
-def update_parity_oracle(oracle: ParityOracle, observed_qi_per_joule: float) -> ParityOracle:
+def update_parity_oracle(
+    oracle: ParityOracle,
+    observed_qi_per_joule: float,
+    *,
+    weight: float = 1.0,
+) -> ParityOracle:
     """Fold one observed Qi-per-joule rate into the smoothed parity rate.
 
     The published rate is an exponential moving average of observations, and a
@@ -97,9 +105,14 @@ def update_parity_oracle(oracle: ParityOracle, observed_qi_per_joule: float) -> 
     previous rate. A spike in observed rates (demand surge, mining difficulty
     shock, thin settlement volume) therefore bleeds into the published rate
     over several epochs instead of repricing the marketplace at once.
+
+    ``weight`` (0 to 1) scales the smoothing alpha for this observation. It is
+    how volume weighting enters: an epoch that settled little energy gets
+    proportionally little influence over the published rate, so manufacturing
+    thin epochs is an expensive way to move the oracle.
     """
     observed = max(float(observed_qi_per_joule), 0.0)
-    alpha = oracle.smoothing_alpha
+    alpha = oracle.smoothing_alpha * min(max(float(weight), 0.0), 1.0)
     blended = alpha * observed + (1.0 - alpha) * oracle.qi_per_joule
     lower = oracle.qi_per_joule * (1.0 - oracle.max_step_ratio)
     upper = oracle.qi_per_joule * (1.0 + oracle.max_step_ratio)
@@ -120,21 +133,32 @@ def oracle_from_epoch_summaries(
     initial_qi_per_joule: float,
     smoothing_alpha: float = DEFAULT_SMOOTHING_ALPHA,
     max_step_ratio: float = DEFAULT_MAX_STEP_RATIO,
+    min_epoch_energy_joules: float = DEFAULT_MIN_EPOCH_ENERGY_JOULES,
+    full_weight_energy_joules: float = DEFAULT_FULL_WEIGHT_ENERGY_JOULES,
 ) -> ParityOracle:
     """Replay finalized epochs into a smoothed parity rate.
 
     Each epoch's observed rate is ``settled_qi_per_joule`` from its
-    ``energy_totals`` metadata; epochs that settled no energy are skipped.
+    ``energy_totals`` metadata. Epochs that settled less energy than
+    ``min_epoch_energy_joules`` are ignored entirely, and influence scales
+    linearly with settled energy up to ``full_weight_energy_joules``, so the
+    published rate follows real settlement volume rather than epoch count.
     """
     oracle = init_parity_oracle(
         qi_per_joule=initial_qi_per_joule,
         smoothing_alpha=smoothing_alpha,
         max_step_ratio=max_step_ratio,
     )
+    min_joules = max(float(min_epoch_energy_joules), 0.0)
+    full_weight_joules = max(float(full_weight_energy_joules), 0.0)
     for summary in summaries:
-        observed = float(summary.get("metadata", {}).get("energy_totals", {}).get("settled_qi_per_joule", 0.0))
-        if observed > 0:
-            oracle = update_parity_oracle(oracle, observed)
+        energy_totals = summary.get("metadata", {}).get("energy_totals", {})
+        observed = float(energy_totals.get("settled_qi_per_joule", 0.0))
+        epoch_joules = float(energy_totals.get("total_energy_joules", summary.get("total_energy_joules", 0.0)))
+        if observed <= 0 or epoch_joules < min_joules:
+            continue
+        weight = min(epoch_joules / full_weight_joules, 1.0) if full_weight_joules > 0 else 1.0
+        oracle = update_parity_oracle(oracle, observed, weight=weight)
     return oracle
 
 
@@ -199,6 +223,51 @@ def apply_stability_corridor(
         clamped=bounded != spot,
         shed_premium_qi=round(max(spot - ceiling, 0.0), 12),
     )
+
+
+def stabilized_market_price(
+    *,
+    compute_supply: float,
+    customer_demand: float,
+    worker_utilization: float,
+    mining_fallback_profitability: float,
+    latency_class: str = "standard",
+    privacy_class: str = "standard",
+    verification_class: str = "standard",
+    regional_scarcity: float = 0.0,
+    ceiling_multiplier: float = DEFAULT_CORRIDOR_CEILING_MULTIPLIER,
+) -> dict[str, Any]:
+    """Dynamic market price with the stability corridor applied.
+
+    Computes the open-ended spot price from supply, demand, utilization, and
+    service classes, then bounds it inside the corridor above the mining
+    fallback floor. Quote paths should prefer this over the raw market price
+    so demand surges reprice within a known band.
+    """
+    market = compute_market_price(
+        compute_supply=compute_supply,
+        customer_demand=customer_demand,
+        worker_utilization=worker_utilization,
+        mining_fallback_profitability=mining_fallback_profitability,
+        latency_class=latency_class,
+        privacy_class=privacy_class,
+        verification_class=verification_class,
+        regional_scarcity=regional_scarcity,
+    )
+    corridor = apply_stability_corridor(
+        spot_price_qi=market.spot_price_qi,
+        floor_price_qi=market.floor_price_qi,
+        ceiling_multiplier=ceiling_multiplier,
+    )
+    return {
+        "spot_price_qi": corridor.spot_price_qi,
+        "unbounded_spot_price_qi": market.spot_price_qi,
+        "floor_price_qi": corridor.floor_price_qi,
+        "ceiling_price_qi": corridor.ceiling_price_qi,
+        "clamped": corridor.clamped,
+        "shed_premium_qi": corridor.shed_premium_qi,
+        "pricing_reason": market.pricing_reason + "; spot bounded by the stability corridor",
+    }
 
 
 def price_stability_report(
@@ -292,6 +361,12 @@ def peg_settings(config: dict[str, Any]) -> dict[str, float]:
             anchor_cfg.get("corridor_ceiling_multiplier", DEFAULT_CORRIDOR_CEILING_MULTIPLIER)
         ),
         "stable_cv_threshold": float(anchor_cfg.get("stable_cv_threshold", DEFAULT_STABLE_CV_THRESHOLD)),
+        "min_epoch_energy_joules": float(
+            anchor_cfg.get("min_epoch_energy_joules", DEFAULT_MIN_EPOCH_ENERGY_JOULES)
+        ),
+        "full_weight_energy_joules": float(
+            anchor_cfg.get("full_weight_energy_joules", DEFAULT_FULL_WEIGHT_ENERGY_JOULES)
+        ),
     }
 
 

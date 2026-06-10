@@ -40,6 +40,7 @@ The project is released under the MIT License. See `LICENSE`.
 - `energy_anchor.py`: energy parity rate from mining issuance and energy-anchored job pricing.
 - `energy_peg.py`: smoothed parity oracle, joule-denominated quotes, stability corridor, and volatility reporting.
 - `energy_standards.py`: per-model reference joules-per-token billing, worker efficiency margins, and clamped benchmark recalibration.
+- `calibrate.py`: derives `energy_anchor` config values from hardware measurements and records them as validation evidence.
 - `agents.py`: autonomous agent accounts, escrow, earnings, and policy helpers.
 - `agent_simulation.py`: deterministic agent economics simulation.
 - `economic_scheduler.py`: deterministic agent action scheduler.
@@ -886,10 +887,13 @@ To keep Qi behaving like an energy-backed unit of account rather than a volatile
 
 Jobs are billed at a per-model benchmark joules-per-token (`energy_standards.py`), not at a worker's measured draw, so energy pricing never becomes cost-plus: every worker gets the same quote for the same work, beating the benchmark is the operator's efficiency margin, and the benchmark recalibrates toward fleet efficiency with the same clamped damping as the oracle.
 
+The oracle is volume-weighted (thin settlement epochs are ignored and influence scales with settled energy), the corridor is applied to dynamic market prices via `stabilized_market_price`, and `calibrate.py` turns real hardware measurements into the model's two configured inputs — the reference mining rate and the joules-per-token benchmark — recording them in the evidence registry for the assumption tracker.
+
 ```bash
 make energy-report
 make stability-report
 make efficiency-report
+make calibrate
 ```
 
 ## Receipt Hashing

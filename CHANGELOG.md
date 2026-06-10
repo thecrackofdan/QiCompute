@@ -13,6 +13,9 @@ All notable changes to QiCompute are documented here. This project follows the s
 - Tests for the energy anchor layer and first coverage for `market.py`, `runners.py`, and `summary.py` helpers.
 - Energy peg stability layer (`energy_peg.py`): smoothed parity oracle with clamped per-epoch steps (replayable from finalized epoch summaries), joule-denominated job quotes converted to Qi only at settlement, stability corridor bounding spot premiums above the energy floor, volatility reporting with stable/volatile verdicts, and a deterministic simulation showing 70%+ Qi cost volatility reduction versus raw token pricing. Configured via the `energy_anchor` section; documented in `ENERGY_MODEL.md`; `make stability-report` target.
 - Standardized energy billing (`energy_standards.py`): jobs are billed at a per-model benchmark joules-per-token (`energy_anchor.reference_joules_per_token`) instead of a worker's measured draw, removing the cost-plus incentive to waste energy. Worker efficiency margins and reports against the benchmark, plus clamped benchmark recalibration toward fleet efficiency. `make efficiency-report` target.
+- Volume-weighted parity oracle: epochs settling less than `min_epoch_energy_joules` are ignored and oracle influence scales with settled energy up to `full_weight_energy_joules`, so manufacturing thin epochs cannot steer the published rate.
+- `stabilized_market_price`: dynamic market pricing from `market_pricing.py` with the stability corridor applied, for quote paths.
+- Hardware calibration bridge (`calibrate.py`, `make calibrate`): measures (or accepts) tokens-per-second and watts, derives the recommended `energy_anchor` config values, flags drift beyond 25% against current config, and can append measurements to the evidence registry where the assumption tracker picks them up. Energy parity and billing benchmark assumptions added to `ECONOMIC_ASSUMPTIONS.md`.
 
 ## [0.1.0] - 2026-06-03
 

@@ -42,9 +42,11 @@ Qi should behave like an energy-backed unit of account for useful work, not a vo
 
 A raw parity rate would reprice the marketplace instantly on every mining difficulty shock or thin-volume settlement epoch. `update_parity_oracle` publishes an exponential moving average of observed Qi-per-joule rates instead, and clamps any single update to `max_step_ratio` (default 10%) relative to the previous rate — the same damping idea as a difficulty adjustment clamp. `oracle_from_epoch_summaries` replays finalized epochs' `settled_qi_per_joule` into the oracle, so the published rate is reproducible from settlement history.
 
+Oracle influence is volume-weighted: epochs that settled less than `min_epoch_energy_joules` are ignored entirely, and influence scales linearly with settled energy up to `full_weight_energy_joules`. Steering the published rate therefore requires settling real energy at the manipulated rate — manufacturing many thin epochs moves it little or not at all.
+
 ### 3. The stability corridor
 
-`apply_stability_corridor` bounds spot prices inside `[floor, floor * corridor_ceiling_multiplier]`, where the floor is the energy reservation price (mining fallback). Demand surges raise prices within a known band instead of without limit; the report records how much premium was shed by the ceiling.
+`apply_stability_corridor` bounds spot prices inside `[floor, floor * corridor_ceiling_multiplier]`, where the floor is the energy reservation price (mining fallback). Demand surges raise prices within a known band instead of without limit; the report records how much premium was shed by the ceiling. `stabilized_market_price` wraps the dynamic market price from `market_pricing.py` with the corridor applied, and is the function quote paths should prefer over the raw market price.
 
 ### 4. Standardized energy billing
 
@@ -69,6 +71,8 @@ energy_anchor:
   max_step_ratio: 0.1
   corridor_ceiling_multiplier: 1.5
   stable_cv_threshold: 0.15
+  min_epoch_energy_joules: 100.0
+  full_weight_energy_joules: 10000.0
   reference_joules_per_token:
     default: 3.0
     llama-3.1-8b: 3.0
@@ -90,6 +94,19 @@ python3 energy_standards.py --output-tokens 500 --measured-joules-per-token 2.4
 ```
 
 `energy-report` prints the parity rate and an anchored price for a sample job. `stability-report` prints the raw-versus-pegged volatility comparison. `efficiency-report` prints a standardized quote and the efficiency margin for a sample worker.
+
+## Calibration
+
+The whole model derives from two configured numbers: the reference mining rate and the joules-per-token benchmark table. `calibrate.py` is the bridge from measurement to configuration:
+
+```bash
+make calibrate                                  # measure via hardware_validation, compare to config
+python3 calibrate.py --runtime-type subprocess  # measure with a real local runtime
+python3 calibrate.py --tokens-per-second 42 --power-watts 320 --gpu-model rtx-4090
+python3 calibrate.py --record-evidence          # also append to evidence_registry.jsonl
+```
+
+It reports the measured joules-per-token, the recommended `energy_anchor` values, drift ratios against the currently configured values (warning above 25% drift), and can append the measurement to the evidence registry so the assumption tracker and validation dashboard pick it up against the energy-pricing assumptions in `ECONOMIC_ASSUMPTIONS.md`.
 
 ## Current Evidence
 
@@ -114,7 +131,7 @@ Unknowns:
 - How the parity rate should respond to mining difficulty changes over time.
 - Whether a single global reference rig is adequate, or whether the anchor must be regional (energy costs and hardware vary by region).
 - The right smoothing alpha and step clamp for real settlement cadence: too much damping makes the oracle lag genuine cost shifts and misprice work; too little readmits the volatility it exists to remove.
-- Whether an adversary can steer the oracle by feeding it thin or manufactured settlement epochs (oracle manipulation resistance is unmodeled).
+- Whether volume weighting is sufficient oracle manipulation resistance: thin epochs are now ignored and influence scales with settled energy, but an adversary willing to settle real energy at off-market rates can still lean on the rate within the clamp.
 - How benchmark recalibration should be governed: who measures fleet efficiency, how workers prove their reported draw, and whether per-model benchmarks fragment as model variants multiply.
 
 ## Limitations

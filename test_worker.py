@@ -103,6 +103,11 @@ from energy_anchor import (
     joules_per_token,
     mining_energy_parity,
 )
+from calibrate import (
+    calibrate_from_hardware_validation,
+    calibrate_from_measurements,
+    calibration_evidence_record,
+)
 from energy_peg import (
     apply_stability_corridor,
     init_parity_oracle,
@@ -111,6 +116,7 @@ from energy_peg import (
     price_stability_report,
     quote_job_in_energy,
     simulate_peg_stability,
+    stabilized_market_price,
     update_parity_oracle,
 )
 from energy_standards import (
@@ -2158,10 +2164,10 @@ inference:
 
     def test_oracle_from_epoch_summaries_skips_empty_epochs(self) -> None:
         summaries = [
-            {"metadata": {"energy_totals": {"settled_qi_per_joule": 0.0}}},
-            {"metadata": {"energy_totals": {"settled_qi_per_joule": 1.2e-7}}},
+            {"metadata": {"energy_totals": {"settled_qi_per_joule": 0.0, "total_energy_joules": 5000.0}}},
+            {"metadata": {"energy_totals": {"settled_qi_per_joule": 1.2e-7, "total_energy_joules": 5000.0}}},
             {"metadata": {}},
-            {"metadata": {"energy_totals": {"settled_qi_per_joule": 1.4e-7}}},
+            {"metadata": {"energy_totals": {"settled_qi_per_joule": 1.4e-7, "total_energy_joules": 5000.0}}},
         ]
 
         oracle = oracle_from_epoch_summaries(
@@ -2169,6 +2175,8 @@ inference:
             initial_qi_per_joule=1e-7,
             smoothing_alpha=0.5,
             max_step_ratio=1.0,
+            min_epoch_energy_joules=100.0,
+            full_weight_energy_joules=0.0,
         )
 
         self.assertEqual(oracle.observation_count, 3)
@@ -2240,6 +2248,147 @@ inference:
         self.assertEqual(configured["smoothing_alpha"], 0.3)
         self.assertEqual(configured["max_step_ratio"], 0.05)
         self.assertEqual(configured["corridor_ceiling_multiplier"], 2.0)
+
+    def test_parity_oracle_weight_scales_observation_influence(self) -> None:
+        oracle = init_parity_oracle(qi_per_joule=1e-7, smoothing_alpha=0.2, max_step_ratio=1.0)
+
+        full = update_parity_oracle(oracle, 2e-7, weight=1.0)
+        half = update_parity_oracle(oracle, 2e-7, weight=0.5)
+        none = update_parity_oracle(oracle, 2e-7, weight=0.0)
+
+        self.assertAlmostEqual(full.qi_per_joule, 0.2 * 2e-7 + 0.8 * 1e-7, places=18)
+        self.assertAlmostEqual(half.qi_per_joule, 0.1 * 2e-7 + 0.9 * 1e-7, places=18)
+        self.assertEqual(none.qi_per_joule, 1e-7)
+
+    def test_oracle_ignores_thin_epochs_and_weights_by_volume(self) -> None:
+        thin_attack = [
+            {"metadata": {"energy_totals": {"settled_qi_per_joule": 9e-7, "total_energy_joules": 10.0}}}
+            for _ in range(50)
+        ]
+        oracle = oracle_from_epoch_summaries(
+            thin_attack,
+            initial_qi_per_joule=1e-7,
+            min_epoch_energy_joules=100.0,
+            full_weight_energy_joules=10000.0,
+        )
+
+        self.assertEqual(oracle.qi_per_joule, 1e-7)
+        self.assertEqual(oracle.observation_count, 1)
+
+        partial = oracle_from_epoch_summaries(
+            [{"metadata": {"energy_totals": {"settled_qi_per_joule": 2e-7, "total_energy_joules": 5000.0}}}],
+            initial_qi_per_joule=1e-7,
+            smoothing_alpha=0.2,
+            max_step_ratio=1.0,
+            min_epoch_energy_joules=100.0,
+            full_weight_energy_joules=10000.0,
+        )
+        self.assertAlmostEqual(partial.qi_per_joule, 0.1 * 2e-7 + 0.9 * 1e-7, places=18)
+
+    def test_stabilized_market_price_bounds_demand_surge(self) -> None:
+        surge = stabilized_market_price(
+            compute_supply=1.0,
+            customer_demand=100.0,
+            worker_utilization=1.0,
+            mining_fallback_profitability=0.001,
+            latency_class="urgent",
+            privacy_class="confidential",
+            regional_scarcity=5.0,
+            ceiling_multiplier=1.5,
+        )
+        calm = stabilized_market_price(
+            compute_supply=10.0,
+            customer_demand=1.0,
+            worker_utilization=0.1,
+            mining_fallback_profitability=0.001,
+        )
+
+        self.assertTrue(surge["clamped"])
+        self.assertEqual(surge["spot_price_qi"], surge["ceiling_price_qi"])
+        self.assertGreater(surge["unbounded_spot_price_qi"], surge["ceiling_price_qi"])
+        self.assertGreater(surge["shed_premium_qi"], 0)
+        self.assertFalse(calm["clamped"])
+        self.assertGreaterEqual(calm["spot_price_qi"], calm["floor_price_qi"])
+        self.assertIn("stability corridor", surge["pricing_reason"])
+
+    def test_calibration_derives_benchmark_and_flags_drift(self) -> None:
+        config = {
+            "energy_anchor": {
+                "reference_mining_qi_per_hour": 0.05,
+                "reference_power_watts": 250,
+                "reference_joules_per_token": {"default": 3.0, "llama-3.1-8b": 3.0},
+            }
+        }
+
+        aligned = calibrate_from_measurements(
+            tokens_per_second=100.0,
+            power_watts=300.0,
+            mining_qi_per_hour=0.05,
+            config=config,
+            model="llama-3.1-8b",
+        )
+        drifted = calibrate_from_measurements(
+            tokens_per_second=500.0,
+            power_watts=300.0,
+            mining_qi_per_hour=0.05,
+            config=config,
+            model="llama-3.1-8b",
+        )
+
+        self.assertEqual(aligned["measurement"]["measured_joules_per_token"], 3.0)
+        self.assertEqual(aligned["drift_warnings"], [])
+        self.assertAlmostEqual(aligned["drift_ratios"]["reference_power_watts"], 0.2, places=9)
+        self.assertEqual(drifted["measurement"]["measured_joules_per_token"], 0.6)
+        self.assertIn("reference_joules_per_token", drifted["drift_warnings"])
+        self.assertEqual(
+            drifted["recommended_energy_anchor"]["reference_joules_per_token"]["llama-3.1-8b"], 0.6
+        )
+
+    def test_calibration_from_hardware_validation_result(self) -> None:
+        validation = {
+            "gpu_model": "test-gpu",
+            "model_name": "llama-3.1-8b",
+            "tokens_per_second": 100.0,
+            "runtime_duration_seconds": 2.0,
+            "estimated_energy_joules": 500.0,
+        }
+
+        calibration = calibrate_from_hardware_validation(
+            validation,
+            mining_qi_per_hour=0.05,
+            config={},
+        )
+
+        self.assertEqual(calibration["measurement"]["power_watts"], 250.0)
+        self.assertEqual(calibration["measurement"]["measured_joules_per_token"], 2.5)
+        self.assertEqual(calibration["measurement"]["source"], "hardware_validation")
+        self.assertEqual(calibration["measurement"]["gpu_model"], "test-gpu")
+
+    def test_calibration_evidence_feeds_assumption_tracker(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            evidence_path = str(Path(tmp) / "evidence.jsonl")
+            assumptions_path = Path(tmp) / "assumptions.md"
+            assumptions_path.write_text(
+                "| Assumption | Why |\n| --- | --- |\n"
+                "| Reference joules per token reflects real model energy use | billing |\n",
+                encoding="utf-8",
+            )
+            calibration = calibrate_from_measurements(
+                tokens_per_second=100.0,
+                power_watts=300.0,
+                mining_qi_per_hour=0.05,
+                config={},
+                model="llama-3.1-8b",
+            )
+
+            record = calibration_evidence_record(calibration, confidence=0.6, path=evidence_path)
+            statuses = track_assumptions(assumptions_path=assumptions_path, evidence_path=evidence_path)
+
+            self.assertEqual(record["category"], "energy_benchmark_measurement")
+            self.assertEqual(record["result"]["measured_joules_per_token"], 3.0)
+            self.assertEqual(len(statuses), 1)
+            self.assertEqual(statuses[0].status, "partially validated")
+            self.assertEqual(statuses[0].evidence_count, 1)
 
     def test_reference_joules_per_token_uses_model_table_with_default(self) -> None:
         config = {"energy_anchor": {"reference_joules_per_token": {"default": 3.0, "efficient-model": 1.5}}}

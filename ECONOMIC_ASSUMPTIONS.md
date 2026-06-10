@@ -24,6 +24,8 @@ Confidence scores are 1 to 5, where 1 means mostly unvalidated and 5 means stron
 | QiCompute can compete on latency | Latency-sensitive buyers may reject distributed routing | Routing model and regional simulation | End-to-end latency measurements | 1 |
 | Local controller trust is acceptable for early markets | Current architecture is not public decentralized | LAN controller prototype and docs | Clear target customer willing to trust operator | 3 |
 | Useful work should not mint Qi | Avoids second issuance path and incentive confusion | Strong doc/code principle | Economic analysis of reward sufficiency | 4 |
+| Mining issuance yields a usable energy parity rate | The energy anchor and peg derive all pricing from Qi per joule | Parity, oracle, corridor, and peg simulations with deterministic tests | Real mining yield and wall-socket energy measurements | 1 |
+| Reference joules per token reflects real model energy use | Standardized billing depends on credible per-model benchmarks | Placeholder benchmark table and calibration tooling | Hardware benchmark measurements across GPUs and models | 1 |
 
 ## Highest Priority Evidence To Gather
 

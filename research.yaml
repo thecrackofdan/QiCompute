@@ -10,6 +10,9 @@ prices:
   # longest continuous public series available. Swap URLs to change source.
   qi_url: "https://api.coingecko.com/api/v3/coins/quai-network/market_chart?vs_currency=usd&days=max&interval=daily"
   btc_url: "https://api.coingecko.com/api/v3/coins/bitcoin/market_chart?vs_currency=usd&days=max&interval=daily"
+  # Second crypto-beta null: small-caps often track broad risk appetite more
+  # tightly than BTC alone; the thesis must beat every null.
+  eth_url: "https://api.coingecko.com/api/v3/coins/ethereum/market_chart?vs_currency=usd&days=max&interval=daily"
   # CoinGecko market_chart returns {"prices": [[ms_epoch, usd], ...],
   # "total_volumes": [[ms_epoch, usd], ...]} - volumes are cached for the
   # liquidity honesty section (OBJECTIONS.md item d).

@@ -87,6 +87,32 @@ class Claim1VerdictTest(unittest.TestCase):
         self.assertGreater(energy["r_squared"], btc["r_squared"])
         self.assertGreater(energy["beta"], 0)
 
+    def test_eth_null_participates_and_eth_driven_price_fails_thesis(self) -> None:
+        series = sample_data.generate_series()
+        with_eth = claim1_analyze(
+            qi_usd=series["qi_usd"],
+            btc_usd=series["btc_usd"],
+            difficulty=series["difficulty"],
+            config=RESEARCH_CONFIG,
+            eth_usd=series["eth_usd"],
+        )
+        self.assertEqual(with_eth["null_hypotheses"], ["BTC", "ETH"])
+        self.assertEqual(with_eth["verdict"], "supports_energy_thesis")
+
+        # Qi that is pure ETH beta: the second null must catch it.
+        eth_values = series["eth_usd"]
+        base = next(iter(eth_values.values()))
+        qi_as_eth_beta = {date: 0.08 * value / base for date, value in eth_values.items()}
+        result = claim1_analyze(
+            qi_usd=qi_as_eth_beta,
+            btc_usd=series["btc_usd"],
+            difficulty=series["difficulty"],
+            config=RESEARCH_CONFIG,
+            eth_usd=series["eth_usd"],
+        )
+        self.assertEqual(result["verdict"], "energy_thesis_not_supported")
+        self.assertIn("ETH returns", result["verdict_reason"])
+
     def test_btc_driven_price_fails_thesis(self) -> None:
         series = sample_data.generate_series()
         # Qi that is pure BTC beta: the null hypothesis should win.

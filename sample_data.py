@@ -31,15 +31,18 @@ def generate_series() -> dict[str, dict[str, float]]:
     dates = _dates()
     difficulty: dict[str, float] = {}
     btc: dict[str, float] = {}
+    eth: dict[str, float] = {}
     qi: dict[str, float] = {}
     electricity: dict[str, float] = {}
     base_difficulty = 1.0e12
     base_btc = 60_000.0
+    base_eth = 3_000.0
     for i, day in enumerate(dates):
         # difficulty trends up with a fast wave so energy-cost returns carry
         # real daily variance; deterministic pseudo-noise from sin
         difficulty[day] = base_difficulty * (1.0 + 0.004 * i) * (1.0 + 0.12 * math.sin(i / 3.0))
         btc[day] = base_btc * (1.0 + 0.002 * i) * (1.0 + 0.10 * math.sin(i / 7.0 + 1.0))
+        eth[day] = base_eth * (1.0 + 0.0025 * i) * (1.0 + 0.12 * math.sin(i / 6.0 + 2.0))
         electricity[day] = 0.12 * (1.0 + 0.05 * math.sin(i / 30.0))
     # modeled cost per Qi for the reference rig in research.yaml
     # (45 MH/s, 300 W, 3 Qi/block, $0.12/kWh)
@@ -59,6 +62,7 @@ def generate_series() -> dict[str, dict[str, float]]:
     return {
         "qi_usd": qi,
         "btc_usd": btc,
+        "eth_usd": eth,
         "difficulty": difficulty,
         "electricity_usd_per_kwh": electricity,
         "qi_volume_usd": volume,

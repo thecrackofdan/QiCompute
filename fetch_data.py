@@ -205,6 +205,7 @@ def main() -> int:
     jobs = [
         ("qi_usd", lambda: fetch_price(config, data_dir, "qi_usd", "qi_url")),
         ("btc_usd", lambda: fetch_price(config, data_dir, "btc_usd", "btc_url")),
+        ("eth_usd", lambda: fetch_price(config, data_dir, "eth_usd", "eth_url")),
         ("difficulty", lambda: fetch_difficulty(config, data_dir)),
         ("electricity_usd_per_kwh", lambda: fetch_electricity(config, data_dir)),
     ]

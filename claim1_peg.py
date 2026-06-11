@@ -9,9 +9,11 @@ every proof-of-work asset, and is the premise here, not the finding. What
 this script tests is MARKET-level coupling: whether Qi's exchange price
 tracks the modeled energy cost of producing a Qi. Bitcoin proves identical
 protocol mechanics do not pin market price to production cost, which is why
-the null hypothesis is built in: Qi daily log-returns are regressed both on
-modeled cost-of-production returns and on BTC returns. If BTC beta explains
-Qi better than energy cost does, the verdict says the thesis is not
+the null hypotheses are built in: Qi daily log-returns are regressed on
+modeled cost-of-production returns AND on BTC and ETH returns (two crypto-
+beta nulls; small-caps often track broad risk appetite more tightly than
+BTC alone). The thesis is supported only if energy cost beats EVERY null;
+if any null explains Qi better, the verdict says the thesis is not
 supported.
 
 NO-CONCLUSION GATES, applied before any verdict:
@@ -92,18 +94,24 @@ def analyze(
     difficulty: dict[str, float],
     config: dict[str, Any],
     qi_volume_usd: dict[str, float] | None = None,
+    eth_usd: dict[str, float] | None = None,
 ) -> dict[str, Any]:
     cost_usd = cost_series(difficulty, config)
-    dates, (qi, btc, cost) = align_by_date(qi_usd, btc_usd, cost_usd)
+    eth: list[float] | None = None
+    if eth_usd:
+        dates, (qi, btc, cost, eth) = align_by_date(qi_usd, btc_usd, cost_usd, eth_usd)
+    else:
+        dates, (qi, btc, cost) = align_by_date(qi_usd, btc_usd, cost_usd)
     n = len(dates)
     min_samples = int(config.get("verdict", {}).get("min_samples", 90))
 
     qi_returns = log_returns(qi)
     cost_returns = log_returns(cost)
-    btc_returns = log_returns(btc)
 
     energy_regression = ols(cost_returns, qi_returns)
-    btc_regression = ols(btc_returns, qi_returns)
+    null_regressions: dict[str, dict[str, Any]] = {"BTC": ols(log_returns(btc), qi_returns)}
+    if eth is not None:
+        null_regressions["ETH"] = ols(log_returns(eth), qi_returns)
 
     result: dict[str, Any] = {
         "aligned_days": n,
@@ -111,10 +119,15 @@ def analyze(
         "levels_correlation_qi_vs_cost": round(pearson(qi, cost), 6),
         "levels_correlation_qi_vs_btc": round(pearson(qi, btc), 6),
         "returns_regression_qi_on_energy_cost": energy_regression,
-        "returns_regression_qi_on_btc": btc_regression,
+        "returns_regression_qi_on_btc": null_regressions["BTC"],
+        "null_regressions": null_regressions,
+        "null_hypotheses": sorted(null_regressions),
         "min_samples_for_verdict": min_samples,
         "liquidity": liquidity_stats(qi_volume_usd),
     }
+    if eth is not None:
+        result["returns_regression_qi_on_eth"] = null_regressions["ETH"]
+        result["levels_correlation_qi_vs_eth"] = round(pearson(qi, eth), 6)
     min_volume = float(config.get("verdict", {}).get("min_median_daily_volume_usd", 50_000))
     liquidity = result["liquidity"]
     if n < min_samples:
@@ -131,36 +144,40 @@ def analyze(
             "no conclusion is drawn in either direction. The energy-money thesis is currently "
             "untestable at this liquidity - that is the finding."
         )
-    elif (
-        energy_regression["r_squared"] > btc_regression["r_squared"]
-        and energy_regression["beta"] > 0
-    ):
-        result["verdict"] = "supports_energy_thesis"
-        result["verdict_reason"] = (
-            f"energy-cost returns explain Qi returns (R2={energy_regression['r_squared']:.4f}) "
-            f"better than BTC returns do (R2={btc_regression['r_squared']:.4f}), with positive beta."
-        )
     else:
-        result["verdict"] = "energy_thesis_not_supported"
-        result["verdict_reason"] = (
-            f"BTC returns (R2={btc_regression['r_squared']:.4f}) explain Qi at least as well as "
-            f"energy-cost returns (R2={energy_regression['r_squared']:.4f}): Qi trades like "
-            "crypto beta, not energy money, over this window."
-        )
+        strongest_null_name = max(null_regressions, key=lambda name: null_regressions[name]["r_squared"])
+        strongest_null = null_regressions[strongest_null_name]
+        if energy_regression["r_squared"] > strongest_null["r_squared"] and energy_regression["beta"] > 0:
+            result["verdict"] = "supports_energy_thesis"
+            result["verdict_reason"] = (
+                f"energy-cost returns explain Qi returns (R2={energy_regression['r_squared']:.4f}) "
+                f"better than every null does (strongest: {strongest_null_name}, "
+                f"R2={strongest_null['r_squared']:.4f}), with positive beta."
+            )
+        else:
+            result["verdict"] = "energy_thesis_not_supported"
+            result["verdict_reason"] = (
+                f"{strongest_null_name} returns (R2={strongest_null['r_squared']:.4f}) explain Qi at "
+                f"least as well as energy-cost returns (R2={energy_regression['r_squared']:.4f}): "
+                "Qi trades like crypto beta, not energy money, over this window."
+            )
     result["series"] = {"dates": dates, "qi_usd": qi, "btc_usd": btc, "modeled_cost_usd": cost}
+    if eth is not None:
+        result["series"]["eth_usd"] = eth
     return result
 
 
 def render_markdown(result: dict[str, Any], *, synthetic: bool) -> str:
     energy = result["returns_regression_qi_on_energy_cost"]
-    btc = result["returns_regression_qi_on_btc"]
+    nulls = result.get("null_regressions", {"BTC": result["returns_regression_qi_on_btc"]})
     lines = []
     if synthetic:
         lines += ["> **SYNTHETIC SAMPLE DATA - pipeline demonstration only, not a finding.**", ""]
     lines += [
         "# Claim 1: Peg Tracking (market level)",
         "",
-        "Does Qi's **market price** track its modeled energy cost of production, or does it trade like BTC beta?",
+        "Does Qi's **market price** track its modeled energy cost of production, or does it trade like "
+        f"generic crypto beta (nulls: {', '.join(sorted(nulls))})?",
         "",
         "*Not under test:* Quai's protocol couples emission to difficulty by construction - that is "
         "mechanics, not evidence. This analysis tests the market layer only.",
@@ -172,7 +189,13 @@ def render_markdown(result: dict[str, Any], *, synthetic: bool) -> str:
         "| Hypothesis (daily log-returns) | beta | t(beta) | R2 | n |",
         "| --- | --- | --- | --- | --- |",
         f"| Qi ~ modeled energy cost | {energy['beta']} | {energy['t_beta']} | {energy['r_squared']} | {energy['n']} |",
-        f"| Qi ~ BTC (null hypothesis) | {btc['beta']} | {btc['t_beta']} | {btc['r_squared']} | {btc['n']} |",
+    ]
+    for name in sorted(nulls):
+        null = nulls[name]
+        lines.append(
+            f"| Qi ~ {name} (null hypothesis) | {null['beta']} | {null['t_beta']} | {null['r_squared']} | {null['n']} |"
+        )
+    lines += [
         "",
         f"## Verdict: `{result['verdict']}`",
         "",
@@ -214,6 +237,8 @@ def render_chart(result: dict[str, Any], path: str, *, synthetic: bool) -> bool:
     ax.plot(dates, normalize(series["qi_usd"]), label="Qi market price (normalized)")
     ax.plot(dates, normalize(series["modeled_cost_usd"]), label="Modeled energy cost (normalized)")
     ax.plot(dates, normalize(series["btc_usd"]), label="BTC (normalized, null hypothesis)", alpha=0.6)
+    if "eth_usd" in series:
+        ax.plot(dates, normalize(series["eth_usd"]), label="ETH (normalized, null hypothesis)", alpha=0.6)
     step = max(len(dates) // 10, 1)
     ax.set_xticks(dates[::step])
     ax.tick_params(axis="x", rotation=45)
@@ -240,9 +265,12 @@ def load_inputs(config: dict[str, Any], *, sample: bool) -> dict[str, dict[str, 
             )
             return None
         out[name] = {date: float(value) for date, value in cached["series"].items()}
-    volume = read_cache(data_dir, "qi_volume_usd")
-    if volume is not None:
-        out["qi_volume_usd"] = {date: float(value) for date, value in volume["series"].items()}
+    for optional in ("qi_volume_usd", "eth_usd"):
+        cached = read_cache(data_dir, optional)
+        if cached is not None:
+            out[optional] = {date: float(value) for date, value in cached["series"].items()}
+        elif optional == "eth_usd":
+            print("note: no eth_usd cache; running with BTC as the only null hypothesis")
     return out
 
 
@@ -261,6 +289,7 @@ def main() -> int:
         difficulty=inputs["difficulty"],
         config=config,
         qi_volume_usd=inputs.get("qi_volume_usd"),
+        eth_usd=inputs.get("eth_usd"),
     )
     results_dir = Path(config.get("results_dir", "results"))
     results_dir.mkdir(parents=True, exist_ok=True)

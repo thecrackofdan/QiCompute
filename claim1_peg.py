@@ -1,17 +1,31 @@
-"""Claim 1: does Qi's market price track its modeled energy cost of production?
+"""Claim 1: does Qi's MARKET price track its modeled energy cost of production?
 
     python3 claim1_peg.py              # analyze cached real data (data/)
     python3 claim1_peg.py --sample     # SYNTHETIC fixtures, for testing the pipeline only
 
-The null hypothesis is built in: Qi daily log-returns are regressed both on
-the modeled cost-of-production returns and on BTC returns. If BTC beta
-explains Qi better than energy cost does, the verdict says the thesis is not
-supported. Below verdict.min_samples aligned observations the verdict is
-"insufficient_data" - thin data is never smoothed into a conclusion.
+WHAT IS AND IS NOT UNDER TEST. Quai's protocol ties Qi emission to hashrate
+and difficulty BY CONSTRUCTION - that coupling is mechanics, shared with
+every proof-of-work asset, and is the premise here, not the finding. What
+this script tests is MARKET-level coupling: whether Qi's exchange price
+tracks the modeled energy cost of producing a Qi. Bitcoin proves identical
+protocol mechanics do not pin market price to production cost, which is why
+the null hypothesis is built in: Qi daily log-returns are regressed both on
+modeled cost-of-production returns and on BTC returns. If BTC beta explains
+Qi better than energy cost does, the verdict says the thesis is not
+supported.
+
+NO-CONCLUSION GATES, applied before any verdict:
+- fewer than verdict.min_samples aligned observations -> "insufficient_data"
+- median daily volume below verdict.min_median_daily_volume_usd ->
+  "below_liquidity_threshold" (a thin market's price is noise; stats are
+  still printed for inspection but no conclusion is drawn either way)
+Thin data is never smoothed into a conclusion.
 
 Cost model: difficulty (hashes/block) / block_reward (Qi/block) = hashes/Qi;
 divided by the reference GPU's hashrate gives seconds of work per Qi; times
-watts gives joules per Qi; times $/kWh gives modeled USD cost per Qi.
+watts gives joules per Qi; times $/kWh gives modeled USD cost per Qi. The
+$/kWh is the explicit global-marginal-miner assumption (OBJECTIONS.md (b));
+rerun at 0.04 and 0.20 to check verdict robustness.
 """
 from __future__ import annotations
 
@@ -101,11 +115,21 @@ def analyze(
         "min_samples_for_verdict": min_samples,
         "liquidity": liquidity_stats(qi_volume_usd),
     }
+    min_volume = float(config.get("verdict", {}).get("min_median_daily_volume_usd", 50_000))
+    liquidity = result["liquidity"]
     if n < min_samples:
         result["verdict"] = "insufficient_data"
         result["verdict_reason"] = (
             f"only {n} aligned daily observations; verdict requires {min_samples}. "
             "No conclusion is drawn from thin data."
+        )
+    elif liquidity.get("available") and liquidity["median_daily_volume_usd"] < min_volume:
+        result["verdict"] = "below_liquidity_threshold"
+        result["verdict_reason"] = (
+            f"median daily Qi volume ${liquidity['median_daily_volume_usd']:,.0f} is below the "
+            f"pre-registered ${min_volume:,.0f} threshold: the market price is treated as noise and "
+            "no conclusion is drawn in either direction. The energy-money thesis is currently "
+            "untestable at this liquidity - that is the finding."
         )
     elif (
         energy_regression["r_squared"] > btc_regression["r_squared"]
@@ -134,9 +158,12 @@ def render_markdown(result: dict[str, Any], *, synthetic: bool) -> str:
     if synthetic:
         lines += ["> **SYNTHETIC SAMPLE DATA - pipeline demonstration only, not a finding.**", ""]
     lines += [
-        "# Claim 1: Peg Tracking",
+        "# Claim 1: Peg Tracking (market level)",
         "",
-        "Does Qi's market price track its modeled energy cost of production, or does it trade like BTC beta?",
+        "Does Qi's **market price** track its modeled energy cost of production, or does it trade like BTC beta?",
+        "",
+        "*Not under test:* Quai's protocol couples emission to difficulty by construction - that is "
+        "mechanics, not evidence. This analysis tests the market layer only.",
         "",
         f"- Aligned daily observations: **{result['aligned_days']}** ({' to '.join(result['date_range']) if result['date_range'] else 'none'})",
         f"- Levels correlation, Qi vs modeled cost: **{result['levels_correlation_qi_vs_cost']}** (levels correlate trivially when both trend; the regression below uses returns)",

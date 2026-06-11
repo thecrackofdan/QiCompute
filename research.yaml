@@ -59,3 +59,9 @@ verdict:
   # Below this many aligned daily observations, claim 1 reports
   # "insufficient_data" rather than a verdict either way.
   min_samples: 90
+  # Pre-registered liquidity gate (PREDICTIONS.md / OBJECTIONS.md (d)):
+  # below this median daily Qi volume the market price is treated as noise
+  # and claim 1 reports "below_liquidity_threshold" instead of a verdict.
+  # Candidate rationale: a plausible single $5k hedge should move <10% of a
+  # day's volume. Flagged for review before result interpretation.
+  min_median_daily_volume_usd: 50000

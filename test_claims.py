@@ -101,6 +101,38 @@ class Claim1VerdictTest(unittest.TestCase):
         )
         self.assertEqual(result["verdict"], "energy_thesis_not_supported")
 
+    def test_below_liquidity_threshold_blocks_verdict_either_way(self) -> None:
+        series = sample_data.generate_series()
+        thin_volume = {date: 500.0 for date in series["qi_usd"]}  # $500/day median
+
+        result = claim1_analyze(
+            qi_usd=series["qi_usd"],
+            btc_usd=series["btc_usd"],
+            difficulty=series["difficulty"],
+            config=RESEARCH_CONFIG,
+            qi_volume_usd=thin_volume,
+        )
+
+        # same energy-driven data that supports the thesis when liquid:
+        # below the gate, NO conclusion is drawn in either direction
+        self.assertEqual(result["verdict"], "below_liquidity_threshold")
+        self.assertIn("untestable at this liquidity", result["verdict_reason"])
+        # regression stats remain inspectable
+        self.assertGreater(result["returns_regression_qi_on_energy_cost"]["r_squared"], 0)
+
+    def test_liquid_volume_passes_the_gate(self) -> None:
+        series = sample_data.generate_series()
+
+        result = claim1_analyze(
+            qi_usd=series["qi_usd"],
+            btc_usd=series["btc_usd"],
+            difficulty=series["difficulty"],
+            config=RESEARCH_CONFIG,
+            qi_volume_usd=series["qi_volume_usd"],  # median ~$250k > $50k gate
+        )
+
+        self.assertEqual(result["verdict"], "supports_energy_thesis")
+
     def test_thin_data_yields_no_verdict(self) -> None:
         series = sample_data.generate_series()
         dates = sorted(series["qi_usd"])[:30]

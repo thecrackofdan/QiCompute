@@ -3,6 +3,14 @@
 Combines claim 1's energy content of Qi (joules per Qi, from current network
 difficulty and the reference GPU) with claim 3's measured joules per token.
 
+DERIVED, DECLINING QUANTITY - NOT A STABILITY CLAIM. Qi/token = Qi/joule x
+joules/token. The thesis predicts the first factor is stable; the second
+falls every year with hardware/software efficiency, so this index is
+expected to DECLINE over time. It is a spot quote for pricing today's job
+(claim 4), not a unit anyone should expect to hold its value. The index also
+prices only the ENERGY component of compute, under claim 3's measurement
+boundary (marginal GPU draw, PUE=1.0).
+
     python3 qi_index.py
 """
 from __future__ import annotations

@@ -1,3 +1,10 @@
+> # ⚠️ SHELVED PROTOTYPE DOCUMENT
+> This is the *old* marketplace-era thesis, preserved for history. It
+> assumes what the repository root now tests empirically. The current
+> thesis statement, with its scope and falsification conditions, lives in
+> the root `README.md`, `PREDICTIONS.md`, and `PAPER.md`. Do not quote this
+> document as the project's position.
+
 # QiCompute Thesis
 
 ## Core Claim

@@ -1,3 +1,11 @@
+> # ⚠️ SHELVED PROTOTYPE
+> Everything in `legacy/` is the shelved QiCompute marketplace prototype. It
+> was built **assuming the energy-money thesis that the repository root now
+> tests** — it is frozen historical material, runnable
+> (`cd legacy && python3 -m unittest`), and **not evidence for or against
+> the thesis**. Marketplace code belongs after the energy-money evidence,
+> not before it. Start at the repo root README.
+
 # QiCompute
 
 **Current focus: the crossover daemon** — a single process a Quai GPU miner installs that continuously compares what the GPU earns mining Quai against what it could earn serving open-model inference, and switches to whichever pays more. The marketplace, escrow, and committee layers from the v0.1.0 MVP remain in the repo (see below) but are out of the critical path.

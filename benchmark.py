@@ -1,13 +1,28 @@
-"""One-shot crossover benchmark: N minutes mining, N minutes inference, one table.
+"""One-shot benchmark: claim 3 joules/token measurement (plus the crossover table).
 
 Run this first on the target rig:
 
-    python3 benchmark.py --minutes 5
+    python3 benchmark.py --minutes 5 --skip-mining --store
+
+MEASUREMENT BOUNDARY (claim 3 methodology - report this with any number):
+joules/token here is MARGINAL GPU BOARD DRAW divided by token throughput.
+- Included: GPU board power as reported by NVML/nvidia-smi, averaged over
+  the inference phase.
+- Excluded: CPU, RAM, fans, storage, PSU conversion losses, networking.
+- Idle/baseline GPU power is NOT subtracted (the GPU is presumed dedicated
+  to the workload while serving).
+- PUE = 1.0 is assumed (home rig: no datacenter cooling/distribution
+  overhead). State a different PUE explicitly if measuring in a facility.
+- Batch size 1, single request stream; quantization and context length are
+  whatever the configured Ollama model serves - record the model tag.
+These choices can swing joules/token 2-5x; rows with different boundaries
+must not be pooled (PREDICTIONS.md P3). The boundary string is stored in
+each row's notes so the public dataset stays comparable.
 
 Mining phase starts your configured miner and reads live hashrate from its
-stdout; inference phase drives local Ollama and measures tokens/sec. Watts are
-sampled via nvidia-smi throughout. The table prices both paths per GPU-day
-using the same integer money math as the daemon.
+stdout; inference phase drives local Ollama and measures tokens/sec. Watts
+are sampled via nvidia-smi throughout. The crossover table prices both paths
+per GPU-day using the same integer money math as the daemon.
 """
 from __future__ import annotations
 
@@ -36,6 +51,10 @@ from daemon import (
 )
 from telemetry import GPUTelemetry
 
+
+MEASUREMENT_BOUNDARY = (
+    "marginal GPU board draw (NVML), no idle subtraction, excludes CPU/RAM/fans/PSU, PUE=1.0, batch=1"
+)
 
 MEASUREMENTS_SCHEMA = """
 CREATE TABLE IF NOT EXISTS measurements (
@@ -320,7 +339,7 @@ def main() -> int:
                 "avg_watts": inference["watts"],
                 "joules_per_token": inference["joules_per_token"],
                 "contributor": args.contributor or None,
-                "notes": args.notes or None,
+                "notes": f"{args.notes + '; ' if args.notes else ''}boundary: {MEASUREMENT_BOUNDARY}",
             }
             store_measurement(args.measurements_db, row)
             print(f"stored measurement {row['measurement_id']} in {args.measurements_db}")

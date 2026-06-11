@@ -15,6 +15,13 @@ reference need to change.
 
     python3 claim4_settlement.py --demo      # full job lifecycle, printed ledger + receipt
 
+PRICING SCOPE: the quote covers the ENERGY COMPONENT of the job only
+(Qi/joule x joules/token under claim 3's measurement boundary). It is not a
+full-cost price - hardware amortization, margin, and overhead are outside
+the thesis and outside this quote (README "Scope and Limitations"). The
+Qi/token rate used here is a spot derivation expected to decline over time;
+nothing in settlement assumes Qi/token stability.
+
 Flow: price an inference job in Qi at the joule-derived rate (claim 1's
 Qi/joule x claim 3's joules/token) -> escrow the quote from the customer ->
 record the served output (prompt hash + token counts only) -> settle pro-rata

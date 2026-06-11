@@ -21,5 +21,7 @@ jobs:
         run: python -m unittest -v
       - name: Sample pipeline runs end-to-end
         run: python reproduce.py --sample
+      - name: Crossover daemon tool suite
+        run: cd tools/crossover-daemon && python -m unittest
       - name: Legacy suite
         run: cd legacy && python -m unittest

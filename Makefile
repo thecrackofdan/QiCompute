@@ -1,4 +1,4 @@
-.PHONY: test test-legacy lint reproduce reproduce-sample fetch claim1 claim2 claim4 index benchmark daemon clean
+.PHONY: test test-legacy test-tools lint reproduce reproduce-sample fetch claim1 claim2 claim4 index benchmark daemon clean
 
 PYTHON ?= python3
 
@@ -7,6 +7,9 @@ test:
 
 test-legacy:
 	cd legacy && $(PYTHON) -m unittest
+
+test-tools:
+	cd tools/crossover-daemon && $(PYTHON) -m unittest
 
 lint:
 	$(PYTHON) -m compileall -q .
@@ -33,10 +36,10 @@ index:
 	$(PYTHON) qi_index.py
 
 benchmark:
-	$(PYTHON) benchmark.py --minutes 5 --skip-mining --store
+	$(PYTHON) benchmark.py --minutes 5 --store
 
 daemon:
-	$(PYTHON) daemon.py
+	cd tools/crossover-daemon && $(PYTHON) daemon.py
 
 clean:
 	find . -type d -name __pycache__ -prune -exec rm -rf {} +

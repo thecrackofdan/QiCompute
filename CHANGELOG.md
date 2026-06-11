@@ -4,6 +4,11 @@ All notable changes to QiCompute are documented here. This project follows the s
 
 ## [Unreleased]
 
+### Changed (Quai/Qi focus)
+
+- `benchmark.py` is now pure Quai/Qi measurement: claim 3 joules/token (unchanged boundary, storage, and schema) plus `--calibrate-rig`, which measures the rig's Quai hashrate and watts and prints the `reference_gpu` block for `research.yaml` (the claim-1 cost-model rig). The USD mining-vs-inference crossover table and all Vast.ai/RunPod market-rate references are gone from the root; benchmark config moved into a `benchmark:` section of `research.yaml`.
+- The crossover daemon (`daemon.py`, `report.py`, `test_daemon.py`, its `config.yaml`) moved to `tools/crossover-daemon/` with its own README: a working, tested, USD-denominated utility for Quai miners, explicitly outside the thesis and not evidence for or against it. CI runs its suite from that directory.
+
 ### Changed (research pivot)
 
 - The repo is now an empirical test of the energy-money thesis, structured bottom-up around four claims with a built-in null hypothesis and a neutrality contract (see README). The QiCompute marketplace prototype is shelved, frozen, and runnable under `legacy/` (its 241-test suite passes from that directory).

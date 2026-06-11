@@ -193,7 +193,8 @@ python3 reproduce.py --sample            # offline synthetic pipeline demo (labe
 python3 fetch_data.py                    # cache Qi/BTC prices+volume, difficulty, electricity into data/
 python3 claim1_peg.py
 python3 claim2_stability.py
-python3 benchmark.py --minutes 5 --skip-mining --store   # on a GPU box with Ollama
+python3 benchmark.py --minutes 5 --store # claim 3 measurement, on a GPU box with Ollama
+python3 benchmark.py --calibrate-rig     # measure your rig's Quai hashrate+watts for research.yaml
 python3 qi_index.py
 python3 claim4_settlement.py --demo
 
@@ -227,21 +228,24 @@ CSV mirror; analysis only ever reads the cache.
 
 ## Contributing measurements (claim 3)
 
-Run `python3 benchmark.py --minutes 5 --skip-mining --store --contributor your-handle`
+Run `python3 benchmark.py --minutes 5 --store --contributor your-handle`
 on your GPU and open a PR with the resulting `measurements.db` row (export
 coming as the dataset grows). Hardware diversity is the point — the
 joules/token decline across hardware generations is itself a prediction
 (P3).
 
-## What's in `legacy/`
+## What's in `tools/` and `legacy/`
 
-The shelved QiCompute marketplace prototype (worker daemon, LAN cluster,
-escrow/committee layers, its docs and its 241-test suite) — **shelved
-because it assumed the thesis this repo now tests**. It is frozen but
-runnable (`cd legacy && python3 -m unittest`) and is not evidence for or
-against anything here. The root also retains the crossover daemon
-(`daemon.py`, `report.py`) from the interim pivot: a practical tool for
-miners that switches a GPU between mining and inference by revenue.
+`tools/crossover-daemon/` is a practical utility for Quai miners — it
+auto-switches a GPU between mining Quai and serving inference by net
+revenue. It is USD-denominated operational tooling, kept working and tested
+but outside the thesis: see its README.
+
+`legacy/` is the shelved QiCompute marketplace prototype (worker daemon, LAN
+cluster, escrow/committee layers, its docs and its 241-test suite) —
+**shelved because it assumed the thesis this repo now tests**. It is frozen
+but runnable (`cd legacy && python3 -m unittest`) and is not evidence for or
+against anything here.
 
 ## License
 

@@ -1,46 +1,90 @@
-# Is Qi Energy Money? An Empirical Test
+# QiCompute — Is Qi Energy Money?
 
-This repository is a research project, not a product. It tests one thesis with
-public data and reproducible code, and it is structured so that a skeptic can
-clone it, run one command, and check whether the data supports the claims.
+## Vision
 
-## The thesis
+QiCompute asks whether Qi can become the unit of account for machine
+intelligence, because all machine intelligence begins as energy consumed by
+computation.
 
-**Qi is energy money — its value tracks the energy cost of its production.**
-Therefore, for compute whose marginal cost is almost purely energy
-(depreciated/sunk-cost GPUs, like a miner's idle 3090), Qi is the structurally
-correct unit of account: Qi-per-joule should be stable by construction, while
-USD or BTC pricing of the same compute inherits all the volatility of those
-denominations.
+Quai Network already has the pieces that matter: proof-of-work, real energy
+expenditure, and Qi. The thesis under test is that Qi may function as
+**energy money** — a monetary unit whose market value tracks the energy cost
+of its production. If that holds, then compute whose marginal cost is almost
+purely energy can be priced and settled in Qi more naturally than in USD,
+BTC, or arbitrary token pricing.
 
-**The corollary, which every chart here must respect:** "Qi per token" will
-NOT be stable — joules/token falls every year with hardware and software
-efficiency. Qi prices the energy **input** of compute, not the output. Any
-analysis that presents Qi/token as the stability claim is wrong, and outputs
-in this repo say so explicitly.
+What this project is **not**:
+
+- It is not AI securing consensus, and not AI replacing proof-of-work.
+- It is not proof-of-useful-work replacing Quai mining. Useful AI work
+  should be **paid for with Qi**, not used to replace Quai's proof-of-work.
+- It is not a generic decentralized AI marketplace. Marketplace code belongs
+  **after** the energy-money evidence, not before it.
+
+QiCompute does not need Quai consensus to verify AI inference. Quai secures
+the money layer; QiCompute measures and prices compute above it. The chain
+remains proof-of-work; AI compute exists above the chain as an application
+layer.
+
+## Architecture
+
+```
+Energy
+→ Quai Proof-of-Work
+→ Qi Energy-Money Thesis        (claim 1: does the market price track energy cost?)
+→ Compute Energy Measurement    (claim 3: measured joules/token on real hardware)
+→ Qi Compute Index              (joules/Qi × joules/token → Qi per million tokens)
+→ Qi Settlement Layer           (claim 4: escrow and settle inference in micro-Qi)
+```
+
+The one coherent story: Quai provides PoW and Qi → Qi may be energy money →
+compute is energy converted into useful work → AI inference is a measurable
+compute workload → joules/token provides physical ground truth → joules/Qi
+provides monetary energy content → together they derive Qi/token and
+Qi-per-million-tokens → settlement is the application, not the premise.
+
+## The thesis, precisely
+
+**Qi/joule stability IS the thesis. Qi/token stability is NOT.**
+Qi prices the energy **input** of computation, not the AI output. Joules per
+token falls every year as hardware and software improve, so Qi/token must
+fall too — that decline is a prediction of this project (PREDICTIONS.md P3),
+not a failure mode. Any analysis or chart in this repo that presents
+Qi/token as the stability claim is wrong by the repo's own standard.
+
+One more distinction the analysis enforces (see claim 1): Quai's protocol
+ties Qi emission to hashrate and difficulty **by construction** — that is
+mechanics, not evidence. The hypothesis under test is whether Qi's **market
+price** tracks energy cost. Protocol-level coupling is assumed; market-level
+coupling is measured.
 
 ## Neutrality contract
 
-Success is **not** "the thesis is confirmed" — success is a rigorous answer
-either way. If Qi turns out to trade like generic altcoin beta instead of
-tracking energy cost, that result gets published just as prominently; the
-null hypothesis (Qi ~ BTC) is built into the claim-1 analysis and can win.
-Concretely:
+**Success is not confirming the thesis. Success is producing a rigorous
+answer either way.** If Qi turns out to trade like generic altcoin beta
+instead of tracking energy cost, that result gets published just as
+prominently; the null hypothesis (Qi ~ BTC) is built into the claim-1
+analysis and can win. Concretely:
 
-- Analysis runs only from cached, inspectable data in `data/` — no
-  cherry-picked windows; the full available history is used.
+- Analysis runs only from cached, inspectable data in `data/` (JSON with
+  provenance + CSV mirrors) — no cherry-picked windows; the full available
+  history is used.
 - No smoothing anywhere; window parameters are explicit in `research.yaml`.
 - Below `verdict.min_samples` aligned observations, the output is
   `insufficient_data`, not a conclusion.
+- Below the pre-registered liquidity threshold (see Scope and Limitations),
+  the market price is treated as noise and the output says so —
+  "currently untestable at this liquidity" is a legitimate finding.
 - Synthetic fixtures exist only to test the pipeline (`data/sample/`,
   generated by `sample_data.py`); every output produced from them carries a
   SYNTHETIC banner and they are never evidence for or against anything.
 
 ## Why this ordering
 
-A marketplace priced in Qi is only as sound as the peg beneath it (the
-previous incarnation of this repo built the marketplace first; it assumed its
-own premise and is now shelved in `legacy/`). So we test bottom-up:
+A marketplace priced in Qi is only as sound as the peg beneath it. The
+previous incarnation of this repo built the marketplace first; **it assumed
+its own premise** and is now shelved in `legacy/`. The repository must test
+the thesis first:
 
 1. **Claim 1 is the foundation** — if it fails, everything above it is moot.
 2. **Claim 2 is the payoff** — the unit-of-account comparison.
@@ -51,13 +95,15 @@ own premise and is now shelved in `legacy/`). So we test bottom-up:
 
 ### Claim 1 — Peg tracking (`claim1_peg.py`)
 
-Does Qi's market price track its modeled energy cost of production?
-Difficulty → energy per Qi for a configurable reference GPU (default RTX
-3090: hashrate and watts in `research.yaml`) × configurable $/kWh gives the
-modeled cost. Qi daily log-returns are regressed on modeled-cost returns
-**and** on BTC returns (the null hypothesis). Output: overlay chart plus
-correlation/regression stats for both hypotheses, and a verdict:
-`supports_energy_thesis`, `energy_thesis_not_supported`, or
+Does Qi's **market price** track its modeled energy cost of production?
+(The protocol-level emission/difficulty coupling is true by design and is
+not what's being tested.) Difficulty → energy per Qi for a configurable
+reference GPU (default RTX 3090: hashrate and watts in `research.yaml`) ×
+configurable $/kWh gives the modeled cost. Qi daily log-returns are
+regressed on modeled-cost returns **and** on BTC returns (the null
+hypothesis). Output: overlay chart plus regression stats for both
+hypotheses, the liquidity context, and a verdict: `supports_energy_thesis`,
+`energy_thesis_not_supported`, `below_liquidity_threshold`, or
 `insufficient_data`.
 
 ### Claim 2 — Unit-of-account stability (`claim2_stability.py`)
@@ -66,19 +112,26 @@ Is energy-marginal compute more stably priced in Qi than in USD, BTC, or a
 regional electricity index? Two fixed bundles — 1 kWh of compute energy, and
 1M tokens of Llama-70B-class inference — are denominated in each unit through
 market exchange rates, and the chart compares rolling 30-day volatility.
-This is the money chart. Per the corollary, the series the thesis predicts is
-stable is **Qi/joule**; Qi/token is presented alongside it with the gap
-explained.
+This is the money chart. Per the thesis statement above, the series that is
+predicted stable is **Qi/joule**; Qi/token is presented alongside it with
+the gap explained.
 
 ### Claim 3 — Joules/token ground truth (`benchmark.py`)
 
 N minutes of real inference on a configurable Ollama model → tokens/sec,
-watts (NVML/nvidia-smi), joules/token, stored in SQLite with hardware
-metadata (`--store` → `measurements.db`). The schema includes GPU name,
-driver, VRAM, and a contributor field: the ambition is a public dataset of
-other people's GPUs. `qi_index.py` derives the live index — **the Qi cost of
-1M tokens today** — from claim 1's energy content of Qi × claim 3's measured
-joules/token.
+watts, joules/token, stored in SQLite with hardware metadata
+(`--store` → `measurements.db`). **Measurement boundary, stated explicitly:**
+the default measurement is *marginal GPU board draw* via NVML/nvidia-smi —
+it excludes CPU, RAM, fans, PSU losses, and assumes PUE = 1.0 (home rig, no
+datacenter cooling overhead). Idle baseline is not subtracted; batch size is
+1; quantization and context length are whatever the configured model serves.
+These choices can swing joules/token 2–5x, which is why every stored row
+carries the boundary in its notes and the schema records hardware metadata.
+The contributor field exists because the ambition is a public dataset of
+other people's GPUs. `qi_index.py` derives the live index — the Qi cost of
+1M tokens today — from claim 1's energy content of Qi × claim 3's measured
+joules/token. (Qi/token is a *derived, declining* quantity — see the thesis
+section.)
 
 ### Claim 4 — Settlement (`claim4_settlement.py`)
 
@@ -91,31 +144,53 @@ conservation checked, re-settlement provably a no-op — and **emits a
 receipt** to `results/`. The settlement layer is a **clearly-marked mock**
 (`settlement_layer: MOCK_LOCAL_SQLITE`); a Quai testnet port is pending
 tooling confirmation, and the receipt format isolates that change to one
-field plus a transaction reference.
+field plus a transaction reference. Settlement prices the **energy
+component** of a job, not its full cost (see Scope and Limitations).
 
-## Research documents
+## Scope and Limitations
 
-- **`PREDICTIONS.md`** — falsifiable numeric predictions with failure
-  conditions, written before results; candidate thresholds flagged for
-  review and frozen before interpretation.
-- **`OBJECTIONS.md`** — the steelmanned case against, including the
-  Qi/token confusion, regional electricity variance (the explicit global
-  marginal miner assumption), why-not-USD/futures, thin liquidity, and the
-  Bitcoin causality lesson.
-- **`PAPER.md`** — the paper skeleton: thesis, lineage (Ford's energy
-  dollar, Technocracy's energy certificates, Fuller's kWh currency), method,
-  results sections wired to `results/` artifacts.
+**"Energy-marginal compute", defined.** Compute for which electricity is the
+dominant marginal cost of one more unit of work: hardware that is already
+paid for (depreciated consumer GPUs, a miner's idle 3090), running on
+power the operator already buys. The thesis claims Qi is the natural unit
+for *that* compute. It does **not** claim Qi prices all compute cost.
+
+**Energy is not the whole cost of compute.** For modern datacenter GPUs,
+amortized capex often exceeds electricity. Rough methodology (refine with
+real quotes before quoting these numbers):
+
+| Hardware class | Capex amortized | Energy cost | Energy fraction of total |
+| --- | --- | --- | --- |
+| RTX 3090, owned outright (sunk), residential $0.12/kWh | ~$0 marginal | 0.35 kW × 24h × $0.12 ≈ $1.00/day | **~100% of marginal cost** |
+| RTX 3090, amortized $1,500 over 3 years | ≈ $1.37/day | ≈ $1.00/day | ~40–45% |
+| H100, amortized $30,000 over 4 years, datacenter $0.07/kWh, PUE 1.3 | ≈ $20.50/day | 0.7 kW × 1.3 × 24h × $0.07 ≈ $1.53/day | **~7%** |
+
+The thesis is strongest in the first row and weakest in the last. Claims and
+settlement in this repo price the energy component only.
+
+**Liquidity caveat.** Qi is thinly traded. The repo pre-registers a minimum
+liquidity threshold (`verdict.min_median_daily_volume_usd` in
+`research.yaml`): below it, claim 1 reports `below_liquidity_threshold`
+instead of a verdict, because a price series from a few thousand dollars of
+daily volume measures market-making noise, not an energy-money mechanism.
+If current liquidity is below the threshold, the repo says so plainly —
+that is a finding about testability, reported as such, not worked around.
+
+**Causality.** Even a strong claim-1 correlation cannot distinguish "energy
+cost anchors price" from "price drives hashrate drives modeled cost"
+(the Bitcoin lesson, OBJECTIONS.md (e)). Conclusion language is restricted
+to "tracks"/"fails to track".
 
 ## Run it
 
 ```bash
-pip install -r requirements.txt          # PyYAML; matplotlib for charts
+pip install -r requirements.txt          # PyYAML + matplotlib
 
 python3 reproduce.py                     # fetch real data, run all claims -> results/REPORT.md
 python3 reproduce.py --sample            # offline synthetic pipeline demo (labeled, not findings)
 
 # individual claims
-python3 fetch_data.py                    # cache Qi/BTC prices, difficulty, electricity into data/
+python3 fetch_data.py                    # cache Qi/BTC prices+volume, difficulty, electricity into data/
 python3 claim1_peg.py
 python3 claim2_stability.py
 python3 benchmark.py --minutes 5 --skip-mining --store   # on a GPU box with Ollama
@@ -127,30 +202,46 @@ python3 -m unittest                      # root test suites (claims + crossover 
 
 ## Data sources
 
-| Dataset | Proposed source | Why | Status |
+| Dataset | Source (confirmed) | Why | Notes |
 | --- | --- | --- | --- |
-| Qi price history | CoinGecko `market_chart?days=max` | free, no key, aggregates exchanges, longest continuous daily series since QUAI's early-2024 listing | **awaiting confirmation** — swap URLs in `research.yaml` to override |
-| BTC price history | CoinGecko (same endpoint family) | consistency with the Qi series | same |
-| Quai difficulty | JSON-RPC block-header sampling against `rpc.quai.network` (resumable cache); explorer charts endpoint configurable as an alternative | no explorer API dependency | verify the header field paths in `research.yaml` against a live node |
-| Electricity | EIA v2 API (free key, US industrial retail price default, configurable) | the regional electricity comparator for claim 2 | optional — flat fallback used and labeled without a key |
+| Qi price + volume history | CoinGecko `market_chart?days=max` | free, no key, aggregates exchanges, longest continuous daily series since QUAI's early-2024 listing | volume series feeds the liquidity gate |
+| BTC price history | CoinGecko (same endpoint family) | consistency with the Qi series | |
+| Quai difficulty | explorer charts endpoint when configured, automatic fallback to JSON-RPC block-header sampling against `rpc.quai.network` | deep history when available, no hard third-party dependency | verify the header field paths in `research.yaml` against a live node |
+| Electricity | EIA v2 API (free key, US industrial retail default, configurable) | the regional electricity comparator for claim 2 | optional — flat fallback used and labeled without a key |
 
-All fetches cache to `data/*.json` with source URL and timestamp; analysis
-only ever reads the cache.
+All fetches cache to `data/*.json` (with source URL and timestamp) plus a
+CSV mirror; analysis only ever reads the cache.
+
+## Research documents
+
+- **`PREDICTIONS.md`** — falsifiable numeric predictions with failure
+  conditions and the data conditions (liquidity, window) required to
+  evaluate each; every prediction labeled Qi/joule or Qi/token.
+- **`OBJECTIONS.md`** — the steelmanned case against, including the
+  Qi/token confusion, the by-construction objection, regional electricity
+  variance, energy as a minority of datacenter compute cost,
+  why-not-USD/futures, thin liquidity, and the Bitcoin causality lesson.
+- **`PAPER.md`** — the paper skeleton: thesis, lineage (Ford's energy
+  dollar, Technocracy's energy certificates, Fuller's kWh currency), method,
+  results sections wired to `results/` artifacts.
 
 ## Contributing measurements (claim 3)
 
 Run `python3 benchmark.py --minutes 5 --skip-mining --store --contributor your-handle`
 on your GPU and open a PR with the resulting `measurements.db` row (export
-coming as the dataset grows). Hardware diversity is the point.
+coming as the dataset grows). Hardware diversity is the point — the
+joules/token decline across hardware generations is itself a prediction
+(P3).
 
 ## What's in `legacy/`
 
 The shelved QiCompute marketplace prototype (worker daemon, LAN cluster,
-escrow/committee layers, its docs and its 241-test suite) — frozen but
-runnable: `cd legacy && python3 -m unittest`. The root also retains the
-crossover daemon (`daemon.py`, `report.py`) from the interim pivot: a
-practical tool for miners that switches a GPU between mining and inference by
-revenue, with `test_daemon.py` covering its switching logic.
+escrow/committee layers, its docs and its 241-test suite) — **shelved
+because it assumed the thesis this repo now tests**. It is frozen but
+runnable (`cd legacy && python3 -m unittest`) and is not evidence for or
+against anything here. The root also retains the crossover daemon
+(`daemon.py`, `report.py`) from the interim pivot: a practical tool for
+miners that switches a GPU between mining and inference by revenue.
 
 ## License
 

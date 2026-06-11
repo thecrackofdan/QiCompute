@@ -53,7 +53,8 @@ def main() -> int:
     verdict_path = results_dir / "claim1_stats.json"
     if verdict_path.exists():
         stats = json.loads(verdict_path.read_text(encoding="utf-8"))
-        sections.append(f"**Claim 1 verdict: `{stats.get('verdict')}`** - {stats.get('verdict_reason', '')}\n")
+        draft = "" if stats.get("thresholds_frozen") else " *(THRESHOLDS DRAFT - not citable)*"
+        sections.append(f"**Claim 1 verdict: `{stats.get('verdict')}`**{draft} - {stats.get('verdict_reason', '')}\n")
     for name in ("claim1.md", "claim2.md"):
         path = results_dir / name
         if path.exists():

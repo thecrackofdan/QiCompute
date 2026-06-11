@@ -159,6 +159,25 @@ class Claim1VerdictTest(unittest.TestCase):
 
         self.assertEqual(result["verdict"], "supports_energy_thesis")
 
+    def test_unfrozen_thresholds_stamp_draft_on_output(self) -> None:
+        from claim1_peg import render_markdown
+
+        series = sample_data.generate_series()
+        draft = claim1_analyze(
+            qi_usd=series["qi_usd"], btc_usd=series["btc_usd"], difficulty=series["difficulty"],
+            config=RESEARCH_CONFIG,
+        )
+        frozen_config = {**RESEARCH_CONFIG, "verdict": {**RESEARCH_CONFIG["verdict"], "thresholds_frozen": True}}
+        frozen = claim1_analyze(
+            qi_usd=series["qi_usd"], btc_usd=series["btc_usd"], difficulty=series["difficulty"],
+            config=frozen_config,
+        )
+
+        self.assertFalse(draft["thresholds_frozen"])
+        self.assertIn("THRESHOLDS DRAFT - not citable", render_markdown(draft, synthetic=False))
+        self.assertTrue(frozen["thresholds_frozen"])
+        self.assertNotIn("THRESHOLDS DRAFT", render_markdown(frozen, synthetic=False))
+
     def test_verdict_is_scale_invariant_to_kwh_but_levels_are_not(self) -> None:
         series = sample_data.generate_series()
         cheap = {**RESEARCH_CONFIG, "network": {"block_reward_qi": "3", "usd_per_kwh": "0.04"}}

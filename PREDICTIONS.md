@@ -11,6 +11,15 @@ are interpreted. Once frozen, these numbers do not move to fit the data.
 
 Status: **DRAFT — thresholds flagged for review (data not yet pulled).**
 
+**Freeze mechanics (enforced in code):** while `verdict.thresholds_frozen`
+is `false` in `research.yaml`, every claim-1 output is stamped
+"THRESHOLDS DRAFT — not citable". To freeze: replace every bracketed
+candidate below with a reviewed number — ideally reviewed by someone who
+*doubts* the thesis — set the flag to `true`, and commit. The freeze must
+happen **before** looking at real regression output; flipping the flag (or
+moving a number) after seeing results voids the pre-registration and the
+repo's neutrality claim with it.
+
 ## Why only Qi/joule predictions are central
 
 Qi prices the energy **input** of computation. Qi/joule is what the

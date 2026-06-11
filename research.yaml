@@ -73,6 +73,12 @@ claim2:
   joules_per_token_fallback: "0.5"
 
 verdict:
+  # PRE-REGISTRATION SWITCH. While false, every claim-1 output is stamped
+  # "THRESHOLDS DRAFT - not citable". Flip to true only after the bracketed
+  # candidates in PREDICTIONS.md are replaced with reviewed numbers
+  # (ideally by someone who doubts the thesis) - and never after looking at
+  # real regression output.
+  thresholds_frozen: false
   # Below this many aligned daily observations, claim 1 reports
   # "insufficient_data" rather than a verdict either way.
   min_samples: 90

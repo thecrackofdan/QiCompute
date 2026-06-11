@@ -4,6 +4,12 @@ All notable changes to QiCompute are documented here. This project follows the s
 
 ## [Unreleased]
 
+### Changed (rigor hardening)
+
+- Claim 1 gains ETH as a second crypto-beta null (fetched/cached/synthesized like BTC); the thesis must beat every null, and the verdict names the strongest one.
+- Honesty fix: the returns-based claim-1 verdict is scale-invariant to the cost model's constants ($/kWh, reference hashrate/watts cancel in log-returns), so the previously prescribed $/kWh "verdict robustness rerun" was vacuous. The docs now state the invariance (a stronger answer to the regional-electricity objection), and a level sensitivity is reported instead: median price-to-modeled-cost ratio at $0.04/$0.12/$0.20 per kWh, which any level claim must quote as a range.
+- Pre-registration is now enforced in code: until `verdict.thresholds_frozen` is set (after PREDICTIONS.md candidates are reviewed and frozen, before seeing real output), every claim-1 result is stamped "THRESHOLDS DRAFT - not citable" in the report, stats JSON, and reproduce summary.
+
 ### Changed (Quai/Qi focus)
 
 - `benchmark.py` is now pure Quai/Qi measurement: claim 3 joules/token (unchanged boundary, storage, and schema) plus `--calibrate-rig`, which measures the rig's Quai hashrate and watts and prints the `reference_gpu` block for `research.yaml` (the claim-1 cost-model rig). The USD mining-vs-inference crossover table and all Vast.ai/RunPod market-rate references are gone from the root; benchmark config moved into a `benchmark:` section of `research.yaml`.

@@ -162,6 +162,7 @@ def analyze(
         "null_regressions": null_regressions,
         "null_hypotheses": sorted(null_regressions),
         "min_samples_for_verdict": min_samples,
+        "thresholds_frozen": bool(config.get("verdict", {}).get("thresholds_frozen", False)),
         "liquidity": liquidity_stats(qi_volume_usd),
         "cost_level_sensitivity": cost_level_sensitivity(qi, cost, config),
     }
@@ -213,6 +214,13 @@ def render_markdown(result: dict[str, Any], *, synthetic: bool) -> str:
     lines = []
     if synthetic:
         lines += ["> **SYNTHETIC SAMPLE DATA - pipeline demonstration only, not a finding.**", ""]
+    if not result.get("thresholds_frozen", False):
+        lines += [
+            "> **THRESHOLDS DRAFT - not citable.** PREDICTIONS.md candidates are not yet frozen "
+            "(`verdict.thresholds_frozen: false` in research.yaml). Freeze them - before looking at "
+            "real regression output - and rerun before citing any verdict.",
+            "",
+        ]
     lines += [
         "# Claim 1: Peg Tracking (market level)",
         "",

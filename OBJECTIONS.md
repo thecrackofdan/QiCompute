@@ -26,17 +26,24 @@ repo's own standard.
 power runs ~$0.03/kWh in hydro-rich regions and $0.30+/kWh in parts of
 Europe; a peg to "energy cost" is a peg to nothing in particular.
 
-**Treatment here — the global marginal miner assumption, made explicit:**
-the cost model prices the *marginal* producer, not the average one. Mining
-migrates to cheap power; difficulty equilibrates so that the marginal miner
-operates near break-even at *their* electricity price. The model's
-`usd_per_kwh` in `research.yaml` is therefore a single global-marginal
-estimate (default $0.12, deliberately conservative), and the honest
-sensitivity check is to rerun claim 1 at $0.04 and $0.20 — if the verdict
-flips inside the plausible range of the marginal miner's power cost, the
-result is not robust and the report must say so. Regional spread is also why
-claim 2 uses a configurable electricity index rather than pretending one
-price exists.
+**Treatment here — the global marginal miner assumption, made explicit, and
+what it can actually contaminate:** the cost model prices the *marginal*
+producer, not the average one. Mining migrates to cheap power; difficulty
+equilibrates so that the marginal miner operates near break-even at *their*
+electricity price. The model's `usd_per_kwh` in `research.yaml` is a single
+global-marginal estimate (default $0.12, deliberately conservative).
+
+Crucially, the claim-1 **verdict is immune to this assumption by
+construction**: the $/kWh (and reference hashrate/watts) are constant
+multipliers on the cost series, and constant multipliers cancel in
+log-returns — in returns space the regression is effectively Qi versus
+difficulty, and no choice of electricity price can flip it. What the
+assumption *does* contaminate is every **level** claim — how far above or
+below modeled production cost Qi trades, joules/Qi, the Qi index, claim 2's
+bundles. Claim 1 therefore reports the median price-to-cost ratio at $0.04,
+$0.12, and $0.20 per kWh side by side, and any level statement must quote
+that range, not a single number. Regional spread is also why claim 2 uses a
+configurable electricity index rather than pretending one price exists.
 
 ## (c) Why not just USD, or electricity futures?
 

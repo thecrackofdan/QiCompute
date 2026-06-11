@@ -159,6 +159,30 @@ class Claim1VerdictTest(unittest.TestCase):
 
         self.assertEqual(result["verdict"], "supports_energy_thesis")
 
+    def test_verdict_is_scale_invariant_to_kwh_but_levels_are_not(self) -> None:
+        series = sample_data.generate_series()
+        cheap = {**RESEARCH_CONFIG, "network": {"block_reward_qi": "3", "usd_per_kwh": "0.04"}}
+        dear = {**RESEARCH_CONFIG, "network": {"block_reward_qi": "3", "usd_per_kwh": "0.20"}}
+
+        result_cheap = claim1_analyze(
+            qi_usd=series["qi_usd"], btc_usd=series["btc_usd"], difficulty=series["difficulty"], config=cheap
+        )
+        result_dear = claim1_analyze(
+            qi_usd=series["qi_usd"], btc_usd=series["btc_usd"], difficulty=series["difficulty"], config=dear
+        )
+
+        # constant $/kWh multipliers cancel in log-returns: identical verdict and fit
+        self.assertEqual(result_cheap["verdict"], result_dear["verdict"])
+        self.assertAlmostEqual(
+            result_cheap["returns_regression_qi_on_energy_cost"]["r_squared"],
+            result_dear["returns_regression_qi_on_energy_cost"]["r_squared"],
+            places=9,
+        )
+        # ...while the level ratio scales exactly with 1/kwh
+        cheap_ratio = result_cheap["cost_level_sensitivity"]["median_price_to_cost_ratio_by_usd_per_kwh"]["0.04"]
+        dear_ratio = result_dear["cost_level_sensitivity"]["median_price_to_cost_ratio_by_usd_per_kwh"]["0.20"]
+        self.assertAlmostEqual(cheap_ratio / dear_ratio, 5.0, places=2)
+
     def test_thin_data_yields_no_verdict(self) -> None:
         series = sample_data.generate_series()
         dates = sorted(series["qi_usd"])[:30]

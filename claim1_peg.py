@@ -25,9 +25,19 @@ Thin data is never smoothed into a conclusion.
 
 Cost model: difficulty (hashes/block) / block_reward (Qi/block) = hashes/Qi;
 divided by the reference GPU's hashrate gives seconds of work per Qi; times
-watts gives joules per Qi; times $/kWh gives modeled USD cost per Qi. The
-$/kWh is the explicit global-marginal-miner assumption (OBJECTIONS.md (b));
-rerun at 0.04 and 0.20 to check verdict robustness.
+watts gives joules per Qi; times $/kWh gives modeled USD cost per Qi.
+
+WHAT THE COST-MODEL CONSTANTS CAN AND CANNOT AFFECT (honesty note): the
+$/kWh, reference hashrate, and watts are constant multipliers on the cost
+series, and constant multipliers CANCEL in log-returns. The returns-based
+verdict is therefore invariant to them BY CONSTRUCTION - it cannot flip
+under a different global-marginal-miner assumption (OBJECTIONS.md (b)). In
+returns space, the only time-varying driver of modeled cost is network
+difficulty (and any block-reward change), so the regression is effectively
+"Qi returns vs difficulty returns". The constants DO matter for every
+LEVEL claim - joules/Qi, the price-to-cost ratio, the Qi index, claim 2's
+bundles - which is why the level sensitivity (price/cost ratio at $0.04,
+base, and $0.20 per kWh) is reported separately below.
 """
 from __future__ import annotations
 
@@ -68,6 +78,35 @@ def cost_series(difficulty_series: dict[str, float], config: dict[str, Any]) -> 
             usd_per_kwh=float(Decimal(str(network["usd_per_kwh"]))),
         )
         for date, difficulty in difficulty_series.items()
+    }
+
+
+def cost_level_sensitivity(
+    qi: list[float],
+    cost: list[float],
+    config: dict[str, Any],
+    kwh_scenarios: tuple[float, ...] = (0.04, 0.20),
+) -> dict[str, Any]:
+    """Median price-to-modeled-cost ratio under different $/kWh assumptions.
+
+    Levels, not returns: the returns verdict is scale-invariant to $/kWh (it
+    cancels in log-returns), so the global-marginal-miner assumption shows up
+    only here - in how far above or below modeled production cost Qi trades.
+    """
+    ratios = sorted(p / c for p, c in zip(qi, cost) if c > 0)
+    if not ratios:
+        return {"available": False}
+    n = len(ratios)
+    base_ratio = ratios[n // 2] if n % 2 else (ratios[n // 2 - 1] + ratios[n // 2]) / 2
+    base_kwh = float(Decimal(str(config["network"]["usd_per_kwh"])))
+    scenarios = {f"{base_kwh:.2f}": round(base_ratio, 4)}
+    for kwh in kwh_scenarios:
+        if kwh > 0:
+            scenarios[f"{kwh:.2f}"] = round(base_ratio * base_kwh / kwh, 4)
+    return {
+        "available": True,
+        "median_price_to_cost_ratio_by_usd_per_kwh": dict(sorted(scenarios.items())),
+        "note": "levels only; the returns-based verdict is invariant to $/kWh by construction",
     }
 
 
@@ -124,6 +163,7 @@ def analyze(
         "null_hypotheses": sorted(null_regressions),
         "min_samples_for_verdict": min_samples,
         "liquidity": liquidity_stats(qi_volume_usd),
+        "cost_level_sensitivity": cost_level_sensitivity(qi, cost, config),
     }
     if eth is not None:
         result["returns_regression_qi_on_eth"] = null_regressions["ETH"]
@@ -202,6 +242,22 @@ def render_markdown(result: dict[str, Any], *, synthetic: bool) -> str:
         result["verdict_reason"],
         "",
     ]
+    sensitivity = result.get("cost_level_sensitivity", {})
+    if sensitivity.get("available"):
+        ratios = sensitivity["median_price_to_cost_ratio_by_usd_per_kwh"]
+        lines += [
+            "## Cost-model constants: what they can and cannot affect",
+            "",
+            "The $/kWh and reference-rig constants cancel in log-returns, so the verdict above is "
+            "**invariant to the global-marginal-miner assumption by construction** (in returns space the "
+            "regression is effectively Qi vs difficulty). The assumption matters only for *level* claims - "
+            "how far above or below modeled production cost Qi trades:",
+            "",
+            "| $/kWh assumed | median price / modeled cost |",
+            "| --- | --- |",
+        ]
+        lines += [f"| {kwh} | {ratio}x |" for kwh, ratio in ratios.items()]
+        lines += [""]
     liquidity = result.get("liquidity", {})
     if liquidity.get("available"):
         lines += [

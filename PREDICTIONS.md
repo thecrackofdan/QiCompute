@@ -45,17 +45,26 @@ to difficulty) is true by construction and is not a prediction — see
 OBJECTIONS.md (f).
 
 **Prediction:** Over the full available daily history, Qi log-returns are
-better explained by modeled energy-cost returns than by BTC returns:
+better explained by modeled energy-cost returns than by **every**
+crypto-beta null (BTC and ETH):
 
-- R²(Qi ~ energy cost) > R²(Qi ~ BTC), and
+- R²(Qi ~ energy cost) > max(R²(Qi ~ BTC), R²(Qi ~ ETH)), and
 - energy-cost beta in **[0.5, 1.5]** with t-statistic > 2.
 
 **Candidate magnitudes (priors, to derive):** R²(energy) ≥ [0.2]; the gap
-R²(energy) − R²(BTC) ≥ [0.1].
+R²(energy) − max(null R²) ≥ [0.1].
 
-**Failure condition:** R²(Qi ~ BTC) ≥ R²(Qi ~ energy cost), or energy beta
+**Failure condition:** any null R² ≥ R²(Qi ~ energy cost), or energy beta
 ≤ 0, or |t| ≤ 2 on the full sample. Any of these means Qi trades as crypto
 beta over the observed window and claim 1 fails.
+
+**Scale-invariance note:** this returns-based prediction is invariant to
+the cost model's constants ($/kWh, reference hashrate/watts) — they cancel
+in log-returns, so no choice of global-marginal electricity price can flip
+it; in returns space the test is effectively Qi versus difficulty. Those
+constants matter only for *level* claims (joules/Qi, the price-to-cost
+ratio, the index), which claim 1 reports with a $0.04–$0.20/kWh range and
+which carry no pass/fail condition here.
 
 **Data conditions:** the evaluability preconditions above. Below either
 threshold the output is `insufficient_data` / `below_liquidity_threshold`,

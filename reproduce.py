@@ -42,7 +42,7 @@ def main() -> int:
         "claim4_settlement": run(["claim4_settlement.py", "--demo", "--db", "settlement.db", *sample_flag]),
     }
     print("\n=== claim 3 (joules/token ground truth) ===")
-    print("requires a local GPU + Ollama: python3 benchmark.py --minutes 5 --skip-mining --store")
+    print("requires a local GPU + Ollama: python3 benchmark.py --minutes 5 --store")
 
     results_dir = Path("results")
     results_dir.mkdir(exist_ok=True)

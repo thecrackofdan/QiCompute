@@ -46,24 +46,85 @@ def main() -> int:
 
     results_dir = Path("results")
     results_dir.mkdir(exist_ok=True)
+
     sections = []
-    if args.sample:
-        sections.append("> **SYNTHETIC SAMPLE DATA - pipeline demonstration only, not a finding.**\n")
+    # Single top-level header - individual claim markdowns carry their own
+    # SYNTHETIC / DRAFT banners, so we do not duplicate them here.
     sections.append(f"# Qi Energy-Money Claims Report\n\nGenerated {datetime.now(timezone.utc).isoformat()}\n")
+    if args.sample:
+        sections.append(
+            "> **SYNTHETIC SAMPLE DATA** - pipeline demonstration only, not a finding. "
+            "All results below are labeled accordingly.\n"
+        )
+
+    # Claim 1 one-line verdict summary (extracted from JSON to avoid duplicating
+    # the full claim1.md content in the header).
     verdict_path = results_dir / "claim1_stats.json"
     if verdict_path.exists():
         stats = json.loads(verdict_path.read_text(encoding="utf-8"))
         draft = "" if stats.get("thresholds_frozen") else " *(THRESHOLDS DRAFT - not citable)*"
-        sections.append(f"**Claim 1 verdict: `{stats.get('verdict')}`**{draft} - {stats.get('verdict_reason', '')}\n")
+        sections.append(
+            f"**Claim 1 verdict: `{stats.get('verdict')}`**{draft} "
+            f"- {stats.get('verdict_reason', '')}\n"
+        )
+
+    # Include the full markdown output for each claim. Individual claim scripts
+    # are responsible for their own SYNTHETIC / DRAFT banners; reproduce.py
+    # does not inject additional copies.
     for name in ("claim1.md", "claim2.md"):
         path = results_dir / name
         if path.exists():
             sections.append(path.read_text(encoding="utf-8"))
         else:
-            sections.append(f"## {name}\n\nnot produced this run (missing data - see console output)\n")
+            sections.append(
+                f"## {name}\n\n"
+                "not produced this run (missing data - see console output)\n"
+            )
+
+    # Qi index snapshot (claim 3 derived output)
+    index_path = results_dir / "qi_index.json"
+    if index_path.exists():
+        index = json.loads(index_path.read_text(encoding="utf-8"))
+        synthetic_note = " *(SYNTHETIC)*" if index.get("synthetic") else ""
+        sections.append(
+            "## Qi Index (Claim 3 derived)\n\n"
+            f"As of **{index.get('as_of', 'unknown')}**{synthetic_note}: "
+            f"1 Qi costs **{index.get('qi_cost', '?')} Qi** per "
+            f"{index.get('tokens', 1_000_000):,} tokens "
+            f"({index.get('joules_per_token_source', '')})\n"
+        )
+    else:
+        sections.append(
+            "## Qi Index (Claim 3 derived)\n\n"
+            "not produced this run - run `python3 benchmark.py --minutes 5 --store` "
+            "on a GPU to populate measurements.db, then rerun.\n"
+        )
+
+    # Claim 4 settlement demo receipt
+    receipts = sorted(results_dir.glob("receipt_*.json"))
+    if receipts:
+        receipt = json.loads(receipts[-1].read_text(encoding="utf-8"))
+        sections.append(
+            "## Claim 4: Settlement Demo\n\n"
+            f"Job `{receipt.get('job_id', '?')}` settled via `{receipt.get('settlement_layer', '?')}`. "
+            f"Quoted: {receipt.get('quoted_micro_qi', '?')} micro-Qi, "
+            f"settled: {receipt.get('settled_micro_qi', '?')} micro-Qi "
+            f"({receipt.get('fraction_served', '?')} served). "
+            f"Receipt hash: `{receipt.get('receipt_hash', '?')[:16]}...`\n"
+        )
+    else:
+        sections.append(
+            "## Claim 4: Settlement Demo\n\n"
+            "not produced this run (missing data - see console output)\n"
+        )
+
     failed = [name for name, code in statuses.items() if code != 0]
     if failed:
-        sections.append(f"\nIncomplete this run: {', '.join(failed)} (missing data or fetch failures - nothing was substituted).\n")
+        sections.append(
+            f"\n---\n\nIncomplete this run: {', '.join(failed)} "
+            "(missing data or fetch failures - nothing was substituted).\n"
+        )
+
     (results_dir / "REPORT.md").write_text("\n".join(sections), encoding="utf-8")
     print(f"\nreport: results/REPORT.md")
     return 0

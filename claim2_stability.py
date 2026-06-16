@@ -49,7 +49,17 @@ def latest_measured_joules_per_token(db_path: str = "measurements.db") -> float 
     return float(row[0]) if row else None
 
 
-def electricity_series(config: dict[str, Any], dates: list[str], *, sample: bool) -> tuple[dict[str, float], str]:
+def electricity_series(
+    config: dict[str, Any], dates: list[str], *, sample: bool, max_forward_fill_days: int = 90
+) -> tuple[dict[str, float], str]:
+    """Return a daily electricity price series for the given dates.
+
+    Monthly EIA data is forward-filled onto daily dates. If the most recent
+    cached month is more than `max_forward_fill_days` before the last
+    requested date, a stale-data warning is included in the source label
+    and printed to stderr so the user knows the claim 2 bundle prices are
+    extrapolated beyond the configured threshold.
+    """
     data_dir = Path("data/sample" if sample else config.get("data_dir", "data"))
     cached = read_cache(data_dir, "electricity_usd_per_kwh")
     if cached and cached.get("series"):
@@ -62,7 +72,30 @@ def electricity_series(config: dict[str, Any], dates: list[str], *, sample: bool
             if applicable:
                 series[date] = monthly[applicable[-1]]
         if series:
-            return series, "EIA cached series"
+            latest_month = known[-1]
+            last_date = dates[-1] if dates else latest_month
+            # Warn if the forward-fill gap exceeds the configured threshold
+            from datetime import date as _date
+            try:
+                gap_days = (_date.fromisoformat(last_date) - _date.fromisoformat(latest_month)).days
+            except ValueError:
+                gap_days = 0
+            if gap_days > max_forward_fill_days:
+                import sys
+                print(
+                    f"WARNING: electricity data last updated {latest_month}; "
+                    f"forward-filling {gap_days} days to {last_date} "
+                    f"(>{max_forward_fill_days}-day threshold). "
+                    "Re-run fetch_data.py with an EIA API key for fresher data.",
+                    file=sys.stderr,
+                )
+                source = (
+                    f"EIA cached series (STALE: last month {latest_month}, "
+                    f"forward-filled {gap_days}d to {last_date})"
+                )
+            else:
+                source = "EIA cached series"
+            return series, source
     flat = float(Decimal(str(config["electricity"]["fallback_usd_per_kwh"])))
     return {date: flat for date in dates}, f"flat fallback {flat} $/kWh (no EIA cache)"
 

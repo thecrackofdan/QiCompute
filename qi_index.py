@@ -83,6 +83,10 @@ def main() -> int:
         print("no difficulty cache; run `python3 fetch_data.py` first")
         return 1
     print(json.dumps(index, indent=2))
+    # Persist the snapshot so reproduce.py can include it in REPORT.md
+    results_dir = Path(config.get("results_dir", "results"))
+    results_dir.mkdir(parents=True, exist_ok=True)
+    (results_dir / "qi_index.json").write_text(json.dumps(index, indent=2), encoding="utf-8")
     return 0
 
 

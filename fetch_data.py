@@ -209,11 +209,20 @@ def main() -> int:
         ("difficulty", lambda: fetch_difficulty(config, data_dir)),
         ("electricity_usd_per_kwh", lambda: fetch_electricity(config, data_dir)),
     ]
+    # Difficulty in rpc_scan mode always runs so it can append new blocks to
+    # the existing cache (the scan resumes from the last cached date). In
+    # explorer mode the full history is re-fetched each time, so we respect
+    # the cache skip like every other dataset to avoid redundant network calls.
+    diff_mode = str(config.get("difficulty", {}).get("mode", "both"))
+    difficulty_always_runs = diff_mode in {"rpc_scan", "both"}
     failures = 0
     for name, job in jobs:
-        if not args.force and name != "difficulty" and read_cache(data_dir, name):
-            print(f"{name}: cached (use --force to refetch)")
-            continue
+        if not args.force and read_cache(data_dir, name):
+            if name == "difficulty" and difficulty_always_runs:
+                pass  # fall through: rpc_scan extends cache incrementally
+            else:
+                print(f"{name}: cached (use --force to refetch)")
+                continue
         try:
             print(job())
         except Exception as exc:

@@ -188,18 +188,49 @@ def analyze(
     else:
         strongest_null_name = max(null_regressions, key=lambda name: null_regressions[name]["r_squared"])
         strongest_null = null_regressions[strongest_null_name]
-        if energy_regression["r_squared"] > strongest_null["r_squared"] and energy_regression["beta"] > 0:
+        # Pre-registered thresholds from PREDICTIONS.md (enforced only when frozen):
+        # - R2(energy) > max(R2 of every null)
+        # - energy beta in [0.5, 1.5]
+        # - t-statistic of energy beta > 2
+        verdict_cfg = config.get("verdict", {})
+        beta_min = float(verdict_cfg.get("beta_min", 0.5))
+        beta_max = float(verdict_cfg.get("beta_max", 1.5))
+        t_min = float(verdict_cfg.get("t_beta_min", 2.0))
+        e_beta = energy_regression["beta"]
+        e_r2 = energy_regression["r_squared"]
+        e_t = energy_regression["t_beta"]
+        r2_beats_nulls = e_r2 > strongest_null["r_squared"]
+        beta_in_range = beta_min <= e_beta <= beta_max
+        t_significant = e_t > t_min
+        if r2_beats_nulls and beta_in_range and t_significant:
             result["verdict"] = "supports_energy_thesis"
             result["verdict_reason"] = (
-                f"energy-cost returns explain Qi returns (R2={energy_regression['r_squared']:.4f}) "
+                f"energy-cost returns explain Qi returns (R2={e_r2:.4f}) "
                 f"better than every null does (strongest: {strongest_null_name}, "
-                f"R2={strongest_null['r_squared']:.4f}), with positive beta."
+                f"R2={strongest_null['r_squared']:.4f}), with beta={e_beta:.4f} "
+                f"in [{beta_min}, {beta_max}] and t={e_t:.2f} > {t_min}."
             )
         else:
+            # Build a specific failure reason to aid diagnosis
+            failures = []
+            if not r2_beats_nulls:
+                failures.append(
+                    f"{strongest_null_name} R2={strongest_null['r_squared']:.4f} "
+                    f">= energy R2={e_r2:.4f}"
+                )
+            if not beta_in_range:
+                failures.append(
+                    f"beta={e_beta:.4f} outside pre-registered range [{beta_min}, {beta_max}]"
+                )
+            if not t_significant:
+                failures.append(
+                    f"t={e_t:.2f} <= pre-registered threshold {t_min}"
+                )
             result["verdict"] = "energy_thesis_not_supported"
             result["verdict_reason"] = (
-                f"{strongest_null_name} returns (R2={strongest_null['r_squared']:.4f}) explain Qi at "
-                f"least as well as energy-cost returns (R2={energy_regression['r_squared']:.4f}): "
+                f"{strongest_null_name} returns (R2={strongest_null['r_squared']:.4f}) "
+                f"explain Qi at least as well as energy-cost returns (R2={e_r2:.4f}). "
+                "Pre-registered failure condition(s) met: " + "; ".join(failures) + ". "
                 "Qi trades like crypto beta, not energy money, over this window."
             )
     result["series"] = {"dates": dates, "qi_usd": qi, "btc_usd": btc, "modeled_cost_usd": cost}

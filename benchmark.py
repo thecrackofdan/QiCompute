@@ -71,6 +71,7 @@ CREATE TABLE IF NOT EXISTS measurements (
 
 
 def gpu_metadata(nvidia_smi_path: str = "nvidia-smi") -> dict[str, Any]:
+    import sys
     try:
         result = subprocess.run(
             [nvidia_smi_path, "--query-gpu=name,driver_version,memory.total", "--format=csv,noheader,nounits"],
@@ -87,8 +88,25 @@ def gpu_metadata(nvidia_smi_path: str = "nvidia-smi") -> dict[str, Any]:
                 "driver_version": rows[0][1] if len(rows[0]) > 1 else None,
                 "vram_total_mb": float(rows[0][2]) if len(rows[0]) > 2 else None,
             }
-    except Exception:
-        pass
+    except FileNotFoundError:
+        print(
+            f"WARNING: nvidia-smi not found at '{nvidia_smi_path}'. "
+            "GPU metadata will be missing from the measurement row. "
+            "Install NVIDIA drivers or set benchmark.nvidia_smi_path in research.yaml.",
+            file=sys.stderr,
+        )
+    except subprocess.CalledProcessError as exc:
+        print(
+            f"WARNING: nvidia-smi exited with code {exc.returncode}: {exc.stderr.strip()}. "
+            "GPU metadata will be missing from the measurement row.",
+            file=sys.stderr,
+        )
+    except subprocess.TimeoutExpired:
+        print(
+            "WARNING: nvidia-smi timed out after 5 seconds. "
+            "GPU metadata will be missing from the measurement row.",
+            file=sys.stderr,
+        )
     return {"gpu_name": None, "gpu_count": None, "driver_version": None, "vram_total_mb": None}
 
 

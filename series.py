@@ -83,7 +83,15 @@ def ols(xs: list[float], ys: list[float]) -> dict[str, Any]:
     dof = n - 2
     sigma2 = ss_res / dof if dof > 0 else 0.0
     se_beta = math.sqrt(sigma2 / sxx) if sxx > 0 and sigma2 > 0 else 0.0
-    t_beta = beta / se_beta if se_beta > 0 else 0.0
+    # Perfect or near-perfect fit: sigma2 -> 0 implies infinite t-statistic.
+    # Return float('inf') / float('-inf') so downstream verdict logic can
+    # correctly evaluate t_beta > threshold without a false zero.
+    if se_beta > 0:
+        t_beta = beta / se_beta
+    elif beta != 0.0:
+        t_beta = math.copysign(float("inf"), beta)
+    else:
+        t_beta = 0.0
     return {
         "n": n,
         "beta": round(beta, 8),

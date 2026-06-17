@@ -1,9 +1,8 @@
 """Claim 3 measurement: joules/token on this rig, plus reference-rig calibration.
 
     python3 benchmark.py --minutes 5 --store          # measure inference, store to measurements.db
-    python3 benchmark.py --calibrate-rig --minutes 5  # measure KawPoW (GPU) hashrate+watts
-    python3 benchmark.py --calibrate-rig --algo sha256 --minutes 5  # measure SHA-256 ASIC rig
-    python3 benchmark.py --calibrate-rig --algo scrypt --minutes 5  # measure Scrypt ASIC rig
+    python3 benchmark.py --calibrate-rig --minutes 5  # measure KawPoW hashrate+watts (GPU)
+    python3 benchmark.py --calibrate-rig --algo twp   # measure TWP receipts/sec via InferenceGemm
 
 MEASUREMENT BOUNDARY (claim 3 methodology - report this with any number):
 joules/token here is MARGINAL GPU BOARD DRAW divided by token throughput.
@@ -15,26 +14,23 @@ joules/token here is MARGINAL GPU BOARD DRAW divided by token throughput.
 - PUE = 1.0 is assumed (home rig: no datacenter cooling/distribution
   overhead). State a different PUE explicitly if measuring in a facility.
 - Batch size 1, single request stream; quantization and context length are
-  whatever the configured Ollama model serves - record the model tag.
+  whatever the configured model serves - record the model tag.
 These choices can swing joules/token 2-5x; rows with different boundaries
 must not be pooled (PREDICTIONS.md P3). The boundary string is stored in
 each row's notes so the public dataset stays comparable.
 
---calibrate-rig runs the configured miner instead, parses live hashrate from
-its stdout, samples watts, and prints the reference block to paste into
-research.yaml. Use --algo to specify the hardware class:
+--calibrate-rig measures the GPU rig and prints the reference block to paste
+into research.yaml. Use --algo to specify the mode:
 
   --algo kawpow  (default) KawPoW GPU miner -> reference_gpu block
-  --algo sha256            SHA-256 ASIC miner -> soap.reference_sha256 block
-  --algo scrypt            Scrypt ASIC miner -> soap.reference_scrypt block
+  --algo twp               TWP inference via InferenceGemm -> soap.reference_twp block
 
-The soap.reference_sha256 and soap.reference_scrypt blocks feed the
-multi-algorithm energy model in claim1_peg.py (effective_difficulty).
-The energy_factor for each algo is derived from the measured J/hash relative
-to the KawPoW reference rig.
+Under the TWP native merge-mining model, the GPU IS the miner: InferenceGemm
+submits Tensor Work Proof receipts as Quai workshares and earns Qi rewards.
+No ASIC hardware is required for the inference layer.
 
 This script measures physics only (tokens/sec, watts, joules/token,
-hashes/sec). Qi-denominated derivations live in qi_index.py; this script
+receipts/sec). Qi-denominated derivations live in qi_index.py; this script
 quotes no fiat prices.
 """
 from __future__ import annotations
@@ -211,9 +207,14 @@ def _run_igemm_phase(bench_cfg: dict[str, Any], minutes: float, sampler: WattSam
     """Drive InferenceGemm (vLLM-compatible) endpoint for the given duration.
 
     InferenceGemm serves an OpenAI-compatible /v1/chat/completions endpoint.
-    Each response includes a Tensor Work Receipt in the response headers or body
-    (implementation-dependent on harness version). This function measures
-    throughput in receipt-mode and returns the overhead fraction vs baseline.
+    Each response includes a Tensor Work Receipt — the proof that a specific
+    model ran specific weights and produced a specific output. This receipt is
+    submitted as a native Quai workshare under the TWP merge-mining algorithm,
+    earning Qi rewards. The GPU IS the miner.
+
+    This function measures throughput in receipt-mode and returns the overhead
+    fraction vs baseline (pre-registered ceiling: 10%, P3b in PREDICTIONS.md).
+    DS reference: 2.98% overhead on Qwen2.5-3B W8A8.
     """
     url = str(bench_cfg.get("igemm_url", "http://127.0.0.1:8000")).rstrip("/") + "/v1/chat/completions"
     model = str(bench_cfg.get("igemm_model", "dominant-strategies/quai-igemm-qwen2.5-3b-w8a8-research"))
@@ -239,11 +240,8 @@ def _run_igemm_phase(bench_cfg: dict[str, Any], minutes: float, sampler: WattSam
             break
         choices = data.get("choices", [])
         if choices:
-            content = choices[0].get("message", {}).get("content", "")
-            token_count = len(content.split())  # rough proxy; replace with usage.completion_tokens
             usage = data.get("usage", {})
-            token_count = int(usage.get("completion_tokens", token_count))
-            # InferenceGemm may embed receipt status in a custom field
+            token_count = int(usage.get("completion_tokens", len(choices[0].get("message", {}).get("content", "").split())))
             if data.get("tensor_work_receipt") or data.get("twr_accepted"):
                 receipts_accepted += 1
             elapsed = data.get("elapsed_seconds", 1.0)
@@ -283,9 +281,8 @@ def run_inference_phase(bench_cfg: dict[str, Any], minutes: float, telemetry: GP
 
 # ---------------------------------------------------------------------------
 # Per-algorithm calibration config keys in research.yaml
-# kawpow: benchmark.miner_command / benchmark.hashrate_regex (existing)
-# sha256: soap.sha256_miner_command / soap.sha256_hashrate_regex
-# scrypt: soap.scrypt_miner_command / soap.scrypt_hashrate_regex
+# kawpow: benchmark.miner_command / benchmark.hashrate_regex (GPU KawPoW)
+# twp:    uses igemm backend directly — no external miner command needed
 # ---------------------------------------------------------------------------
 _ALGO_CONFIG: dict[str, dict[str, Any]] = {
     "kawpow": {
@@ -297,41 +294,12 @@ _ALGO_CONFIG: dict[str, dict[str, Any]] = {
         "yaml_block": "reference_gpu",
         "hashrate_label": "hashrate_hps",
     },
-    "sha256": {
-        "command_key": ("soap", "sha256_miner_command"),
-        "regex_key": ("soap", "sha256_hashrate_regex"),
-        "multiplier_key": ("soap", "sha256_hashrate_unit_multiplier"),
-        "default_regex": r"([0-9]+(?:\.[0-9]+)?)\s*[Tt][Hh]/s",
-        "default_multiplier": 1_000_000_000_000,  # TH/s -> H/s
-        "yaml_block": "soap.reference_sha256",
-        "hashrate_label": "hashrate_hps",
-    },
-    "scrypt": {
-        "command_key": ("soap", "scrypt_miner_command"),
-        "regex_key": ("soap", "scrypt_hashrate_regex"),
-        "multiplier_key": ("soap", "scrypt_hashrate_unit_multiplier"),
-        "default_regex": r"([0-9]+(?:\.[0-9]+)?)\s*[Gg][Hh]/s",
-        "default_multiplier": 1_000_000_000,  # GH/s -> H/s
-        "yaml_block": "soap.reference_scrypt",
-        "hashrate_label": "hashrate_hps",
-    },
-    # Ravencoin KawPoW: same algorithm as Quai, energy_factor = 1.0 by definition.
-    # Useful to confirm the reference rig numbers match when pointed at RVN stratum.
-    "rvn": {
-        "command_key": ("soap", "rvn_miner_command"),
-        "regex_key": ("soap", "rvn_hashrate_regex"),
-        "multiplier_key": ("soap", "rvn_hashrate_unit_multiplier"),
-        "default_regex": r"([0-9]+(?:\.[0-9]+)?)\s*[Mm][Hh]/s",
-        "default_multiplier": 1_000_000,  # MH/s -> H/s
-        "yaml_block": "soap.reference_rvn",
-        "hashrate_label": "hashrate_hps",
-    },
-    # TWP inference: the GPU runs InferenceGemm and emits Tensor Work Receipts.
-    # 'hashrate' here is receipts/sec (tok/s / tokens_per_receipt).
+    # TWP inference: the GPU runs InferenceGemm and emits Tensor Work Receipts
+    # as native Quai workshares. 'hashrate' = receipts/sec (tok/s / tokens_per_receipt).
     # Calibration uses the igemm backend directly (no external miner command needed).
     # energy_factor = (watts / receipts_per_sec) / (ref_gpu_watts / ref_gpu_kawpow_hps)
     "twp": {
-        "command_key": ("soap", "twp_miner_command"),  # empty list -> igemm backend path
+        "command_key": ("soap", "twp_miner_command"),
         "regex_key": ("soap", "twp_hashrate_regex"),
         "multiplier_key": ("soap", "twp_hashrate_unit_multiplier"),
         "default_regex": r"([0-9]+(?:\.[0-9]+)?)\s*receipts?/s",
@@ -360,10 +328,10 @@ def run_rig_calibration(
 ) -> dict[str, Any]:
     """Measure this rig's hashrate and watts for the given algorithm.
 
-    algo: 'kawpow' (default, GPU KawPoW) | 'sha256' (ASIC SHA-256) | 'scrypt' (ASIC Scrypt)
-          'rvn' (Ravencoin KawPoW, energy_factor=1.0) | 'twp' (TWP inference receipts/sec)
+    algo: 'kawpow' (default, GPU KawPoW mining) | 'twp' (TWP inference receipts/sec)
 
     For 'twp', the igemm backend is used directly (no external miner command needed).
+    The GPU running InferenceGemm IS the miner under Quai's TWP native algorithm.
     Returns a dict with hashrate_hps, watts, measured, and algo.
     Also prints the research.yaml block to paste in.
     """
@@ -378,14 +346,15 @@ def run_rig_calibration(
     if algo == "twp" and not command:
         bench_cfg = config.get("benchmark", {})
         igemm_url = str(bench_cfg.get("igemm_url", "http://localhost:8000"))
-        igemm_model = str(bench_cfg.get("igemm_model", ""))
+        igemm_model = str(bench_cfg.get("igemm_model", "dominant-strategies/quai-igemm-qwen2.5-3b-w8a8-research"))
         print(f"calibrate-rig (twp): measuring InferenceGemm receipts/sec for {minutes:.1f} minutes...")
         print(f"  endpoint: {igemm_url}  model: {igemm_model or '(from config)'}")
         sampler = WattSampler(telemetry)
         sampler.start()
-        result = _run_igemm_phase(igemm_url, igemm_model, int(minutes * 60))
+        raw = _run_igemm_phase(bench_cfg, minutes, sampler)
         watts = sampler.stop()
-        receipts_per_sec = result.get("receipts_per_sec", 0.0)
+        rates = raw.get("rates", [])
+        receipts_per_sec = sum(rates) / len(rates) if rates else 0.0
         if receipts_per_sec <= 0:
             print("calibrate-rig (twp): igemm backend returned no receipts — is the server running?")
             return {"hashrate_hps": 0, "watts": watts, "measured": False, "algo": algo}
@@ -460,7 +429,7 @@ def main() -> int:
         "--algo",
         default="kawpow",
         choices=list(_ALGO_CONFIG),
-        help="Algorithm to calibrate: kawpow (GPU KawPoW), sha256 (ASIC SHA-256), scrypt (ASIC Scrypt), rvn (Ravencoin KawPoW, energy_factor=1.0), twp (TWP inference receipts/sec via igemm backend)",
+        help="Algorithm to calibrate: kawpow (GPU KawPoW mining) | twp (TWP inference receipts/sec via InferenceGemm — the GPU IS the miner)",
     )
     parser.add_argument("--store", action="store_true", help="Append the inference measurement to measurements.db (claim 3 dataset)")
     parser.add_argument("--measurements-db", default="measurements.db")
@@ -486,23 +455,7 @@ def main() -> int:
                 print(f"  name: \"{gpu_name}\"")
                 print(f"  hashrate_hps: {rig['hashrate_hps']}")
                 print(f"  watts: {int(round(rig['watts']))}")
-            else:
-                # SHA-256 or Scrypt ASIC: print soap sub-block
-                # Also compute energy_factor relative to KawPoW reference
-                kw_ref = config.get("reference_gpu", {})
-                kw_hps = float(kw_ref.get("hashrate_hps", 45_000_000))
-                kw_watts = float(kw_ref.get("watts", 300))
-                kw_j_per_hash = kw_watts / kw_hps if kw_hps > 0 else 0.0
-                asic_j_per_hash = rig["watts"] / rig["hashrate_hps"] if rig["hashrate_hps"] > 0 else 0.0
-                energy_factor = asic_j_per_hash / kw_j_per_hash if kw_j_per_hash > 0 else 0.0
-                print(f"soap:")
-                print(f"  reference_{args.algo}:")
-                print(f"    name: \"measured-{args.algo}-asic\"")
-                print(f"    hashrate_hps: {rig['hashrate_hps']}")
-                print(f"    watts: {int(round(rig['watts']))}")
-                print(f"  algo_energy_factors:")
-                print(f"    {args.algo}: {energy_factor:.6e}  # measured J/hash / KawPoW J/hash")
-                print(f"    # Update this in soap.algo_energy_factors to override the default estimate.")
+            # TWP calibration output is handled inside run_rig_calibration directly
         return 0
 
     inference = run_inference_phase(bench_cfg, args.minutes, telemetry)
@@ -519,7 +472,6 @@ def main() -> int:
         receipts = inference.get("receipts_accepted", 0)
         overhead_threshold = float(bench_cfg.get("twp_overhead_threshold", 0.10))
         print(f"  receipts accepted: {receipts}")
-        # TWP overhead note: compare to Dominant Strategies reference (2.98% on 3B)
         print(f"  TWP overhead threshold (P3b): <= {overhead_threshold*100:.0f}% of baseline tok/s")
         print(f"  Reference (DS quai-igemm-qwen2.5-3b-w8a8): 2.98% overhead, 1 accepted receipt")
     print("  Qi-denominated index: python3 qi_index.py")

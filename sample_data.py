@@ -36,15 +36,15 @@ def generate_series() -> dict[str, dict[str, float]]:
     electricity: dict[str, float] = {}
     token_choice_qi_fraction: dict[str, float] = {}
     exchange_rate_qi_per_quai: dict[str, float] = {}
-    # SOAP workshare difficulty series (synthetic)
-    # kawpow_ws: KawPoW workshares below block threshold (GPU miners)
-    # soap_ws: SOAP workshares (SHA-256 / Scrypt ASICs) - introduced Dec 2025
-    # We model SOAP workshares as starting small and growing as ASIC miners
-    # discover the merge-mining opportunity. The soap_ws difficulty is in
-    # SHA-256/Scrypt units; after energy normalisation in claim1_peg.py the
-    # contribution to effective difficulty is small but non-zero.
+    # Workshare difficulty series (synthetic)
+    # kawpow_ws: KawPoW GPU workshares below block difficulty threshold
+    # twp_ws: TWP (Tensor Work Proof) inference workshares - native Quai algorithm
+    # We model TWP workshares as starting small and growing as inference nodes
+    # come online. The twp_ws difficulty is in TWP receipt units; after energy
+    # normalisation in claim1_peg.py the contribution to effective difficulty
+    # is calibrated via benchmark.py --calibrate-rig --algo twp.
     workshare_difficulty_kawpow_ws: dict[str, float] = {}
-    workshare_difficulty_soap_ws: dict[str, float] = {}
+    workshare_difficulty_twp_ws: dict[str, float] = {}
     base_difficulty = 1.0e12
     base_btc = 60_000.0
     base_eth = 3_000.0
@@ -52,8 +52,8 @@ def generate_series() -> dict[str, dict[str, float]]:
     # slowly with noise.  The exchange rate responds with a negative lag:
     # when qi_fraction is low, the rate rises (controller restores equilibrium).
     base_er = 13.26  # Qi per QUAI at 1e18 scale (observed on-chain 2026-06)
-    # SOAP launched ~day 45 in our synthetic window (Dec 2025 equivalent)
-    soap_launch_day = 45
+    # TWP inference workshares: model adoption starting day 45
+    twp_launch_day = 45
     for i, day in enumerate(dates):
         # difficulty trends up with a fast wave so energy-cost returns carry
         # real daily variance; deterministic pseudo-noise from sin
@@ -73,18 +73,17 @@ def generate_series() -> dict[str, dict[str, float]]:
         # KawPoW workshares: ~3-5 per block, difficulty ~10% of block difficulty
         kw_ws = difficulty[day] * 0.10 * (3.0 + 1.5 * math.sin(i / 4.0))
         workshare_difficulty_kawpow_ws[day] = max(0.0, kw_ws)
-        # SOAP workshares: zero before launch, then growing adoption curve
-        # SHA-256 difficulty is ~1e8x larger than KawPoW difficulty per hash,
-        # but energy_factor normalises it down; synthetic values are in
-        # SHA-256 hash units (so they look large but contribute small energy)
-        if i < soap_launch_day:
-            workshare_difficulty_soap_ws[day] = 0.0
+        # TWP inference workshares: zero before launch, then growing adoption curve
+        # Difficulty in TWP receipt units (one receipt per inference run).
+        # Energy factor calibrated via benchmark.py --calibrate-rig --algo twp.
+        if i < twp_launch_day:
+            workshare_difficulty_twp_ws[day] = 0.0
         else:
-            days_since_launch = i - soap_launch_day
-            # Logistic adoption curve: grows from 0 to ~5e19 (Bitcoin-scale SHA-256 diff)
+            days_since_launch = i - twp_launch_day
+            # Logistic adoption curve: grows from 0 as inference nodes come online
             adoption = 1.0 / (1.0 + math.exp(-0.05 * (days_since_launch - 30)))
-            soap_ws = 5.0e19 * adoption * (1.0 + 0.15 * math.sin(i / 5.0))
-            workshare_difficulty_soap_ws[day] = max(0.0, soap_ws)
+            twp_ws = difficulty[day] * 0.05 * adoption * (1.0 + 0.15 * math.sin(i / 5.0))
+            workshare_difficulty_twp_ws[day] = max(0.0, twp_ws)
     # modeled cost per Qi for the reference rig in research.yaml
     # (45 MH/s, 300 W, 3 Qi/block, $0.12/kWh)
     cost = {
@@ -110,7 +109,7 @@ def generate_series() -> dict[str, dict[str, float]]:
         "token_choice_qi_fraction": token_choice_qi_fraction,
         "exchange_rate_qi_per_quai": exchange_rate_qi_per_quai,
         "workshare_difficulty_kawpow_ws": workshare_difficulty_kawpow_ws,
-        "workshare_difficulty_soap_ws": workshare_difficulty_soap_ws,
+        "workshare_difficulty_twp_ws": workshare_difficulty_twp_ws,
     }
 
 

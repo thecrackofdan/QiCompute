@@ -1,64 +1,44 @@
 # QiCompute Hardware Testing Guide
 
-This guide covers the exact test procedures, required data, and expected outputs for running the QiCompute pipeline against a real, multi-algorithm hardware stack.
+This guide covers the exact test procedures, required data, and expected outputs for running the QiCompute pipeline against real GPU hardware.
 
-If you are running a solo Quai node and possess a mix of GPU and ASIC hardware, you can generate the real-world data required to move the project's claims from synthetic models to empirical truth.
+QiCompute's inference layer is entirely GPU-based. Under Quai's TWP (Tensor Work Proof) native merge-mining algorithm, the GPU running InferenceGemm **is** the miner — Tensor Work Receipts are submitted as Quai workshares and earn Qi rewards directly. No ASIC hardware is required.
 
 ## The Hardware Stack & Roles
 
-This guide is tailored for the following setup:
-
 | Hardware | Algorithm | Role in QiCompute |
 |---|---|---|
-| **Avalon Q** | SHA-256 | SOAP workshare baseline. Feeds Claim 7 (ASIC adoption) and calibrates Claim 6 (dual-revenue). |
-| **2x BitAxe** | SHA-256 | Lightweight SOAP nodes. Used to measure per-unit workshare frequency. |
-| **2x Home DG1** | Scrypt | SOAP Scrypt workshare baseline. Feeds the multi-algo energy model (Claim 1). |
-| **2x RTX 3080** | KawPoW | Primary mining & inference. Feeds Claim 1 (difficulty) and Claim 3 (joules/token). |
-| **RTX 3090** | KawPoW | The reference rig. Anchors the Claim 3 inference baseline and Claim 6 crossover daemon. |
+| **RTX 3090** | KawPoW + TWP | Reference rig. Anchors Claim 3 inference baseline and Claim 6 dual-revenue model. |
+| **2x RTX 3080** | KawPoW + TWP | Secondary rigs. Validate that joules/token is stable across GPU tiers. |
 
 ---
 
-## Phase 1: Calibrating the Energy Model (ASICs)
+## Phase 1: Calibrate the KawPoW Reference Rig
 
-Currently, `research.yaml` uses spec-sheet estimates for SHA-256 and Scrypt ASIC energy efficiency. Your ASICs will replace these estimates with real, measured data.
+First, measure the actual KawPoW hashrate and wattage of the 3090 to replace the spec-sheet defaults in `research.yaml`.
 
-### 1. SHA-256 Calibration (Avalon Q)
-
-You need to measure the actual hashrate and wattage of the Avalon Q while it is hashing.
-
-1. Ensure the Avalon Q is running and accessible.
-2. Edit `research.yaml` to include your miner command and hashrate regex in the `sha256_miner_command` and `sha256_hashrate_regex` fields.
-3. Run the calibration script:
+1. Edit `research.yaml` and set `benchmark.miner_command` to your KawPoW miner invocation (e.g., T-Rex, lolMiner, or TeamRedMiner pointed at your local node stratum).
+2. Run the calibration:
    ```bash
-   python3 benchmark.py --calibrate-rig --algo sha256 --minutes 5
+   python3 benchmark.py --calibrate-rig --algo kawpow --minutes 5
    ```
 
 **Expected Output:**
-The script will output a YAML block looking something like this:
-```yaml
-soap.reference_sha256:
-  hashrate_hps: 110000000000000  # 110 TH/s
-  watts: 3300
 ```
-*Action:* Paste this block into the `soap:` section of `research.yaml`, replacing the stub. The script will also calculate and print the `algo_energy_factors.sha256` value — update that field in `research.yaml` as well.
+calibrate-rig (kawpow): running [...] for 5.0 minutes...
 
-### 2. Scrypt Calibration (Home DG1)
+Measured kawpow reference rig - paste into research.yaml under 'reference_gpu':
+reference_gpu:
+  name: "RTX 3090"
+  hashrate_hps: 47200000
+  watts: 295
+```
 
-Repeat the process for the Scrypt ASIC.
-
-1. Edit `research.yaml` to include your Scrypt miner command and regex.
-2. Run the calibration script:
-   ```bash
-   python3 benchmark.py --calibrate-rig --algo scrypt --minutes 5
-   ```
-
-**Expected Output:**
-A YAML block for `soap.reference_scrypt`.
-*Action:* Paste this into `research.yaml` and update `algo_energy_factors.scrypt`.
+*Action:* Paste this block into the `reference_gpu:` section of `research.yaml`, replacing the defaults.
 
 ---
 
-## Phase 2: Calibrating Inference (GPUs)
+## Phase 2: Calibrate Inference (GPU)
 
 Claim 3 asserts that inference can be priced consistently in joules. We need to measure the actual joules per token on your GPUs.
 
@@ -67,11 +47,11 @@ There are two supported inference backends:
 | Backend | Setup | Use Case |
 |---|---|---|
 | **Ollama** (`backend: ollama`) | `ollama pull qwen2.5:3b` | Fast setup, unverified inference |
-| **InferenceGemm** (`backend: igemm`) | See below | Production — emits Tensor Work Receipts |
+| **InferenceGemm** (`backend: igemm`) | See below | Production — emits Tensor Work Receipts (TWP) |
 
-For production Quai inference, the InferenceGemm backend is preferred because it ties joules/token measurements to cryptographically verifiable Tensor Work Receipts. Dominant Strategies has published the reference checkpoint at [huggingface.co/dominant-strategies/quai-igemm-qwen2.5-3b-w8a8-research](https://huggingface.co/dominant-strategies/quai-igemm-qwen2.5-3b-w8a8-research), with a measured TWP overhead of only **2.98%** — meaning receipt-mode inference is essentially the same cost as unverified inference.
+For production Quai inference, the InferenceGemm backend is required because it ties joules/token measurements to cryptographically verifiable Tensor Work Receipts. Dominant Strategies has published the reference checkpoint at [huggingface.co/dominant-strategies/quai-igemm-qwen2.5-3b-w8a8-research](https://huggingface.co/dominant-strategies/quai-igemm-qwen2.5-3b-w8a8-research), with a measured TWP overhead of only **2.98%** — meaning receipt-mode inference is essentially the same cost as unverified inference.
 
-### 1. Reference Rig (RTX 3090) — Ollama Backend (Quick Start)
+### Option A: Ollama Backend (Quick Start)
 
 1. Ensure Ollama is running and the `qwen2.5:3b` model is pulled:
    ```bash
@@ -83,9 +63,9 @@ For production Quai inference, the InferenceGemm backend is preferred because it
    ```
 
 **Expected Output:**
-The script will drive the model with prompts for 5 minutes, measuring tokens/sec and reading GPU wattage via `nvidia-smi`. It will print the final `joules_per_token` (typically ~3.0 - 4.0 for a 3090) and append the record to `measurements.db`.
+The script will drive the model with prompts for 5 minutes, measuring tokens/sec and reading GPU wattage via `nvidia-smi`. It will print the final `joules_per_token` (typically 3–5 J/token for a 3090) and append the record to `measurements.db`.
 
-### 2. Reference Rig (RTX 3090) — InferenceGemm Backend (Production)
+### Option B: InferenceGemm Backend (Production TWP)
 
 1. Serve the InferenceGemm checkpoint via vLLM:
    ```bash
@@ -103,19 +83,52 @@ The script will drive the model with prompts for 5 minutes, measuring tokens/sec
    ```
 
 **Expected Output:**
-In addition to `joules_per_token`, the script will print `receipts_accepted` (the number of Tensor Work Receipts emitted during the run) and compare the measured overhead against the pre-registered 10% ceiling. The Dominant Strategies reference result is 2.98% overhead with 1 accepted receipt on the 3B model.
+In addition to `joules_per_token`, the script will print `receipts_accepted` (the number of Tensor Work Receipts emitted during the run) and compare the measured overhead against the pre-registered 10% ceiling (P3b). The Dominant Strategies reference result is **2.98% overhead** with 1 accepted receipt on the 3B model.
 
-### 3. Secondary Rigs (RTX 3080s)
+### Option C: TWP Calibration (Receipts/sec)
 
-Repeat the exact same command on the machines hosting the 3080s. This proves that the joules/token metric is relatively stable across different hardware tiers within the same generation.
+To measure the TWP-specific energy factor for the multi-algorithm model:
+
+```bash
+python3 benchmark.py --calibrate-rig --algo twp --minutes 5
+```
+
+**Expected Output:**
+```
+calibrate-rig (twp): measuring InferenceGemm receipts/sec for 5.0 minutes...
+
+calibrate-rig (twp) results:
+  receipts/sec : 62.6
+  watts        : 290.0 W
+  J/receipt    : 4.6326
+  energy_factor vs KawPoW ref: 0.6940
+
+Paste into research.yaml soap section:
+  reference_twp:
+    name: "dominant-strategies/quai-igemm-qwen2.5-3b-w8a8-research"
+    hashrate_hps: 62   # receipts/sec
+    watts: 290.0
+  algo_energy_factors:
+    twp: 0.694000   # measured J/receipt / J/KawPoW-hash
+```
+
+*Action:* Paste this into the `soap:` section of `research.yaml`.
+
+### Secondary Rigs (RTX 3080s)
+
+Repeat the same benchmark command on the machines hosting the 3080s. This proves that joules/token is relatively stable across GPU tiers within the same generation.
 
 ---
 
 ## Phase 3: Building the Local Data Cache
 
-Because you are solo mining, your local Quai node has the freshest, most accurate block data, including the workshare lock fields and SOAP data needed for Claims 5 and 7.
+Because you are solo mining, your local Quai node has the freshest, most accurate block data, including the workshare lock fields needed for Claims 5 and 7.
 
-1. Edit `research.yaml` and set `rpc_url` to your local node's RPC endpoint (e.g., `http://127.0.0.1:8545`).
+1. Edit `research.yaml` and set `difficulty.rpc_url` to your local node's RPC endpoint:
+   ```yaml
+   difficulty:
+     rpc_url: "http://127.0.0.1:8545"
+   ```
 2. Run the data fetcher:
    ```bash
    python3 fetch_data.py
@@ -123,19 +136,22 @@ Because you are solo mining, your local Quai node has the freshest, most accurat
 
 **Expected Output:**
 The script will scan the blockchain and build local JSON/CSV caches in the `data/` directory for:
-- `difficulty`
-- `token_choice_qi_fraction` (Claim 5)
-- `exchange_rate_qi_per_quai` (Claim 5)
-- `workshare_difficulty_kawpow_ws` (Claim 7)
-- `workshare_difficulty_soap_ws` (Claim 7)
 
-*Note:* The RPC scan can take a while on the first run. Subsequent runs will only fetch new blocks.
+| Dataset | Claim |
+|---|---|
+| `difficulty` | Claim 1 (energy peg) |
+| `token_choice_qi_fraction` | Claim 5 (controller directionality) |
+| `exchange_rate_qi_per_quai` | Claim 5 (market vs on-chain rate) |
+| `workshare_difficulty_kawpow_ws` | Claim 7 (TWP adoption) |
+| `workshare_difficulty_twp_ws` | Claim 7 (TWP adoption) |
+
+*Note:* The RPC scan can take a while on the first run. Subsequent runs will only fetch new blocks incrementally.
 
 ---
 
 ## Phase 4: Running the Dual-Revenue Daemon
 
-Claim 6 models the economics of running inference while simultaneously mining Quai workshares. The `crossover-daemon` actually executes this logic.
+Claim 6 models the economics of running inference while simultaneously earning Qi workshare rewards via TWP. The `crossover-daemon` executes this logic in real time.
 
 1. Navigate to the daemon directory:
    ```bash
@@ -151,29 +167,28 @@ Claim 6 models the economics of running inference while simultaneously mining Qu
    ```
 
 **Expected Output:**
-The daemon will evaluate the profitability of mining vs. inference every 60 seconds. It will log its decisions to `crossover.db`. Let this run for at least 24 hours.
+The daemon evaluates the profitability of mining vs. inference every 60 seconds and logs decisions to `crossover.db`. Let this run for at least 24 hours, then generate the report:
 
-After 24 hours, run:
 ```bash
 python3 report.py
 ```
-This will generate `report.md` and a revenue comparison chart showing how the dual-revenue model performed in reality compared to mining alone.
+
+This produces `report.md` and a revenue comparison chart showing how the dual-revenue model performed in reality compared to mining alone.
 
 ---
 
 ## Phase 5: The Live Dashboard
 
-Once all the data is flowing, you can monitor the entire project state from a single terminal window.
+Once all data is flowing, monitor the entire project state from a single terminal window:
 
-Run:
 ```bash
 python3 qi_dashboard.py --watch 60
 ```
 
 **Expected Output:**
 A live-updating CLI dashboard showing:
-- The current Qi Index (calculated from your 3090's joules/token measurement).
+- The current Qi Index (from your 3090's joules/token measurement).
 - The Claim 1 peg verdict.
 - The miner token choice ratio (Claim 5).
-- The SOAP adoption rate and workshare energy fraction (Claim 7).
+- The TWP workshare adoption rate and energy fraction (Claim 7).
 - The dual-revenue economics (Claim 6).

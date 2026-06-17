@@ -28,12 +28,10 @@ Cost model (single-algorithm baseline):
   divided by the reference GPU's hashrate gives seconds of work per Qi;
   times watts gives joules per Qi; times $/kWh gives modeled USD cost per Qi.
 
-Multi-algorithm extension (SOAP / workshares):
-  Since Project SOAP (Dec 2025), SHA-256 and Scrypt ASICs submit workshares
-  that are included in KawPoW blocks (up to 9 per block, soft target 3).
-  Each workshare represents real energy expenditure from a different hardware
-  class and contributes to block weight via PoEM entropy. The total network
-  energy per Qi is therefore an undercount if only KawPoW difficulty is used.
+Multi-algorithm extension (TWP workshares):
+  Under Quai's TWP (Tensor Work Proof) native merge-mining algorithm, GPUs
+  running InferenceGemm submit Tensor Work Receipts as Quai workshares and
+  earn Qi rewards. The GPU IS the miner; no ASIC hardware is required.
 
   When workshare data is available (fetch_data.py collects daily avg workshare
   count and per-algorithm difficulty from the RPC), the cost model is extended:
@@ -41,9 +39,9 @@ Multi-algorithm extension (SOAP / workshares):
                                + sum(ws_difficulty[algo] * ws_count[algo]
                                      * algo_energy_factor[algo])
   where algo_energy_factor normalises each algorithm's difficulty to the
-  energy equivalent of KawPoW difficulty (J per hash differs by algorithm).
-  This gives a multi-algorithm effective difficulty that feeds the same
-  joules_per_qi formula.
+  energy equivalent of KawPoW difficulty. For TWP, the energy_factor is
+  calibrated via `benchmark.py --calibrate-rig --algo twp`.
+  This gives an effective difficulty that feeds the same joules_per_qi formula.
 
   NOTE: The returns-based verdict remains invariant to the absolute energy
   scale ($/kWh, watts, hashrate all cancel in log-returns). The multi-
@@ -94,8 +92,7 @@ from series import align_by_date, log_returns, ols, pearson
 # The default values below are used when not present in config.
 _DEFAULT_ALGO_ENERGY_FACTORS: dict[str, float] = {
     "kawpow": 1.0,
-    "sha256": 1.75e-14 / 6.67e-9,   # ~2.62e-6
-    "scrypt": 2.10e-10 / 6.67e-9,   # ~0.0315
+    "twp": 1.0,   # placeholder — calibrate with benchmark.py --calibrate-rig --algo twp
 }
 
 
@@ -116,7 +113,7 @@ def effective_difficulty(
     kawpow_difficulty  : daily KawPoW block difficulty (hashes/block)
     workshare_difficulty: dict mapping algo name -> daily avg workshare
                           difficulty contribution for that algo.
-                          Keys: 'sha256', 'scrypt', 'kawpow_ws'
+                          Keys: 'twp' (TWP inference receipts), 'kawpow_ws'
                           (KawPoW workshares below block threshold).
                           None or empty -> single-algorithm baseline.
     factors            : energy normalisation factors from algo_energy_factors()

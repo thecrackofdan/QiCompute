@@ -143,74 +143,32 @@ claim5:
 
 soap:
   # Project SOAP (Subsidized Open-market Acquisition Protocol) - launched Dec 2025.
-  # Allows SHA-256 (BCH/BTC) and Scrypt (LTC/DOGE) ASICs to submit workshares
-  # to Quai blocks, earning QUAI rewards while the parent-chain block reward
-  # (BCH/LTC/DOGE) is converted to QUAI buybacks by the protocol.
+  # SHA-256 (BCH/BTC) and Scrypt (LTC/DOGE) ASICs submit workshares to Quai blocks
+  # and earn QUAI rewards. This is a separate protocol layer from the QiCompute
+  # inference model — ASICs are not part of the inference pipeline.
+  #
+  # QiCompute's inference layer uses the TWP (Tensor Work Proof) native algorithm:
+  # the GPU running InferenceGemm IS the miner. TWP receipts are submitted as
+  # Quai workshares and earn Qi rewards directly.
   #
   # Algorithm energy normalisation factors (J/hash relative to KawPoW).
-  # These are used in claim1_peg.py effective_difficulty() to convert
-  # workshare difficulty from each algorithm into KawPoW-equivalent energy.
-  #
-  # Default values are derived from published ASIC specs (see claim1_peg.py).
-  # Run `python3 benchmark.py --calibrate-rig --algo sha256` on your ASIC
-  # to measure and replace these with hardware-specific values.
+  # Only kawpow and twp are relevant to the inference model.
   algo_energy_factors:
     kawpow: 1.0                 # reference (RTX 3090, ~6.67e-9 J/hash)
-    rvn: 1.0                    # Ravencoin KawPoW — same algorithm as Quai, energy_factor = 1.0
-    sha256: 2.62e-6             # Antminer S21 estimate (~1.75e-14 J/hash)
-    scrypt: 3.15e-2             # Antminer L9 estimate (~2.10e-10 J/hash)
-    soap_ws: 2.62e-6            # default: treat unclassified SOAP workshares as SHA-256
     twp: 1.0                    # TWP inference workshares — calibrate with benchmark.py --calibrate-rig --algo twp
-                                # energy_factor = joules_per_TWP_hash / joules_per_KawPoW_hash
+                                # energy_factor = joules_per_TWP_receipt / joules_per_KawPoW_hash
                                 # Default 1.0 (same order of magnitude as KawPoW GPU); replace with measured value
-
-  # Reference ASIC rigs for level claims (joules/Qi from ASIC perspective).
-  # Populated by: python3 benchmark.py --calibrate-rig --algo sha256
-  #               python3 benchmark.py --calibrate-rig --algo scrypt
-  reference_sha256:
-    name: ""                    # e.g. "Antminer S21"
-    hashrate_hps: 0             # H/s (e.g. 200000000000000 for 200 TH/s)
-    watts: 0                    # board draw in watts
-
-  reference_scrypt:
-    name: ""                    # e.g. "Antminer L9"
-    hashrate_hps: 0             # H/s (e.g. 16000000000 for 16 GH/s)
-    watts: 0                    # board draw in watts
-
-  # Ravencoin KawPoW reference rig (same GPU as Quai mining; energy_factor = 1.0 by definition).
-  # Populated by: python3 benchmark.py --calibrate-rig --algo rvn
-  reference_rvn:
-    name: ""                    # e.g. "RTX 3090" (same as reference_gpu)
-    hashrate_hps: 0             # H/s KawPoW
-    watts: 0                    # board draw in watts
 
   # TWP inference reference rig.
   # Populated by: python3 benchmark.py --calibrate-rig --algo twp
   # The TWP "hash" is one Tensor Work Receipt (one inference run).
-  # hashrate_hps here means receipts/second (tok/s / tokens_per_receipt).
+  # hashrate_hps here means receipts/second.
   reference_twp:
     name: ""                    # e.g. "RTX 3090 + quai-igemm-qwen2.5-3b-w8a8-research"
-    hashrate_hps: 0             # receipts/sec (proxy for TWP hash rate)
+    hashrate_hps: 0             # receipts/sec
     watts: 0                    # board draw in watts
 
-  # Miner commands for ASIC calibration (benchmark.py --calibrate-rig --algo sha256/scrypt/rvn/twp).
-  # Leave empty if you don't have an ASIC rig to calibrate.
-  sha256_miner_command: []      # e.g. ["cgminer", "--url", "stratum+tcp://...", ...]
-  sha256_hashrate_regex: "([0-9]+(?:\\.[0-9]+)?)\\s*[Tt][Hh]/s"
-  sha256_hashrate_unit_multiplier: 1000000000000  # TH/s -> H/s
-
-  scrypt_miner_command: []      # e.g. ["cgminer", "--scrypt", "--url", ...]
-  scrypt_hashrate_regex: "([0-9]+(?:\\.[0-9]+)?)\\s*[Gg][Hh]/s"
-  scrypt_hashrate_unit_multiplier: 1000000000     # GH/s -> H/s
-
-  # RVN: same KawPoW miner command as kawpow; hashrate in MH/s
-  rvn_miner_command: []         # e.g. same as KawPoW miner pointed at RVN stratum
-  rvn_hashrate_regex: "([0-9]+(?:\\.[0-9]+)?)\\s*[Mm][Hh]/s"
-  rvn_hashrate_unit_multiplier: 1000000           # MH/s -> H/s
-
-  # TWP: inference throughput as proxy for hash rate (receipts/sec)
-  # benchmark.py --calibrate-rig --algo twp uses the igemm backend to measure
-  # receipts/sec and watts, then computes energy_factor vs KawPoW reference.
+  # TWP calibration uses the igemm backend directly — no external miner command needed.
   twp_miner_command: []         # leave empty; twp calibration uses the igemm backend directly
   twp_hashrate_regex: "([0-9]+(?:\\.[0-9]+)?)\\s*receipts?/s"
   twp_hashrate_unit_multiplier: 1                 # receipts/s -> receipts/s (no conversion needed)

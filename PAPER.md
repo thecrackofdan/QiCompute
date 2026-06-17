@@ -41,9 +41,9 @@ Nothing here proposes AI workloads as consensus, or useful work as a
 replacement for mining — useful AI work should be paid for *with* Qi, not
 used to replace Quai's proof-of-work.
 
-### 1.1 By construction vs by market
+### 1.1 By construction vs by market vs by reward mechanism
 
-Two couplings must not be conflated, and this paper tests only the second:
+Three couplings must not be conflated. This paper tests only the second:
 
 - **Protocol-level coupling (by construction).** Quai's emission schedule
   and difficulty adjustment mechanically relate Qi issuance to hashrate and
@@ -54,10 +54,22 @@ Two couplings must not be conflated, and this paper tests only the second:
   protocol: Bitcoin's identical mechanics coexist with market prices that
   spend years far from production cost. Claim 1's regressions therefore run
   on market price with BTC beta as the built-in null.
+- **Reward-mechanism coupling (Claim 6, not the thesis).** The Quai team
+  has confirmed that Tensor Work Proof (TWP) inference will be added as a
+  first-class merge-mining algorithm, allowing GPUs running the InferenceGemm
+  harness to earn Qi block rewards by submitting TWP receipts as workshares.
+  This is a powerful reinforcement of the energy-inference-Qi relationship,
+  but it is not the source of the energy anchor and it is not what Claims 1–3
+  test. **The energy correlation precedes the reward mechanism and does not
+  depend on it.** Qi prices energy by construction; inference costs energy by
+  physics; therefore Qi is the natural unit of account for inference right now,
+  before TWP exists. Claim 6 models the reward mechanism as an additional
+  economic layer. If Claim 6 fails, Claims 1–3 are unaffected.
 
 A reader who takes a claim-1 confirmation as "the protocol works as
 designed" has misread the result; the protocol working as designed is the
-premise.
+premise. A reader who believes Claims 1–3 depend on TWP launching has
+misread the scope; the energy correlation is testable today.
 
 ### 1.2 The corollary
 

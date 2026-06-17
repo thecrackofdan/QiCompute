@@ -228,6 +228,16 @@ Quai workshares. The Quai team has confirmed TWP inference will be a first-class
 merge-mining algorithm alongside SHA-256 (BCH/BTC), Scrypt (LTC/DOGE), and Ravencoin
 KawPoW. This means the GPU IS the miner: the TWP receipt is the proof-of-work, the
 Qi reward is the block subsidy, and the inference fee is the transaction fee.
+
+**Critical distinction — reward mechanism vs energy correlation:** P6 tests the
+*reward mechanism* only. The energy correlation between inference and Qi exists
+independently of TWP: Qi prices energy by construction, inference costs energy by
+physics, therefore Qi is the natural unit of account for inference right now, before
+TWP exists. That correlation is what Claims 1–3 establish in market data. P6 tests
+whether the protocol *additionally* subsidises inference workers via workshare rewards.
+P6 failing does not invalidate Claims 1–3 — it only means the protocol subsidy is
+smaller than modeled at current difficulty.
+
 Until TWP launches on mainnet, the model uses KawPoW hashrate as a proxy for
 TWP receipts/sec. Once live, calibrate with `benchmark.py --calibrate-rig --algo twp`.
 

@@ -187,9 +187,13 @@ Run `benchmark.py --minutes 5 --store --contributor your-handle` on your GPU and
 
 **Protocol coupling is not market coupling.** Quai's protocol ties Qi emission to difficulty by construction — that is mechanics. The claim under test is whether Qi's *market price* tracks energy cost. Claim 1 tests the market layer only.
 
+**The energy correlation precedes the reward mechanism — and does not depend on it.** This is the most important distinction in the project. Qi prices energy by construction. Inference costs energy by physics. Therefore Qi is the natural unit of account for inference right now, before TWP exists, before any workshare reward is paid. A customer paying for inference in Qi is paying in energy because that is what Qi is. This correlation is what Claims 1–3 test in live market data. TWP workshare rewards are the protocol's formalization of that relationship on-chain — a powerful reinforcement, but not the source of the anchor. Claim 6 models the reward mechanism. Claims 1–3 establish the energy correlation that makes the reward meaningful in the first place.
+
+**TWP is a reward mechanism, not the source of the energy anchor.** When TWP launches, a GPU submitting Tensor Work Proof receipts as workshares will earn Qi block rewards directly. This makes the economics of running an inference node more attractive and closes the proof-of-useful-work loop at the protocol level. But the energy-inference-Qi relationship exists independently of this mechanism. Removing TWP from the picture does not break the thesis — it only removes one of the incentive layers that reinforces it.
+
 **SOAP and TWP extend the energy anchor.** SHA-256 ASICs (BCH/BTC), Scrypt ASICs (LTC/DOGE), and Ravencoin KawPoW GPUs submitting SOAP workshares contribute real energy to the network without any additional expenditure. TWP goes further: the Quai team has confirmed that GPU inference nodes running InferenceGemm will submit Tensor Work Proof receipts as native workshares, earning Qi rewards. The GPU IS the miner. Claims 6 and 7 model and track this mechanism.
 
-**The Bitcoin merge-mining flywheel.** If SOAP adoption grows, more of Bitcoin's ~800 EH/s SHA-256 hashrate flows into Quai's energy anchor. At even 1% adoption, the ASIC workshare revenue for a co-located inference node dwarfs its GPU energy cost. Under TWP, the GPU itself earns the workshare reward — no ASIC needed. Claim 7 is the early warning system for whether this flywheel is turning.
+**The Bitcoin merge-mining flywheel.** If SOAP and TWP adoption grows, more of Bitcoin's ~800 EH/s SHA-256 hashrate and more GPU inference capacity flows into Quai's energy anchor. Under TWP, the GPU itself earns the workshare reward — no ASIC needed. Claim 7 is the early warning system for whether this flywheel is turning.
 
 ---
 

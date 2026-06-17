@@ -135,6 +135,31 @@ year, all reporting the same measurement boundary (marginal GPU board draw,
 PUE 1.0, batch 1 — see claim 3 methodology in the README); boundaries that
 differ are not pooled.
 
+### P3b — Tensor Work Proof overhead is negligible
+
+Dominant Strategies' InferenceGemm harness wraps standard GEMM operations
+with Tensor Work Proof (TWP), emitting a cryptographically verifiable Tensor
+Work Receipt per inference run. The cost of this proof must be negligible
+relative to the inference work itself, or the energy-money thesis is
+undermined (a verifiable-but-expensive proof changes the joules/token
+accounting).
+
+**Prediction:** Receipt-mode throughput (tok/s with TWP enabled) is within
+**[10]%** of baseline throughput (tok/s without TWP) on the same hardware
+and model. The Dominant Strategies reference benchmark measured **2.98%**
+overhead on Qwen2.5-3B W8A8 (64.49 baseline → 62.57 receipt-mode tok/s).
+
+**Failure condition:** Measured TWP overhead exceeds 10% on the reference
+rig (RTX 3090 + quai-igemm-qwen2.5-3b-w8a8-research). This would mean
+verifiable inference is materially more expensive than unverified inference,
+breaking the energy-anchor argument for Claim 6.
+
+**Data conditions:** Benchmark run via `python3 benchmark.py --minutes 5
+--store` with `benchmark.backend: igemm` in `research.yaml`; TWP overhead
+calculated as `1 - (receipt_tok_s / baseline_tok_s)`.
+
+**Reference:** [dominant-strategies/quai-igemm-qwen2.5-3b-w8a8-research](https://huggingface.co/dominant-strategies/quai-igemm-qwen2.5-3b-w8a8-research)
+
 ## P4 — Settlement **[Qi/token as a derived price, not a stability claim]** (claim 4)
 
 Settlement quotes jobs in Qi/token *derived from* Qi/joule × joules/token at

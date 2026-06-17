@@ -4,6 +4,29 @@ All notable changes to QiCompute are documented here. This project follows the s
 
 ## [Unreleased]
 
+### Added (InferenceGemm backend & TWP overhead — Dominant Strategies alignment)
+
+- **InferenceGemm backend support in `benchmark.py`**: a new `igemm` backend drives the
+  Dominant Strategies InferenceGemm harness (vLLM-compatible endpoint) instead of Ollama.
+  The backend emits Tensor Work Receipts per inference run and reports `receipts_accepted`
+  alongside the standard `joules_per_token` output. Controlled by `benchmark.backend` in
+  `research.yaml` (`"ollama"` default, `"igemm"` for production).
+- **Reference model updated to Qwen2.5-3B W8A8**: `research.yaml` `benchmark.model` changed
+  from `llama3.1:8b` to `qwen2.5:3b` (Ollama) / `dominant-strategies/quai-igemm-qwen2.5-3b-w8a8-research`
+  (igemm), aligning with the Dominant Strategies reference implementation.
+- **TWP overhead threshold (P3b)** added to `research.yaml` (`twp_overhead_threshold: 0.10`):
+  pre-registered ceiling of 10% overhead for receipt-mode vs baseline throughput. Dominant
+  Strategies measured 2.98% on the 3B model (64.49 → 62.57 tok/s).
+- **`igemm_url` and `igemm_model`** fields added to `research.yaml benchmark:` section for
+  configuring the InferenceGemm server endpoint and HuggingFace checkpoint path.
+- **P3b sub-prediction** added to `PREDICTIONS.md`: receipt-mode overhead ≤ 10% of baseline
+  tok/s, with the Dominant Strategies 2.98% reference result documented.
+- **Objection (m)** added to `OBJECTIONS.md`: "InferenceGemm's TWP adds non-trivial overhead"
+  — with a full treatment of why the overhead is small (Merkle roots over in-memory tensors)
+  and the pre-registered test that would falsify this response.
+- **`HARDWARE_SETUP.md` Phase 2** updated with a two-path setup guide: Ollama (quick start)
+  and InferenceGemm (production), including `vllm serve` command and expected output format.
+
 ### Added (SOAP multi-algorithm energy model)
 
 - **Multi-algorithm energy model in claim 1** (`claim1_peg.py`): the cost model now accounts

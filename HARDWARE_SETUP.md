@@ -62,20 +62,50 @@ A YAML block for `soap.reference_scrypt`.
 
 Claim 3 asserts that inference can be priced consistently in joules. We need to measure the actual joules per token on your GPUs.
 
-### 1. Reference Rig (RTX 3090)
+There are two supported inference backends:
 
-This establishes the baseline cost of inference.
+| Backend | Setup | Use Case |
+|---|---|---|
+| **Ollama** (`backend: ollama`) | `ollama pull qwen2.5:3b` | Fast setup, unverified inference |
+| **InferenceGemm** (`backend: igemm`) | See below | Production — emits Tensor Work Receipts |
 
-1. Ensure Ollama is running and the `llama3.1:8b` model is pulled (`ollama run llama3.1:8b`).
+For production Quai inference, the InferenceGemm backend is preferred because it ties joules/token measurements to cryptographically verifiable Tensor Work Receipts. Dominant Strategies has published the reference checkpoint at [huggingface.co/dominant-strategies/quai-igemm-qwen2.5-3b-w8a8-research](https://huggingface.co/dominant-strategies/quai-igemm-qwen2.5-3b-w8a8-research), with a measured TWP overhead of only **2.98%** — meaning receipt-mode inference is essentially the same cost as unverified inference.
+
+### 1. Reference Rig (RTX 3090) — Ollama Backend (Quick Start)
+
+1. Ensure Ollama is running and the `qwen2.5:3b` model is pulled:
+   ```bash
+   ollama pull qwen2.5:3b
+   ```
 2. Run the benchmark and store the result:
    ```bash
    python3 benchmark.py --minutes 5 --store --contributor "your_handle"
    ```
 
 **Expected Output:**
-The script will hammer Ollama with prompts for 5 minutes, measuring tokens/sec and reading GPU wattage via `nvidia-smi`. It will print the final `joules_per_token` (typically ~3.0 - 4.0 for a 3090) and append the record to `measurements.db`.
+The script will drive the model with prompts for 5 minutes, measuring tokens/sec and reading GPU wattage via `nvidia-smi`. It will print the final `joules_per_token` (typically ~3.0 - 4.0 for a 3090) and append the record to `measurements.db`.
 
-### 2. Secondary Rigs (RTX 3080s)
+### 2. Reference Rig (RTX 3090) — InferenceGemm Backend (Production)
+
+1. Serve the InferenceGemm checkpoint via vLLM:
+   ```bash
+   pip install vllm
+   vllm serve "dominant-strategies/quai-igemm-qwen2.5-3b-w8a8-research" --port 8000
+   ```
+2. Update `research.yaml` to switch to the igemm backend:
+   ```yaml
+   benchmark:
+     backend: "igemm"
+   ```
+3. Run the benchmark:
+   ```bash
+   python3 benchmark.py --minutes 5 --store --contributor "your_handle"
+   ```
+
+**Expected Output:**
+In addition to `joules_per_token`, the script will print `receipts_accepted` (the number of Tensor Work Receipts emitted during the run) and compare the measured overhead against the pre-registered 10% ceiling. The Dominant Strategies reference result is 2.98% overhead with 1 accepted receipt on the 3B model.
+
+### 3. Secondary Rigs (RTX 3080s)
 
 Repeat the exact same command on the machines hosting the 3080s. This proves that the joules/token metric is relatively stable across different hardware tiers within the same generation.
 

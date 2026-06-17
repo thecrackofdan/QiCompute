@@ -68,7 +68,11 @@ Qi daily log-returns are regressed against modeled energy-cost returns and again
 ### Claim 3 — Hardware benchmarking (`benchmark.py`)
 
 ```bash
-# Measure inference joules/token on a GPU with Ollama running
+# Measure inference joules/token on a GPU (Ollama backend, quick start)
+python3 benchmark.py --minutes 5 --store --contributor your-handle
+
+# Measure with InferenceGemm backend (emits Tensor Work Receipts)
+# Set benchmark.backend: igemm in research.yaml first, then:
 python3 benchmark.py --minutes 5 --store --contributor your-handle
 
 # Calibrate your mining rig for the claim-1 cost model
@@ -76,6 +80,8 @@ python3 benchmark.py --calibrate-rig                    # KawPoW GPU
 python3 benchmark.py --calibrate-rig --algo sha256      # SHA-256 ASIC
 python3 benchmark.py --calibrate-rig --algo scrypt      # Scrypt ASIC
 ```
+
+Two inference backends are supported. **Ollama** (`backend: ollama`) is the default and requires only `ollama pull qwen2.5:3b`. **InferenceGemm** (`backend: igemm`) drives the Dominant Strategies harness via a vLLM-compatible endpoint and emits a Tensor Work Receipt per inference run — the production backend for Quai-verifiable inference. The reference checkpoint is [`dominant-strategies/quai-igemm-qwen2.5-3b-w8a8-research`](https://huggingface.co/dominant-strategies/quai-igemm-qwen2.5-3b-w8a8-research) (Qwen2.5-3B, W8A8 quantization), with a measured TWP overhead of **2.98%** (64.49 → 62.57 tok/s). The pre-registered ceiling is 10% (P3b in `PREDICTIONS.md`).
 
 Measurement boundary (stated explicitly in every stored row): marginal GPU board draw via NVML, no idle subtraction, excludes CPU/RAM/fans/PSU, PUE = 1.0, batch size 1. These choices can swing joules/token 2–5x; rows with different boundaries are never pooled.
 
@@ -156,7 +162,7 @@ sample_data.py            # deterministic synthetic fixtures for offline testing
 test_claims.py            # 41 deterministic tests
 research.yaml             # all configuration and pre-registered thresholds
 PREDICTIONS.md            # falsifiable numeric predictions with failure conditions
-OBJECTIONS.md             # steelmanned case against the thesis (12 objections)
+OBJECTIONS.md             # steelmanned case against the thesis (13 objections)
 PAPER.md                  # academic paper skeleton wired to results/ artifacts
 CHANGELOG.md              # full change history
 data/                     # cached data (JSON + CSV mirrors)

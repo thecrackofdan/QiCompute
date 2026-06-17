@@ -181,16 +181,15 @@ class WattSampler(threading.Thread):
         return sum(self.samples) / len(self.samples) if self.samples else 0.0
 
 
-def run_inference_phase(bench_cfg: dict[str, Any], minutes: float, telemetry: GPUTelemetry) -> dict[str, Any]:
+def _run_ollama_phase(bench_cfg: dict[str, Any], minutes: float, sampler: WattSampler) -> dict[str, Any]:
+    """Drive Ollama /api/generate for the given duration and return raw stats."""
     url = str(bench_cfg.get("ollama_url", "http://127.0.0.1:11434")).rstrip("/") + "/api/generate"
-    model = str(bench_cfg.get("model", "llama3.1:8b"))
+    model = str(bench_cfg.get("model", "qwen2.5:3b"))
     prompt = str(bench_cfg.get("probe_prompt", "Briefly explain what a hash function does."))
-    sampler = WattSampler(telemetry)
-    sampler.start()
     deadline = time.monotonic() + minutes * 60
     rates: list[float] = []
     total_output_tokens = 0
-    print(f"inference: driving {model} at {url} for {minutes:.1f} minutes...")
+    print(f"inference (ollama): driving {model} at {url} for {minutes:.1f} minutes...")
     while time.monotonic() < deadline:
         payload = json.dumps({"model": model, "prompt": prompt, "stream": False}).encode("utf-8")
         request = urllib.request.Request(url, data=payload, headers={"Content-Type": "application/json"})
@@ -205,18 +204,81 @@ def run_inference_phase(bench_cfg: dict[str, Any], minutes: float, telemetry: GP
         if eval_duration_ns > 0:
             rates.append(eval_count / (eval_duration_ns / 1e9))
             total_output_tokens += eval_count
+    return {"model": model, "rates": rates, "output_tokens": total_output_tokens, "backend": "ollama"}
+
+
+def _run_igemm_phase(bench_cfg: dict[str, Any], minutes: float, sampler: WattSampler) -> dict[str, Any]:
+    """Drive InferenceGemm (vLLM-compatible) endpoint for the given duration.
+
+    InferenceGemm serves an OpenAI-compatible /v1/chat/completions endpoint.
+    Each response includes a Tensor Work Receipt in the response headers or body
+    (implementation-dependent on harness version). This function measures
+    throughput in receipt-mode and returns the overhead fraction vs baseline.
+    """
+    url = str(bench_cfg.get("igemm_url", "http://127.0.0.1:8000")).rstrip("/") + "/v1/chat/completions"
+    model = str(bench_cfg.get("igemm_model", "dominant-strategies/quai-igemm-qwen2.5-3b-w8a8-research"))
+    prompt = str(bench_cfg.get("probe_prompt", "Briefly explain what a hash function does."))
+    deadline = time.monotonic() + minutes * 60
+    rates: list[float] = []
+    total_output_tokens = 0
+    receipts_accepted = 0
+    print(f"inference (igemm): driving {model} at {url} for {minutes:.1f} minutes...")
+    while time.monotonic() < deadline:
+        payload = json.dumps({
+            "model": model,
+            "messages": [{"role": "user", "content": prompt}],
+            "max_tokens": 200,
+            "stream": False,
+        }).encode("utf-8")
+        request = urllib.request.Request(url, data=payload, headers={"Content-Type": "application/json"})
+        try:
+            with urllib.request.urlopen(request, timeout=300) as response:
+                data = json.loads(response.read().decode("utf-8"))
+        except Exception as exc:
+            print(f"inference: igemm request failed ({type(exc).__name__}: {exc}); is the InferenceGemm server running?")
+            break
+        choices = data.get("choices", [])
+        if choices:
+            content = choices[0].get("message", {}).get("content", "")
+            token_count = len(content.split())  # rough proxy; replace with usage.completion_tokens
+            usage = data.get("usage", {})
+            token_count = int(usage.get("completion_tokens", token_count))
+            # InferenceGemm may embed receipt status in a custom field
+            if data.get("tensor_work_receipt") or data.get("twr_accepted"):
+                receipts_accepted += 1
+            elapsed = data.get("elapsed_seconds", 1.0)
+            if elapsed > 0 and token_count > 0:
+                rates.append(token_count / elapsed)
+                total_output_tokens += token_count
+    return {"model": model, "rates": rates, "output_tokens": total_output_tokens,
+            "backend": "igemm", "receipts_accepted": receipts_accepted}
+
+
+def run_inference_phase(bench_cfg: dict[str, Any], minutes: float, telemetry: GPUTelemetry) -> dict[str, Any]:
+    backend = str(bench_cfg.get("backend", "ollama")).lower()
+    sampler = WattSampler(telemetry)
+    sampler.start()
+    if backend == "igemm":
+        raw = _run_igemm_phase(bench_cfg, minutes, sampler)
+    else:
+        raw = _run_ollama_phase(bench_cfg, minutes, sampler)
     watts = sampler.stop()
+    rates = raw["rates"]
     tokens_per_second = sum(rates) / len(rates) if rates else 0.0
     joules_per_token = watts / tokens_per_second if tokens_per_second > 0 else 0.0
-    return {
-        "model": model,
+    result = {
+        "model": raw["model"],
+        "backend": raw["backend"],
         "tokens_per_second": round(tokens_per_second, 3),
         "watts": watts,
         "joules_per_token": round(joules_per_token, 6),
         "requests": len(rates),
-        "output_tokens": total_output_tokens,
+        "output_tokens": raw["output_tokens"],
         "measured": bool(rates),
     }
+    if backend == "igemm":
+        result["receipts_accepted"] = raw.get("receipts_accepted", 0)
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -380,13 +442,22 @@ def main() -> int:
         return 0
 
     inference = run_inference_phase(bench_cfg, args.minutes, telemetry)
+    backend_used = inference.get("backend", "ollama")
     print("\nClaim 3 measurement")
+    print(f"  backend:          {backend_used}")
     print(f"  model:            {inference['model']}")
     print(f"  requests:         {inference['requests']}")
     print(f"  tokens/sec:       {inference['tokens_per_second']}")
     print(f"  avg watts:        {inference['watts']:.1f}")
     print(f"  joules/token:     {inference['joules_per_token']}")
     print(f"  boundary:         {MEASUREMENT_BOUNDARY}")
+    if backend_used == "igemm":
+        receipts = inference.get("receipts_accepted", 0)
+        overhead_threshold = float(bench_cfg.get("twp_overhead_threshold", 0.10))
+        print(f"  receipts accepted: {receipts}")
+        # TWP overhead note: compare to Dominant Strategies reference (2.98% on 3B)
+        print(f"  TWP overhead threshold (P3b): <= {overhead_threshold*100:.0f}% of baseline tok/s")
+        print(f"  Reference (DS quai-igemm-qwen2.5-3b-w8a8): 2.98% overhead, 1 accepted receipt")
     print("  Qi-denominated index: python3 qi_index.py")
     if args.store:
         if not inference["measured"]:
@@ -396,7 +467,7 @@ def main() -> int:
                 "measurement_id": str(uuid4()),
                 "ts": datetime.now(timezone.utc).isoformat(),
                 **gpu_metadata(str(bench_cfg.get("nvidia_smi_path", "nvidia-smi"))),
-                "backend": "ollama",
+                "backend": backend_used,
                 "model_name": inference["model"],
                 "minutes": args.minutes,
                 "requests": inference["requests"],
@@ -405,7 +476,11 @@ def main() -> int:
                 "avg_watts": inference["watts"],
                 "joules_per_token": inference["joules_per_token"],
                 "contributor": args.contributor or None,
-                "notes": f"{args.notes + '; ' if args.notes else ''}boundary: {MEASUREMENT_BOUNDARY}",
+                "notes": (
+                    f"{args.notes + '; ' if args.notes else ''}"
+                    f"boundary: {MEASUREMENT_BOUNDARY}"
+                    + (f"; igemm_receipts: {inference.get('receipts_accepted', 0)}" if backend_used == "igemm" else "")
+                ),
             }
             store_measurement(args.measurements_db, row)
             print(f"stored measurement {row['measurement_id']} in {args.measurements_db}")

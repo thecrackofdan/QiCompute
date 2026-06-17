@@ -57,9 +57,39 @@ benchmark:
   # numbers across rigs.
   nvidia_smi_path: "nvidia-smi"
   fallback_watts: 300
+
+  # --- Inference backend ---
+  # Two supported backends:
+  #   "ollama"       : vanilla Ollama (unverified inference, fast setup)
+  #   "igemm"        : Quai InferenceGemm harness (emits Tensor Work Receipts)
+  #
+  # For production Quai inference (Claim 3 + Claim 6), use "igemm" so that
+  # joules/token measurements are tied to verifiable Tensor Work Receipts.
+  # See HARDWARE_SETUP.md Phase 2 for InferenceGemm setup instructions.
+  #
+  # Dominant Strategies benchmark (quai-igemm-qwen2.5-3b-w8a8-research):
+  #   baseline tok/s  : 64.49
+  #   receipt-mode    : 62.57
+  #   TWP overhead    : 2.98%
+  # Source: https://huggingface.co/dominant-strategies/quai-igemm-qwen2.5-3b-w8a8-research
+  backend: "ollama"              # switch to "igemm" when harness is set up
   ollama_url: "http://127.0.0.1:11434"
-  model: "llama3.1:8b"
+  igemm_url: "http://127.0.0.1:8000"  # vLLM-compatible endpoint for InferenceGemm
+
+  # Reference model. Aligned with Dominant Strategies' InferenceGemm reference
+  # implementation. For Ollama backend use the GGUF equivalent; for igemm
+  # backend use the HF checkpoint directly.
+  model: "qwen2.5:3b"           # Ollama: qwen2.5:3b  |  igemm: dominant-strategies/quai-igemm-qwen2.5-3b-w8a8-research
+  igemm_model: "dominant-strategies/quai-igemm-qwen2.5-3b-w8a8-research"
+
   probe_prompt: "Briefly explain what a hash function does."
+
+  # TWP overhead threshold for Claim 3 (P3b).
+  # Pre-registered: receipt-mode overhead must be <= this fraction of baseline
+  # tok/s to be considered negligible. Dominant Strategies measured 2.98% on
+  # the 3B model; 0.10 (10%) is a conservative pre-registered ceiling.
+  twp_overhead_threshold: 0.10
+
   # --calibrate-rig: your Quai miner invocation; hashrate parsed from stdout.
   miner_command: []
   hashrate_regex: "([0-9]+(?:\\.[0-9]+)?)\\s*[Mm][Hh]/s"

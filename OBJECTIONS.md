@@ -288,3 +288,15 @@ Approximately 50–60% of Bitcoin's hashrate currently merge-mines Namecoin, des
 having negligible USD value. The barrier to merge mining is pool software support, not
 miner incentive — and that barrier was cleared for Namecoin with far less economic
 justification than SOAP offers.
+
+## (m) InferenceGemm's Tensor Work Proof adds non-trivial overhead — verifiable inference is more expensive than unverified inference
+
+**Objection:** If generating a Tensor Work Receipt requires significant extra computation, the joules/token for verifiable inference is higher than for unverified inference. This breaks the energy-anchor argument: the "useful work" is more expensive than the baseline, so the Qi pricing model is off.
+
+**Response:** Dominant Strategies measured the TWP overhead on their reference checkpoint (quai-igemm-qwen2.5-3b-w8a8-research, Qwen2.5-3B W8A8) at **2.98%** — receipt-mode throughput was 62.57 tok/s versus 64.49 tok/s baseline. This is within measurement noise for most practical purposes and well below the pre-registered 10% ceiling in P3b.
+
+The reason the overhead is small is architectural: TWP computes Merkle roots over the quantized tensor payloads, which are already in memory during the forward pass. The proof is a hash of data that exists, not a re-computation of the inference. At INT8 quantization (W8A8), the tensors are compact and the hashing is fast relative to the GEMM operations.
+
+**Pre-registered test:** P3b in PREDICTIONS.md. If measured overhead on the RTX 3090 exceeds 10%, this objection stands and Claim 6's dual-revenue economics must be recalculated with the overhead included in the joules/token figure.
+
+**Source:** https://huggingface.co/dominant-strategies/quai-igemm-qwen2.5-3b-w8a8-research

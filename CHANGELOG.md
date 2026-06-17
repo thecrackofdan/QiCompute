@@ -109,6 +109,36 @@ All notable changes to QiCompute are documented here. This project follows the s
 - `stabilized_market_price`: dynamic market pricing from `market_pricing.py` with the stability corridor applied, for quote paths.
 - Hardware calibration bridge (`calibrate.py`, `make calibrate`): measures (or accepts) tokens-per-second and watts, derives the recommended `energy_anchor` config values, flags drift beyond 25% against current config, and can append measurements to the evidence registry where the assumption tracker picks them up. Energy parity and billing benchmark assumptions added to `ECONOMIC_ASSUMPTIONS.md`.
 
+### Added (Claim 6, dashboard, and code quality)
+
+- **Claim 6: workshare-for-inference dual-revenue model** (`claim6_workshare_inference.py`):
+  models the economics of a GPU that simultaneously mines Quai (submitting KawPoW workshares)
+  and serves inference (earning customer payment). Key outputs: expected workshares/day,
+  Qi/day from workshare rewards, energy cost in Qi/day, workshare coverage fraction
+  (threshold: ≥ 5%), break-even utilisation fraction, and a full sensitivity table across
+  4x hashrate range and 50x difficulty range. Integrated into `reproduce.py` and `REPORT.md`.
+- `research.yaml` gains a `claim6:` section with pre-registered thresholds:
+  `workshare_difficulty_factor`, `block_reward_qi`, `workshares_per_block_target`,
+  `coverage_threshold_fraction` (0.05), and `tokens_per_sec_fallback`.
+- `PREDICTIONS.md` gains P6 with numeric failure conditions and data conditions.
+- `OBJECTIONS.md` gains objection (k): "The dual-revenue model assumes miners can run
+  inference simultaneously" — with full treatment of the three valid scenarios (probabilistic
+  workshare submission, crossover daemon, and ASIC workshares + GPU inference).
+- `PAPER.md` gains sections 4.5 (Claim 5) and 4.6 (Claim 6) with results wiring and
+  interpretation notes; Method section updated to describe all six claims; objections
+  reference updated to (a)–(j).
+- **Live CLI dashboard** (`qi_dashboard.py`): single-screen at-a-glance view of the
+  project's current state without running the full pipeline. Shows Qi index, Claim 1
+  verdict, Claim 5 sub-verdicts, Claim 6 dual-revenue metrics, data cache freshness for
+  all 9 datasets, and pipeline artifact status. Supports `--watch N` for auto-refresh
+  every N seconds.
+- **7 new deterministic tests** for Claim 6 in `test_claims.py` (40 total): workshare
+  scaling, zero-input guards, qi_per_workshare proportionality, energy cost proportionality,
+  coverage fraction clamping, model key completeness, verdict validity, and markdown sections.
+- `tools/crossover-daemon/telemetry.py` is now a thin shim that loads the root
+  `telemetry.py` by absolute path via `importlib.util`, eliminating the duplicate
+  implementation. All 14 crossover-daemon tests continue to pass.
+
 ## [0.1.0] - 2026-06-03
 
 ### Added

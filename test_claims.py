@@ -530,6 +530,98 @@ class Claim5TokenChoiceTest(unittest.TestCase):
         self.assertIn("Thesis Robustness", md)
 
 
+class Claim6DualRevenueTest(unittest.TestCase):
+    """Tests for claim6_workshare_inference.py dual-revenue model."""
+
+    def _config(self) -> dict:
+        return {
+            "reference_gpu": {"name": "RTX 3090", "hashrate_mhs": 45.0, "watts": 300.0, "hashrate_hps": 45_000_000},
+            "network": {"block_reward_qi": "1", "usd_per_kwh": "0.12"},
+            "claim6": {
+                "workshare_difficulty_factor": 0.1,
+                "block_reward_qi": 1.0,
+                "workshares_per_block_target": 3.0,
+                "coverage_threshold_fraction": 0.05,
+                "tokens_per_sec_fallback": 50.0,
+            },
+            "claim2": {"joules_per_token_fallback": "0.5", "token_bundle": 1_000_000},
+            "results_dir": "results",
+        }
+
+    def test_expected_workshares_per_day_scales_with_hashrate(self) -> None:
+        from claim6_workshare_inference import expected_workshares_per_day
+        ws_low = expected_workshares_per_day(10.0, 1e12, 0.1)
+        ws_high = expected_workshares_per_day(100.0, 1e12, 0.1)
+        self.assertGreater(ws_high, ws_low)
+        # 10x hashrate -> 10x workshares
+        self.assertAlmostEqual(ws_high / ws_low, 10.0, places=6)
+
+    def test_expected_workshares_per_day_zero_on_bad_input(self) -> None:
+        from claim6_workshare_inference import expected_workshares_per_day
+        self.assertEqual(expected_workshares_per_day(0.0, 1e12, 0.1), 0.0)
+        self.assertEqual(expected_workshares_per_day(45.0, 0.0, 0.1), 0.0)
+
+    def test_qi_per_workshare_proportional_to_reward(self) -> None:
+        from claim6_workshare_inference import qi_per_workshare
+        q1 = qi_per_workshare(1.0, 3.0)
+        q2 = qi_per_workshare(2.0, 3.0)
+        self.assertAlmostEqual(q2 / q1, 2.0, places=9)
+
+    def test_energy_cost_per_day_qi_proportional_to_watts(self) -> None:
+        from claim6_workshare_inference import energy_cost_per_day_qi
+        e1 = energy_cost_per_day_qi(100.0, 1000.0)
+        e2 = energy_cost_per_day_qi(200.0, 1000.0)
+        self.assertAlmostEqual(e2 / e1, 2.0, places=9)
+
+    def test_workshare_coverage_fraction_clamps_at_zero(self) -> None:
+        from claim6_workshare_inference import workshare_coverage_fraction
+        self.assertEqual(workshare_coverage_fraction(0.0, 100.0), 0.0)
+        self.assertEqual(workshare_coverage_fraction(100.0, 0.0), 0.0)
+
+    def test_dual_revenue_model_returns_expected_keys(self) -> None:
+        from claim6_workshare_inference import dual_revenue_model
+        from qi_index import current_index
+        config = self._config()
+        index = current_index(config, sample=True)
+        self.assertIsNotNone(index)
+        series = sample_data.generate_series()
+        difficulty = max(float(v) for v in series["difficulty"].values())
+        result = dual_revenue_model(config, index, difficulty)
+        for key in (
+            "verdict", "workshare_coverage_fraction", "breakeven_utilisation_fraction",
+            "workshare_qi_per_day", "energy_cost_qi_per_day", "expected_workshares_per_day",
+        ):
+            self.assertIn(key, result)
+
+    def test_dual_revenue_model_verdict_is_valid(self) -> None:
+        from claim6_workshare_inference import dual_revenue_model
+        from qi_index import current_index
+        config = self._config()
+        index = current_index(config, sample=True)
+        series = sample_data.generate_series()
+        difficulty = max(float(v) for v in series["difficulty"].values())
+        result = dual_revenue_model(config, index, difficulty)
+        self.assertIn(
+            result["verdict"],
+            {"dual_revenue_non_trivial", "dual_revenue_below_threshold"},
+        )
+
+    def test_render_markdown_contains_required_sections(self) -> None:
+        from claim6_workshare_inference import dual_revenue_model, render_markdown, sensitivity_table
+        from qi_index import current_index
+        config = self._config()
+        index = current_index(config, sample=True)
+        series = sample_data.generate_series()
+        difficulty = max(float(v) for v in series["difficulty"].values())
+        result = dual_revenue_model(config, index, difficulty)
+        sens = sensitivity_table(config, index, difficulty)
+        md = render_markdown(result, sens, synthetic=True)
+        self.assertIn("Claim 6", md)
+        self.assertIn("SYNTHETIC", md)
+        self.assertIn("Sensitivity", md)
+        self.assertIn("Break-even", md)
+
+
 class MeasurementStoreTest(unittest.TestCase):
     def test_store_measurement_idempotent_with_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

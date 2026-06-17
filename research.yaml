@@ -72,6 +72,31 @@ claim2:
   # benchmark.py --store; outputs are labeled when this fallback is active.
   joules_per_token_fallback: "0.5"
 
+claim6:
+  # Workshare-for-inference dual-revenue model (Claim 6)
+  #
+  # workshare_difficulty_factor: ratio of workshare threshold to full block difficulty.
+  # Default 0.1 means workshares are 10x easier than blocks. Calibrate against
+  # observed workshare inclusion rates once real on-chain data is available.
+  workshare_difficulty_factor: 0.1
+  #
+  # block_reward_qi: Qi awarded per block to workshare submitters (total pool).
+  # Calibrate from on-chain block reward data. network.block_reward_qi is the
+  # full block reward; this is the fraction distributed to workshares.
+  block_reward_qi: 1.0
+  #
+  # workshares_per_block_target: Quai's soft target for workshares per block.
+  # Used to compute expected Qi per workshare via PRS (Proportional Reward Splitting).
+  workshares_per_block_target: 3.0
+  #
+  # coverage_threshold_fraction: minimum workshare coverage fraction for P6 to pass.
+  # Pre-registered candidate: 0.05 (5%). Freeze alongside other thresholds.
+  coverage_threshold_fraction: 0.05
+  #
+  # tokens_per_sec_fallback: used when no benchmark measurement is available.
+  # Replace with output of `python3 benchmark.py --minutes 5 --store`.
+  tokens_per_sec_fallback: 50.0
+
 claim5:
   # Minimum aligned observations required for P5a and P5b verdicts.
   # Candidate prior: same as claim 1 (90 days). Freeze alongside other thresholds.

@@ -190,6 +190,37 @@ convertible at the protocol rate, the total energy expenditure (captured by diff
 is always reflected in the combined monetary base regardless of miner token choice.
 The miner preference ratio is a leading indicator of peg pressure, not a failure mode.
 
+## P6 — Workshare-for-inference dual-revenue model **[Qi/joule]** (claim 6)
+
+**Prediction:** At current network difficulty and a reference RTX 3090 (45 MH/s, 300 W),
+workshare rewards cover **≥ [5]%** of the energy cost of running inference continuously.
+This threshold is intentionally conservative — the claim is that the dual-revenue model
+is economically non-trivial, not that it is sufficient alone.
+
+**What is being tested:** whether a GPU that simultaneously mines Quai (submitting
+KawPoW workshares) and serves inference (earning customer payment) receives a meaningful
+subsidy from workshare rewards. The workshares are standard partial proofs — not AI
+outputs used as consensus. The dual-revenue model is the operational complement to
+claim 1: if Qi prices energy, then workshare rewards denominated in Qi are a direct
+energy subsidy to inference workers.
+
+**Failure conditions:**
+- P6 fails if `workshare_coverage_fraction < 0.05` at current network difficulty
+  with the reference rig parameters in `research.yaml`.
+- P6 is `insufficient_data` if no real difficulty data is available (sample mode only).
+
+**Data conditions:**
+- Requires real network difficulty from `fetch_data.py`.
+- Requires `joules_per_token` from `benchmark.py --store` or the config fallback
+  (labeled as fallback in output).
+- The `workshare_difficulty_factor` in `research.yaml → claim6` must be calibrated
+  against observed workshare inclusion rates before the result is citable.
+
+**Sensitivity:** the sensitivity table in `results/claim6.md` shows coverage across
+a 4x hashrate range and 50x difficulty range. The pre-registered threshold must hold
+at the reference rig parameters; sensitivity is reported as context, not as a
+pass/fail gate.
+
 ## Evaluation discipline
 
 - The evaluation window is the **full available history** at freeze time —

@@ -236,3 +236,19 @@ the `fetch_workshare_difficulty` docstring.
 that secures Bitcoin Cash or Litecoin also contributes to Quai's energy anchor — without
 any additional energy expenditure. This is a strength of the thesis, not a weakness: the
 energy peg is anchored to a broader, more diverse hardware base than KawPoW alone.
+
+## (k) The dual-revenue model (Claim 6) assumes miners can run inference simultaneously — that's not how mining works
+
+**Objection:** Mining requires 100% GPU utilisation. You can't serve inference on a GPU that's already mining. The dual-revenue model is physically impossible.
+
+**Treatment here — three valid scenarios, one of which requires no time-sharing:**
+
+The objection is partially correct: a GPU running KawPoW at full utilisation cannot simultaneously run Ollama inference at full capacity. Claim 6 does not assert that both workloads run at 100% simultaneously. The dual-revenue model is valid in three real scenarios:
+
+1. **Workshare submission is probabilistic, not continuous.** KawPoW mining is a hash lottery — a miner submits a workshare when they find a hash below the workshare threshold. Between submissions, the GPU is hashing. Inference can be interleaved during the microseconds between hash evaluations, though at the cost of reduced throughput on both workloads. This is the weakest version of the claim.
+
+2. **The crossover daemon model.** The `tools/crossover-daemon/` daemon switches the GPU between mining and inference based on live revenue. When inference demand is high, the GPU serves inference; when demand is low, it mines. The workshare rewards in Claim 6 represent the mining revenue during idle inference periods, not simultaneous operation. The crossover daemon is the operational complement to Claim 6.
+
+3. **ASIC workshares + GPU inference (the cleanest version).** Under Project SOAP, SHA-256 ASICs and Scrypt ASICs submit workshares to Quai blocks. A node that runs a SHA-256 ASIC (mining BCH/BTC and submitting workshares to Quai) alongside a GPU (serving inference) achieves true simultaneous dual-revenue without any GPU time-sharing. The ASIC handles workshare submission; the GPU handles inference. Claim 6's sensitivity table includes ASIC-class hashrates precisely because this is the most physically realistic version of the model.
+
+**What Claim 6 actually tests:** whether the workshare reward stream is economically non-trivial (≥ 5% of energy cost) for a reference rig — not whether both workloads run simultaneously at full capacity. The break-even utilisation metric in the output directly quantifies how much inference capacity is needed to cover the remaining energy cost after workshare subsidies.

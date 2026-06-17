@@ -121,6 +121,18 @@ production pricing is the cautionary tale: see OBJECTIONS.md (e).)
   contributors.
 - **Claim 4 (settlement):** integer micro-Qi escrow/settlement with receipt
   emission; mock ledger pending Quai testnet tooling.
+- **Claim 5 (K-Quai controller directionality):** on-chain `woHeader.lock`
+  (miner token choice) and `header.exchangeRate` sampled from every block.
+  Tests whether miner Qi-election fraction leads exchange-rate adjustments
+  (P5a/P5b) and whether the market-implied rate tracks the on-chain rate
+  within ±20% (P5c). Robustness check: the thesis holds regardless of miner
+  preference because QUAI and Qi are convertible at the protocol rate; P5
+  tests controller correctness, not thesis precondition.
+- **Claim 6 (dual-revenue model):** models the economics of a GPU that
+  simultaneously mines Quai (submitting workshares) and serves inference
+  (earning customer payment). Workshare rewards are standard KawPoW partial
+  proofs — not AI outputs as consensus. Pre-registered threshold: workshare
+  rewards cover ≥ 5% of energy cost at current network difficulty.
 
 Reproduction: `python3 reproduce.py` regenerates everything from cached raw
 pulls (`data/`). No smoothing; thin data reported, never interpolated.
@@ -161,9 +173,44 @@ Receipt example: `results/receipt_demo-job-1.json`
 [Conservation and idempotency results over the randomized-cycle test in
 PREDICTIONS.md P4; settlement layer status (mock vs testnet).]
 
+### 4.5 Claim 5 — K-Quai controller directionality
+
+Stats: `results/claim5_stats.json` · Narrative: `results/claim5.md`
+
+[Empty until ≥ 90 days of on-chain `woHeader.lock` and `header.exchangeRate`
+data are accumulated. Must report: P5a correlation and direction, P5b
+best-lag and leading-signal flag, P5c market/on-chain ratio and consecutive
+deviation days. If P5c is `insufficient_data` due to thin QI market price,
+report that explicitly — it is not a failure. Report the mean Qi-election
+fraction and mean on-chain exchange rate as context regardless of verdict.]
+
+**Interpretation note:** P5 does not test whether miners choose Qi over QUAI.
+Because the two tokens are convertible at the protocol rate, the energy-money
+thesis holds regardless of miner preference. P5 tests whether the K-Quai
+controller correctly transmits miner preference signals into exchange-rate
+adjustments — a protocol-correctness check, not a thesis prerequisite.
+
+### 4.6 Claim 6 — workshare-for-inference dual-revenue model
+
+Stats: `results/claim6_stats.json` · Narrative: `results/claim6.md`
+
+[Empty until real difficulty and joules/token data are available. Must report:
+workshare coverage fraction vs the pre-registered 5% threshold, break-even
+utilisation fraction, expected workshares/day for the reference rig, and the
+full sensitivity table across hashrate and difficulty multipliers.]
+
+**Interpretation note:** Claim 6 models the economics of a GPU that
+simultaneously mines Quai and serves inference. The workshare rewards are
+standard KawPoW partial proofs — not AI outputs used as consensus. The claim
+is that the dual-revenue model is economically non-trivial at current network
+parameters, not that workshare rewards alone are sufficient to run inference
+profitably. The crossover daemon in `tools/crossover-daemon/` is the
+operational complement: it switches between mining and inference based on live
+revenue, while Claim 6 models the case where both run simultaneously.
+
 ## 5. Objections and limitations
 
-Incorporated by reference: OBJECTIONS.md (a)–(e). The conclusion section may
+Incorporated by reference: OBJECTIONS.md (a)–(j). The conclusion section may
 not use causal language ("anchors", "is caused by") for claim 1 —
 "tracks"/"fails to track" only — per objection (e).
 

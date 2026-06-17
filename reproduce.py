@@ -41,6 +41,7 @@ def main() -> int:
         "qi_index": run(["qi_index.py", *sample_flag]),
         "claim4_settlement": run(["claim4_settlement.py", "--demo", "--db", "settlement.db", *sample_flag]),
         "claim5_token_choice": run(["claim5_token_choice.py", *sample_flag]),
+        "claim6_workshare_inference": run(["claim6_workshare_inference.py", *sample_flag]),
     }
     print("\n=== claim 3 (joules/token ground truth) ===")
     print("requires a local GPU + Ollama: python3 benchmark.py --minutes 5 --store")
@@ -72,7 +73,7 @@ def main() -> int:
     # Include the full markdown output for each claim. Individual claim scripts
     # are responsible for their own SYNTHETIC / DRAFT banners; reproduce.py
     # does not inject additional copies.
-    for name in ("claim1.md", "claim2.md", "claim5.md"):
+    for name in ("claim1.md", "claim2.md", "claim5.md", "claim6.md"):
         path = results_dir / name
         if path.exists():
             sections.append(path.read_text(encoding="utf-8"))

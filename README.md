@@ -30,8 +30,9 @@ layer.
 
 ```
 Energy
-→ Quai Proof-of-Work
+→ Quai Proof-of-Work (KawPoW GPU miners + SOAP ASIC workshares: SHA-256, Scrypt)
 → Qi Energy-Money Thesis        (claim 1: does the market price track energy cost?)
+→ Miner Token Choice            (claim 5: does the K-Quai controller behave as predicted?)
 → Compute Energy Measurement    (claim 3: measured joules/token on real hardware)
 → Qi Compute Index              (joules/Qi × joules/token → Qi per million tokens)
 → Qi Settlement Layer           (claim 4: escrow and settle inference in micro-Qi)
@@ -42,6 +43,14 @@ compute is energy converted into useful work → AI inference is a measurable
 compute workload → joules/token provides physical ground truth → joules/Qi
 provides monetary energy content → together they derive Qi/token and
 Qi-per-million-tokens → settlement is the application, not the premise.
+
+**Multi-algorithm energy anchor (Project SOAP):** Since December 2025, SHA-256
+ASICs (Bitcoin Cash hardware) and Scrypt ASICs (Litecoin/Dogecoin hardware) can
+submit workshares to Quai blocks via Project SOAP, earning QUAI rewards while the
+parent-chain block reward is converted to QUAI buybacks by the protocol. The same
+hardware that secures BCH or LTC also contributes to Quai's energy anchor — without
+any additional energy expenditure. The claim-1 cost model accounts for this via an
+energy-normalised effective difficulty (see `research.yaml` → `soap:` section).
 
 ## The thesis, precisely
 
@@ -94,21 +103,24 @@ the thesis first:
 2. **Claim 2 is the payoff** — the unit-of-account comparison.
 3. **Claim 3 is the ground truth** — measured joules/token on real hardware.
 4. **Claim 4 is the application** — settlement, salvaged from QiCompute.
+5. **Claim 5 is the robustness check** — does the K-Quai controller behave as the monetary theory predicts?
 
-## The four claims
+## The five claims
 
 ### Claim 1 — Peg tracking (`claim1_peg.py`)
 
 Does Qi's **market price** track its modeled energy cost of production?
 (The protocol-level emission/difficulty coupling is true by design and is
-not what's being tested.) Difficulty → energy per Qi for a configurable
-reference GPU (default RTX 3090: hashrate and watts in `research.yaml`) ×
-configurable $/kWh gives the modeled cost. Qi daily log-returns are
-regressed on modeled-cost returns **and** on BTC returns (the null
-hypothesis). Output: overlay chart plus regression stats for both
-hypotheses, the liquidity context, and a verdict: `supports_energy_thesis`,
-`energy_thesis_not_supported`, `below_liquidity_threshold`, or
-`insufficient_data`.
+not what's being tested.) The cost model computes an energy-normalised
+effective difficulty from KawPoW block difficulty plus SOAP workshare
+contributions (SHA-256 and Scrypt ASICs), then converts to energy per Qi
+for a configurable reference GPU (default RTX 3090: hashrate and watts in
+`research.yaml`) × configurable $/kWh. Qi daily log-returns are regressed
+on modeled-cost returns **and** on BTC and ETH returns (the null
+hypotheses). Output: overlay chart plus regression stats for all
+hypotheses, the liquidity context, the workshare energy fraction, and a
+verdict: `supports_energy_thesis`, `energy_thesis_not_supported`,
+`below_liquidity_threshold`, or `insufficient_data`.
 
 ### Claim 2 — Unit-of-account stability (`claim2_stability.py`)
 
@@ -150,6 +162,32 @@ receipt** to `results/`. The settlement layer is a **clearly-marked mock**
 tooling confirmation, and the receipt format isolates that change to one
 field plus a transaction reference. Settlement prices the **energy
 component** of a job, not its full cost (see Scope and Limitations).
+
+### Claim 5 — Miner token choice & K-Quai controller (`claim5_token_choice.py`)
+
+Miners elect their block reward denomination (QUAI or Qi) via the
+`woHeader.lock` field at block time. The work is identical regardless of
+choice. The K-Quai controller observes a rolling 4,000-block preference
+window and adjusts the on-chain QUAI↔Qi exchange rate to restore
+equilibrium. Three sub-tests:
+
+- **P5a — Controller directionality:** when miners prefer QUAI (low
+  `qi_fraction`), the on-chain Qi-per-QUAI rate should rise
+  (`corr(qi_fraction[t-1], Δexchange_rate[t]) < 0`).
+- **P5b — Miner preference leads rate adjustments:** a shift in miner
+  preference should precede the rate adjustment by ≥1 day (negative lagged
+  cross-correlation peak at lag k in {1..14}).
+- **P5c — Market rate tracks on-chain rate:** the market-implied exchange
+  rate (QUAI_USD / QI_USD) should track the on-chain K-Quai controller rate
+  within ±20% over any 30-day window.
+
+Data is fetched incrementally from the Quai RPC: `woHeader.lock` (token
+choice) and `header.exchangeRate` (on-chain rate) are sampled from every
+block header in the same pass as difficulty. The thesis does **not** require
+miners to prefer Qi — because QUAI and Qi are convertible at the protocol
+rate, the total energy expenditure is always reflected in the combined
+monetary base regardless of miner preference. Claim 5 tests whether the
+controller mechanism that enforces this is working as designed.
 
 ## Scope and Limitations
 
@@ -194,13 +232,18 @@ python3 reproduce.py                     # fetch real data, run all claims -> re
 python3 reproduce.py --sample            # offline synthetic pipeline demo (labeled, not findings)
 
 # individual claims
-python3 fetch_data.py                    # cache Qi/BTC prices+volume, difficulty, electricity into data/
-python3 claim1_peg.py
-python3 claim2_stability.py
+python3 fetch_data.py                    # cache Qi/BTC/ETH prices+volume, difficulty,
+                                         # electricity, token choice, exchange rate,
+                                         # and workshare difficulty into data/
+python3 claim1_peg.py                    # peg tracking (multi-algorithm energy model)
+python3 claim2_stability.py              # unit-of-account stability
 python3 benchmark.py --minutes 5 --store # claim 3 measurement, on a GPU box with Ollama
-python3 benchmark.py --calibrate-rig     # measure your rig's Quai hashrate+watts for research.yaml
+python3 benchmark.py --calibrate-rig                    # KawPoW GPU rig -> reference_gpu block
+python3 benchmark.py --calibrate-rig --algo sha256      # SHA-256 ASIC -> soap.reference_sha256 block
+python3 benchmark.py --calibrate-rig --algo scrypt      # Scrypt ASIC  -> soap.reference_scrypt block
 python3 qi_index.py
 python3 claim4_settlement.py --demo
+python3 claim5_token_choice.py           # K-Quai controller directionality & miner token choice
 
 python3 -m unittest                      # root test suites (claims + crossover daemon)
 ```
@@ -210,8 +253,11 @@ python3 -m unittest                      # root test suites (claims + crossover 
 | Dataset | Source (confirmed) | Why | Notes |
 | --- | --- | --- | --- |
 | Qi price + volume history | CoinGecko `market_chart?days=max` | free, no key, aggregates exchanges, longest continuous daily series since QUAI's early-2024 listing | volume series feeds the liquidity gate |
-| BTC price history | CoinGecko (same endpoint family) | consistency with the Qi series | |
+| BTC + ETH price history | CoinGecko (same endpoint family) | null hypotheses for claim 1 | |
 | Quai difficulty | explorer charts endpoint when configured, automatic fallback to JSON-RPC block-header sampling against `rpc.quai.network` | deep history when available, no hard third-party dependency | verify the header field paths in `research.yaml` against a live node |
+| Miner token choice (`qi_fraction`) | Quai JSON-RPC `quai_getBlockByNumber` — `woHeader.lock` field | fraction of blocks where miner elected Qi; feeds claim 5 P5a/P5b | incremental scan, extends on each run |
+| On-chain exchange rate | Quai JSON-RPC `quai_getBlockByNumber` — `header.exchangeRate` (hex big.Int / 1e18 = Qi per QUAI) | K-Quai controller rate; feeds claim 5 P5c | incremental scan, same pass as token choice |
+| Workshare difficulty | Quai JSON-RPC `quai_getBlockByNumber` — `workshares` array; split into `kawpow_ws` and `soap_ws` by `mixHash` heuristic | multi-algorithm energy model in claim 1; SOAP ASIC contributions | heuristic split pending RPC upgrade with explicit algorithm field |
 | Electricity | EIA v2 API (free key, US industrial retail default, configurable) | the regional electricity comparator for claim 2 | optional — flat fallback used and labeled without a key |
 
 All fetches cache to `data/*.json` (with source URL and timestamp) plus a
@@ -225,7 +271,8 @@ CSV mirror; analysis only ever reads the cache.
 - **`OBJECTIONS.md`** — the steelmanned case against, including the
   Qi/token confusion, the by-construction objection, regional electricity
   variance, energy as a minority of datacenter compute cost,
-  why-not-USD/futures, thin liquidity, and the Bitcoin causality lesson.
+  why-not-USD/futures, thin liquidity, the Bitcoin causality lesson, miner
+  token choice (QUAI vs Qi), and SOAP workshare energy accounting.
 - **`PAPER.md`** — the paper skeleton: thesis, lineage (Ford's energy
   dollar, Technocracy's energy certificates, Fuller's kWh currency), method,
   results sections wired to `results/` artifacts.

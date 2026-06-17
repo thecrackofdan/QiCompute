@@ -194,6 +194,128 @@ def fetch_electricity(config: dict[str, Any], data_dir: Path) -> str:
     return f"electricity: {len(series)} monthly points"
 
 
+def fetch_token_choice(config: dict[str, Any], data_dir: Path) -> str:
+    """Sample block headers to build a daily time-series of miner token choice.
+
+    Each block's woHeader.lock field encodes the miner's reward election:
+      0x0 = QUAI elected   0x1 = Qi elected
+
+    We compute a daily ratio: qi_fraction = (Qi-elected blocks) / (total sampled
+    blocks that day).  A ratio near 0 means miners prefer QUAI; near 1 means
+    they prefer Qi.  The series is stored as ``token_choice_qi_fraction``.
+
+    The same RPC scan pattern as fetch_difficulty_rpc_scan is used so the cache
+    extends incrementally on repeated runs.
+    """
+    diff_cfg = config["difficulty"]
+    url = diff_cfg["rpc_url"]
+    step = max(int(diff_cfg.get("rpc_block_step", 3000)), 1)
+    timestamp_path = diff_cfg.get("rpc_timestamp_path", "result.woHeader.timestamp")
+
+    head = http_post_json(url, {"jsonrpc": "2.0", "id": 1, "method": "quai_blockNumber", "params": []})
+    head_number = int(str(dig(head, "result")), 16)
+
+    existing = read_cache(data_dir, "token_choice_qi_fraction")
+    # We need per-day counts to recompute fractions; store raw counts in a
+    # sidecar so we can merge incrementally.
+    counts_path = data_dir / "token_choice_counts.json"
+    if counts_path.exists():
+        counts: dict[str, list[int]] = json.loads(counts_path.read_text(encoding="utf-8"))
+    else:
+        counts = {}  # {date: [qi_count, total_count]}
+
+    sampled = 0
+    for number in range(head_number, 0, -step):
+        block = http_post_json(
+            url,
+            {"jsonrpc": "2.0", "id": 1, "method": "quai_getBlockByNumber", "params": [hex(number), False]},
+        )
+        result = block.get("result") or {}
+        wo = result.get("woHeader") or {}
+        raw_timestamp = wo.get("timestamp")
+        raw_lock = wo.get("lock", "0x0")
+        if raw_timestamp is None:
+            continue
+        timestamp = int(str(raw_timestamp), 16) if str(raw_timestamp).startswith("0x") else int(raw_timestamp)
+        date = datetime.fromtimestamp(timestamp, tz=timezone.utc).date().isoformat()
+        if date in counts:
+            break  # cache already covers from here back
+        lock_val = int(str(raw_lock), 16) if str(raw_lock).startswith("0x") else int(raw_lock)
+        qi_elected = 1 if lock_val == 1 else 0
+        counts[date] = [qi_elected, 1]
+        sampled += 1
+        if sampled >= 400:
+            break
+
+    if not counts:
+        raise ValueError("token_choice: rpc scan produced no samples")
+
+    # Persist raw counts sidecar
+    counts_path.write_text(json.dumps(counts, indent=2), encoding="utf-8")
+
+    # Derive fraction series
+    series = {
+        date: float(v[0]) / float(v[1]) if v[1] > 0 else 0.0
+        for date, v in counts.items()
+    }
+    write_cache(data_dir, "token_choice_qi_fraction", series, f"{url} (rpc_scan lock field, step={step})")
+    return f"token_choice_qi_fraction: {len(series)} daily points ({sampled} new via rpc)"
+
+
+def fetch_exchange_rate(config: dict[str, Any], data_dir: Path) -> str:
+    """Sample the on-chain QUAI/Qi exchange rate from block headers.
+
+    The ``header.exchangeRate`` field is a big.Int stored as a hex string with
+    a 1e18 denominator (wei-like scale): divide by 1e18 to get Qi-per-QUAI.
+
+    This is the K-Quai controller's output — the protocol-set rate that governs
+    QUAI↔Qi conversions.  Tracking it over time shows how the controller
+    responds to miner token-choice pressure and validates the directionality
+    claim: when miners prefer QUAI (lock=0), the controller should raise the
+    Qi-per-QUAI rate to restore equilibrium.
+    """
+    diff_cfg = config["difficulty"]
+    url = diff_cfg["rpc_url"]
+    step = max(int(diff_cfg.get("rpc_block_step", 3000)), 1)
+    timestamp_path = diff_cfg.get("rpc_timestamp_path", "result.woHeader.timestamp")
+
+    head = http_post_json(url, {"jsonrpc": "2.0", "id": 1, "method": "quai_blockNumber", "params": []})
+    head_number = int(str(dig(head, "result")), 16)
+
+    existing = read_cache(data_dir, "exchange_rate_qi_per_quai")
+    series: dict[str, float] = dict(existing["series"]) if existing else {}
+
+    sampled = 0
+    for number in range(head_number, 0, -step):
+        block = http_post_json(
+            url,
+            {"jsonrpc": "2.0", "id": 1, "method": "quai_getBlockByNumber", "params": [hex(number), False]},
+        )
+        result = block.get("result") or {}
+        wo = result.get("woHeader") or {}
+        header = result.get("header") or {}
+        raw_timestamp = wo.get("timestamp")
+        raw_er = header.get("exchangeRate", "0x0")
+        if raw_timestamp is None:
+            continue
+        timestamp = int(str(raw_timestamp), 16) if str(raw_timestamp).startswith("0x") else int(raw_timestamp)
+        date = datetime.fromtimestamp(timestamp, tz=timezone.utc).date().isoformat()
+        if date in series:
+            break  # cache already covers from here back
+        er_int = int(str(raw_er), 16) if str(raw_er).startswith("0x") else int(raw_er)
+        er_qi_per_quai = er_int / 1e18
+        series[date] = er_qi_per_quai
+        sampled += 1
+        if sampled >= 400:
+            break
+
+    if not series:
+        raise ValueError("exchange_rate: rpc scan produced no samples")
+
+    write_cache(data_dir, "exchange_rate_qi_per_quai", series, f"{url} (rpc_scan exchangeRate field, step={step})")
+    return f"exchange_rate_qi_per_quai: {len(series)} daily points ({sampled} new via rpc)"
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Fetch and cache claim data")
     parser.add_argument("--config", default="research.yaml")
@@ -208,6 +330,8 @@ def main() -> int:
         ("eth_usd", lambda: fetch_price(config, data_dir, "eth_usd", "eth_url")),
         ("difficulty", lambda: fetch_difficulty(config, data_dir)),
         ("electricity_usd_per_kwh", lambda: fetch_electricity(config, data_dir)),
+        ("token_choice_qi_fraction", lambda: fetch_token_choice(config, data_dir)),
+        ("exchange_rate_qi_per_quai", lambda: fetch_exchange_rate(config, data_dir)),
     ]
     # Difficulty in rpc_scan mode always runs so it can append new blocks to
     # the existing cache (the scan resumes from the last cached date). In
@@ -215,11 +339,16 @@ def main() -> int:
     # the cache skip like every other dataset to avoid redundant network calls.
     diff_mode = str(config.get("difficulty", {}).get("mode", "both"))
     difficulty_always_runs = diff_mode in {"rpc_scan", "both"}
+    # token_choice and exchange_rate use the same incremental RPC scan pattern
+    # as difficulty rpc_scan, so they always run to extend history.
+    rpc_always_runs = {"token_choice_qi_fraction", "exchange_rate_qi_per_quai"}
     failures = 0
     for name, job in jobs:
         if not args.force and read_cache(data_dir, name):
             if name == "difficulty" and difficulty_always_runs:
                 pass  # fall through: rpc_scan extends cache incrementally
+            elif name in rpc_always_runs:
+                pass  # fall through: incremental rpc scan extends cache
             else:
                 print(f"{name}: cached (use --force to refetch)")
                 continue

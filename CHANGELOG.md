@@ -4,6 +4,34 @@ All notable changes to QiCompute are documented here. This project follows the s
 
 ## [Unreleased]
 
+### Added (claim 5 — miner token choice & directionality)
+
+- **Claim 5** (`claim5_token_choice.py`): empirically tests the K-Quai controller's
+  directionality claim — that the on-chain QUAI↔Qi exchange rate responds to miner
+  token preference in the direction the monetary theory predicts.
+  - P5a: `corr(qi_fraction[t-1], Δexchange_rate[t]) < 0` (controller raises the Qi-per-QUAI
+    rate when miners prefer QUAI).
+  - P5b: lagged cross-correlation test — miner preference should *lead* rate adjustments
+    by ≥ 1 day (negative peak at lag k in {1..14}).
+  - P5c: market-implied rate (QUAI_USD / QI_USD) should track the on-chain protocol rate
+    within ±20%; reported as `insufficient_data` when QI market price is unavailable.
+- `fetch_data.py` gains two new incremental RPC scan series:
+  - `token_choice_qi_fraction`: daily fraction of blocks where `woHeader.lock == 0x1`
+    (miner elected Qi), sampled from the Quai RPC at the configured `rpc_block_step`.
+  - `exchange_rate_qi_per_quai`: daily on-chain K-Quai controller rate from
+    `header.exchangeRate` (hex big.Int / 1e18 = Qi per QUAI).
+  Both series extend incrementally on repeated runs (same pattern as difficulty rpc_scan).
+- `sample_data.py` gains deterministic synthetic fixtures for both new series: a
+  low-qi_fraction oscillation and a lagged exchange rate response, so the claim-5
+  pipeline can be exercised offline.
+- `research.yaml` gains a `claim5:` section with pre-registered thresholds for
+  min_samples, min_leading_corr, max_market_onchain_deviation, and
+  max_consecutive_deviation_days.
+- `PREDICTIONS.md` gains P5 with numeric failure conditions for all three sub-claims.
+- `OBJECTIONS.md` gains objection (i): "If miners choose QUAI over Qi, the energy peg
+  breaks" — with a full treatment explaining why the directionality mechanism preserves
+  the anchor regardless of miner preference.
+
 ### Changed (rigor hardening)
 
 - Claim 1 gains ETH as a second crypto-beta null (fetched/cached/synthesized like BTC); the thesis must beat every null, and the verdict names the strongest one.

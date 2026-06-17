@@ -417,6 +417,119 @@ class SettlementConservationFuzzTest(unittest.TestCase):
             ledger.close()
 
 
+class Claim5TokenChoiceTest(unittest.TestCase):
+    """Tests for claim 5 — miner token choice, directionality & thesis robustness."""
+
+    def _config(self) -> dict:
+        return {
+            "verdict": {"thresholds_frozen": False},
+            "claim5": {
+                "min_samples": 10,  # relaxed for unit tests
+                "min_leading_corr": 0.05,
+                "max_market_onchain_deviation": 0.20,
+                "max_consecutive_deviation_days": 30,
+            },
+        }
+
+    def test_synthetic_fixtures_include_new_series(self) -> None:
+        series = sample_data.generate_series()
+        self.assertIn("token_choice_qi_fraction", series)
+        self.assertIn("exchange_rate_qi_per_quai", series)
+        frac = list(series["token_choice_qi_fraction"].values())
+        er = list(series["exchange_rate_qi_per_quai"].values())
+        # All fractions should be in [0, 1]
+        self.assertTrue(all(0.0 <= f <= 1.0 for f in frac))
+        # All exchange rates should be positive
+        self.assertTrue(all(e > 0 for e in er))
+
+    def test_p5a_detects_negative_correlation(self) -> None:
+        from claim5_token_choice import analyse_p5a
+
+        # Construct a series where qi_fraction directly drives exchange rate
+        # in the opposite direction (high frac -> rate falls, low frac -> rate rises)
+        # Use a clean deterministic relationship: er[t] = 15 - 10 * qi_frac[t]
+        # so delta_er[t] = -10 * delta_qi_frac[t], giving corr = -1
+        dates = [f"2026-01-{i:02d}" for i in range(1, 31)]
+        qi_frac = {d: 0.05 + 0.04 * math.sin(i * 0.7) for i, d in enumerate(dates)}
+        # Exchange rate is a strong negative function of qi_fraction (lagged by 1)
+        frac_vals = list(qi_frac.values())
+        er_vals = [15.0 - 10.0 * frac_vals[0]]
+        for i in range(1, len(dates)):
+            er_vals.append(15.0 - 10.0 * frac_vals[i - 1])  # lag-1 response
+        er = {d: er_vals[i] for i, d in enumerate(dates)}
+        result = analyse_p5a(qi_frac, er)
+        self.assertEqual(result["status"], "ok")
+        self.assertLess(result["corr_qi_fraction_vs_delta_er"], 0)
+        self.assertTrue(result["direction_correct"])
+
+    def test_p5a_insufficient_data_below_threshold(self) -> None:
+        from claim5_token_choice import analyse_p5a
+
+        tiny_frac = {"2026-01-01": 0.1, "2026-01-02": 0.2}
+        tiny_er = {"2026-01-01": 13.0, "2026-01-02": 13.1}
+        result = analyse_p5a(tiny_frac, tiny_er)
+        self.assertEqual(result["status"], "insufficient_data")
+
+    def test_p5b_detects_leading_signal(self) -> None:
+        from claim5_token_choice import analyse_p5b
+
+        # Build a series where qi_fraction at t-3 predicts delta_er at t
+        n = 60
+        dates = [f"2026-01-{(i % 30) + 1:02d}" if i < 30 else f"2026-02-{(i - 30) % 28 + 1:02d}"
+                 for i in range(n)]
+        # Use unique dates
+        dates = [f"2025-{(i // 30) + 1:02d}-{(i % 30) + 1:02d}" for i in range(n)]
+        qi_frac = {d: 0.08 + 0.06 * math.sin(i / 5.0) for i, d in enumerate(dates)}
+        # Exchange rate responds to qi_fraction with lag 3
+        er_vals = [13.0]
+        frac_vals = list(qi_frac.values())
+        for i in range(1, n):
+            lag_frac = frac_vals[max(0, i - 3)]
+            er_vals.append(er_vals[-1] + 0.1 * (0.1 - lag_frac))
+        er = {d: er_vals[i] for i, d in enumerate(dates)}
+        result = analyse_p5b(qi_frac, er, max_lag=14)
+        self.assertEqual(result["status"], "ok")
+        self.assertTrue(result["leading_signal_detected"])
+
+    def test_p5c_insufficient_data_when_qi_price_unavailable(self) -> None:
+        from claim5_token_choice import analyse_p5c
+
+        result = analyse_p5c(
+            quai_usd={"2026-01-01": 0.012},
+            qi_usd={},  # no Qi market price
+            exchange_rate={"2026-01-01": 13.26},
+        )
+        self.assertEqual(result["status"], "insufficient_data")
+        self.assertIn("unavailable", result["reason"])
+
+    def test_synthetic_data_produces_valid_p5a_result(self) -> None:
+        from claim5_token_choice import analyse_p5a
+
+        series = sample_data.generate_series()
+        result = analyse_p5a(
+            series["token_choice_qi_fraction"],
+            series["exchange_rate_qi_per_quai"],
+        )
+        # Synthetic data is designed so direction_correct is True
+        self.assertEqual(result["status"], "ok")
+        self.assertTrue(result["direction_correct"])
+
+    def test_markdown_output_contains_all_sections(self) -> None:
+        from claim5_token_choice import build_markdown, analyse_p5a, analyse_p5b, analyse_p5c
+
+        series = sample_data.generate_series()
+        p5a = analyse_p5a(series["token_choice_qi_fraction"], series["exchange_rate_qi_per_quai"])
+        p5b = analyse_p5b(series["token_choice_qi_fraction"], series["exchange_rate_qi_per_quai"])
+        p5c = analyse_p5c({}, {}, {})
+        md = build_markdown(p5a, p5b, p5c, synthetic=True, config=self._config())
+        self.assertIn("Claim 5", md)
+        self.assertIn("P5a", md)
+        self.assertIn("P5b", md)
+        self.assertIn("P5c", md)
+        self.assertIn("SYNTHETIC", md)
+        self.assertIn("Thesis Robustness", md)
+
+
 class MeasurementStoreTest(unittest.TestCase):
     def test_store_measurement_idempotent_with_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

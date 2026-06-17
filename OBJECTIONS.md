@@ -159,3 +159,41 @@ Two further differences from the generic pitch: the chain stays
 proof-of-work (no proof-of-useful-work, no AI consensus — Quai secures the
 money layer, compute lives above it), and settlement here prices only the
 energy component of jobs, per (g).
+
+## (i) If miners choose QUAI over Qi, the energy peg breaks
+
+**Objection:** miners choose their block reward denomination at block time. If they
+systematically prefer QUAI, Qi supply contracts relative to the energy being expended,
+the peg weakens, and the energy-money thesis fails in practice even if it holds in theory.
+
+**Treatment here — the work is identical; directionality preserves the anchor:**
+the objection conflates token preference with energy decoupling. The work a miner
+performs — hashing — is identical regardless of which token they elect. The total
+energy expenditure of the network is captured by **difficulty**, not by token choice.
+Qi's linear emission is pegged to difficulty; even if every miner elected QUAI today,
+the *potential* Qi supply (the amount that would be issued if miners switched) is still
+anchored to the same difficulty.
+
+The K-Quai controller closes the loop: it observes miner token preference over a
+rolling 4,000-block window and adjusts the on-chain QUAI↔Qi exchange rate via a
+logistic regression (alpha = 1/1000) with a cubic discount function (minimum 20 bps
+slip, scaling cubically with volume). When miners prefer QUAI:
+
+1. Qi supply contracts → Qi price rises above energy cost.
+2. Rational actors convert QUAI to Qi at the protocol rate (burning QUAI, minting Qi).
+3. Supply expands back toward equilibrium.
+
+The controller's response is measurable: the `header.exchangeRate` field in every
+block header records the current Qi-per-QUAI rate. **Claim 5 tests this empirically:**
+if the controller is working, the exchange rate should rise when miners prefer QUAI
+(P5a), and that rise should lag the preference shift by at least one day (P5b).
+
+The miner token choice ratio is therefore a **leading indicator of peg pressure**,
+not a failure mode. A sustained preference for QUAI is the system working as designed:
+it signals that the market expects QUAI to appreciate faster than energy costs rise,
+and the controller responds by making Qi more attractive until equilibrium is restored.
+
+**What would actually break the thesis:** if the controller's logistic regression
+consistently moved the exchange rate in the *wrong* direction (P5a fails), or if the
+market-implied rate (QUAI_USD / QI_USD) diverged persistently from the on-chain rate
+(P5c fails). Those are the testable failure modes, and claim 5 is designed to catch them.

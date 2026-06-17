@@ -72,6 +72,20 @@ claim2:
   # benchmark.py --store; outputs are labeled when this fallback is active.
   joules_per_token_fallback: "0.5"
 
+claim5:
+  # Minimum aligned observations required for P5a and P5b verdicts.
+  # Candidate prior: same as claim 1 (90 days). Freeze alongside other thresholds.
+  min_samples: 90
+  # P5b: minimum absolute lagged correlation to declare a leading signal detected.
+  min_leading_corr: 0.05
+  # P5c: maximum allowed deviation between market-implied and on-chain rate (fraction).
+  max_market_onchain_deviation: 0.20
+  # P5c: maximum consecutive days of deviation before it counts as a failure.
+  max_consecutive_deviation_days: 30
+  # Exchange rate scale: on-chain exchangeRate is a big.Int with 1e18 denominator.
+  # Divide raw hex value by this to get Qi-per-QUAI.
+  exchange_rate_scale: 1.0e18
+
 verdict:
   # PRE-REGISTRATION SWITCH. While false, every claim-1 output is stamped
   # "THRESHOLDS DRAFT - not citable". Flip to true only after the bracketed

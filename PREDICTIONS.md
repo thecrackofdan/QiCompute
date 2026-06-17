@@ -141,6 +141,45 @@ room.
 **Data conditions:** none (deterministic; a seeded 300-cycle version runs in
 CI as `test_claims.py::SettlementConservationFuzzTest`).
 
+## P5 — Miner token choice, directionality & thesis robustness **[on-chain controller]** (claim 5)
+
+Miners elect their block reward denomination (QUAI or Qi) via the `woHeader.lock` field at
+block time. The work is identical regardless of choice. The K-Quai controller observes a
+rolling 4,000-block preference window and adjusts the on-chain QUAI↔Qi exchange rate via
+a logistic regression (alpha = 1/1000) to restore equilibrium.
+
+**P5a — Controller directionality:**
+When miners prefer QUAI (low `qi_fraction`), the on-chain Qi-per-QUAI exchange rate should
+rise. We expect `corr(qi_fraction[t-1], Δexchange_rate[t]) < 0`.
+
+**P5b — Miner preference leads rate adjustments:**
+A shift in miner preference should precede the exchange rate adjustment by at least 1 day.
+We expect a negative lagged cross-correlation peak at lag k ≥ 1 day:
+`corr(Δexchange_rate[t], qi_fraction[t-k]) < -0.05` for some k in {1..14}.
+
+**P5c — Market rate tracks on-chain protocol rate:**
+The market-implied exchange rate (QUAI_USD / QI_USD) should track the on-chain K-Quai
+controller rate within **±[20]%** over any 30-day window. Wide persistent divergence
+would indicate the controller is failing to anchor the peg.
+
+**Failure conditions:**
+- P5a fails if `corr(qi_fraction[t-1], Δexchange_rate[t]) ≥ 0` with n ≥ 90 observations.
+- P5b fails if no lag in {1..14} days shows correlation < -0.05.
+- P5c fails if the market/on-chain ratio exceeds ±20% for more than 30 consecutive days.
+  When QI market price is unavailable, P5c is reported as `insufficient_data` (not a failure).
+
+**Data conditions:**
+- P5a and P5b require ≥ [90] days of aligned `token_choice_qi_fraction` and
+  `exchange_rate_qi_per_quai` from the on-chain RPC scan.
+- P5c additionally requires a QI/USD market price series (CoinGecko or equivalent).
+  If unavailable, P5c is `insufficient_data` and does not affect the P5a/P5b verdict.
+
+**Thesis robustness note:**
+The energy-money thesis does not require miners to prefer Qi. Because QUAI and Qi are
+convertible at the protocol rate, the total energy expenditure (captured by difficulty)
+is always reflected in the combined monetary base regardless of miner token choice.
+The miner preference ratio is a leading indicator of peg pressure, not a failure mode.
+
 ## Evaluation discipline
 
 - The evaluation window is the **full available history** at freeze time —

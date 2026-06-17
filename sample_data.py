@@ -34,9 +34,15 @@ def generate_series() -> dict[str, dict[str, float]]:
     eth: dict[str, float] = {}
     qi: dict[str, float] = {}
     electricity: dict[str, float] = {}
+    token_choice_qi_fraction: dict[str, float] = {}
+    exchange_rate_qi_per_quai: dict[str, float] = {}
     base_difficulty = 1.0e12
     base_btc = 60_000.0
     base_eth = 3_000.0
+    # Synthetic token choice: starts near 0.1 (miners prefer QUAI), drifts up
+    # slowly with noise.  The exchange rate responds with a negative lag:
+    # when qi_fraction is low, the rate rises (controller restores equilibrium).
+    base_er = 13.26  # Qi per QUAI at 1e18 scale (observed on-chain 2026-06)
     for i, day in enumerate(dates):
         # difficulty trends up with a fast wave so energy-cost returns carry
         # real daily variance; deterministic pseudo-noise from sin
@@ -44,6 +50,15 @@ def generate_series() -> dict[str, dict[str, float]]:
         btc[day] = base_btc * (1.0 + 0.002 * i) * (1.0 + 0.10 * math.sin(i / 7.0 + 1.0))
         eth[day] = base_eth * (1.0 + 0.0025 * i) * (1.0 + 0.12 * math.sin(i / 6.0 + 2.0))
         electricity[day] = 0.12 * (1.0 + 0.05 * math.sin(i / 30.0))
+        # Synthetic miner preference: mostly QUAI (low qi_fraction) with slow
+        # oscillation; clipped to [0, 1]
+        frac = 0.08 + 0.06 * math.sin(i / 20.0) + 0.02 * math.sin(i / 5.0)
+        token_choice_qi_fraction[day] = max(0.0, min(1.0, frac))
+        # Synthetic exchange rate: base + controller response (negatively
+        # correlated with qi_fraction at lag ~3 days) + slow upward drift
+        lag_frac = 0.08 + 0.06 * math.sin(max(0, i - 3) / 20.0)
+        er = base_er * (1.0 + 0.002 * i) * (1.0 - 0.4 * lag_frac + 0.03 * math.sin(i / 8.0))
+        exchange_rate_qi_per_quai[day] = max(1.0, er)
     # modeled cost per Qi for the reference rig in research.yaml
     # (45 MH/s, 300 W, 3 Qi/block, $0.12/kWh)
     cost = {
@@ -66,6 +81,8 @@ def generate_series() -> dict[str, dict[str, float]]:
         "difficulty": difficulty,
         "electricity_usd_per_kwh": electricity,
         "qi_volume_usd": volume,
+        "token_choice_qi_fraction": token_choice_qi_fraction,
+        "exchange_rate_qi_per_quai": exchange_rate_qi_per_quai,
     }
 
 

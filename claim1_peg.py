@@ -129,15 +129,29 @@ def effective_difficulty(
     return total
 
 
-def joules_per_qi(*, difficulty: float, block_reward_qi: float, hashrate_hps: float, watts: float) -> float:
-    if block_reward_qi <= 0 or hashrate_hps <= 0:
+def joules_per_qi(*, difficulty: float, block_reward_qi: float | str, hashrate_hps: float, watts: float) -> float:
+    if hashrate_hps <= 0:
         return 0.0
-    hashes_per_qi = difficulty / block_reward_qi
+    
+    # If dynamic, use the protocol k_Qi formula:
+    # reward_Qi = k_Qi * difficulty
+    # baseKqi = 1 / (8 * 10^9)
+    # k_Qi doubles every 2.69 years, but for now we use baseKqi
+    if block_reward_qi == "dynamic":
+        base_kqi = 1.0 / 8_000_000_000.0
+        # hashes_per_qi = difficulty / reward_Qi = difficulty / (k_Qi * difficulty) = 1 / k_Qi
+        hashes_per_qi = 1.0 / base_kqi
+    else:
+        reward = float(block_reward_qi)
+        if reward <= 0:
+            return 0.0
+        hashes_per_qi = difficulty / reward
+        
     seconds_per_qi = hashes_per_qi / hashrate_hps
     return seconds_per_qi * watts
 
 
-def modeled_cost_usd_per_qi(*, difficulty: float, block_reward_qi: float, hashrate_hps: float, watts: float, usd_per_kwh: float) -> float:
+def modeled_cost_usd_per_qi(*, difficulty: float, block_reward_qi: float | str, hashrate_hps: float, watts: float, usd_per_kwh: float) -> float:
     joules = joules_per_qi(
         difficulty=difficulty, block_reward_qi=block_reward_qi, hashrate_hps=hashrate_hps, watts=watts
     )
@@ -162,9 +176,11 @@ def cost_series(
     for date, kawpow_diff in difficulty_series.items():
         ws_diff = workshare_difficulty_series.get(date) if workshare_difficulty_series else None
         eff_diff = effective_difficulty(kawpow_diff, ws_diff, factors)
+        reward_cfg = network["block_reward_qi"]
+        reward_val = reward_cfg if reward_cfg == "dynamic" else float(Decimal(str(reward_cfg)))
         result[date] = modeled_cost_usd_per_qi(
             difficulty=eff_diff,
-            block_reward_qi=float(Decimal(str(network["block_reward_qi"]))),
+            block_reward_qi=reward_val,
             hashrate_hps=float(gpu["hashrate_hps"]),
             watts=float(gpu["watts"]),
             usd_per_kwh=float(Decimal(str(network["usd_per_kwh"]))),

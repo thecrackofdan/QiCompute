@@ -48,7 +48,11 @@ reference_gpu:
   watts: 300
 
 network:
-  block_reward_qi: "3"          # verify against current Quai emission schedule
+  # block_reward_qi: Qi awarded per block to workshare submitters (total pool).
+  # Now dynamically computed using the protocol k_Qi formula:
+  # reward_Qi = k_Qi * blockDifficulty, where baseKqi = 1 / (8 * 10^9).
+  # This is the expected total Qi reward pool for the block.
+  block_reward_qi: "dynamic"
   usd_per_kwh: "0.12"           # production electricity price for the cost model
 
 benchmark:
@@ -113,7 +117,11 @@ claim6:
   # block_reward_qi: Qi awarded per block to workshare submitters (total pool).
   # Calibrate from on-chain block reward data. network.block_reward_qi is the
   # full block reward; this is the fraction distributed to workshares.
-  block_reward_qi: 1.0
+  # block_reward_qi: Qi awarded per block to workshare submitters (total pool).
+  # Now dynamically computed using the protocol k_Qi formula:
+  # reward_Qi = k_Qi * blockDifficulty, where baseKqi = 1 / (8 * 10^9).
+  # This is the expected total Qi reward pool for the block.
+  block_reward_qi: "dynamic"
   #
   # workshares_per_block_target: Quai's soft target for workshares per block.
   # Used to compute expected Qi per workshare via PRS (Proportional Reward Splitting).

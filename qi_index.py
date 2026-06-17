@@ -46,9 +46,11 @@ def current_index(config: dict[str, Any], *, sample: bool = False) -> dict[str, 
     latest_date = max(cached["series"])
     difficulty = float(cached["series"][latest_date])
     gpu = config["reference_gpu"]
+    reward_cfg = config["network"]["block_reward_qi"]
+    reward_val = reward_cfg if reward_cfg == "dynamic" else float(Decimal(str(reward_cfg)))
     jpq = joules_per_qi(
         difficulty=difficulty,
-        block_reward_qi=float(Decimal(str(config["network"]["block_reward_qi"]))),
+        block_reward_qi=reward_val,
         hashrate_hps=float(gpu["hashrate_hps"]),
         watts=float(gpu["watts"]),
     )

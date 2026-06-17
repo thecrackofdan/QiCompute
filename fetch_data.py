@@ -273,6 +273,11 @@ def fetch_exchange_rate(config: dict[str, Any], data_dir: Path) -> str:
     responds to miner token-choice pressure and validates the directionality
     claim: when miners prefer QUAI (lock=0), the controller should raise the
     Qi-per-QUAI rate to restore equilibrium.
+    
+    Note: The controller actually uses `header.minerDifficulty` (an EMA over 4,000
+    blocks) as its signal, not the raw block difficulty. The update formula is:
+    kQuai_i = kQuai_{i-1} * (1 + alpha * (d - d*) / d*)
+    where alpha = 0.001 (proportional controller, not logistic regression).
     """
     diff_cfg = config["difficulty"]
     url = diff_cfg["rpc_url"]

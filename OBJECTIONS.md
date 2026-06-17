@@ -252,3 +252,39 @@ The objection is partially correct: a GPU running KawPoW at full utilisation can
 3. **ASIC workshares + GPU inference (the cleanest version).** Under Project SOAP, SHA-256 ASICs and Scrypt ASICs submit workshares to Quai blocks. A node that runs a SHA-256 ASIC (mining BCH/BTC and submitting workshares to Quai) alongside a GPU (serving inference) achieves true simultaneous dual-revenue without any GPU time-sharing. The ASIC handles workshare submission; the GPU handles inference. Claim 6's sensitivity table includes ASIC-class hashrates precisely because this is the most physically realistic version of the model.
 
 **What Claim 6 actually tests:** whether the workshare reward stream is economically non-trivial (≥ 5% of energy cost) for a reference rig — not whether both workloads run simultaneously at full capacity. The break-even utilisation metric in the output directly quantifies how much inference capacity is needed to cover the remaining energy cost after workshare subsidies.
+
+## (l) "Bitcoin miners will never point hashrate at Quai — the SOAP incentive is too small"
+
+**Objection:** Bitcoin's SHA-256 hashrate (~800 EH/s) is orders of magnitude larger than
+Quai's current difficulty. The QUAI reward from submitting a workshare is negligible
+relative to the BTC block reward. No rational Bitcoin miner will implement SOAP support
+for such a small marginal gain.
+
+**Treatment here:** The objection is correct about the current economics at the individual
+miner level, but misidentifies the mechanism. SOAP adoption does not require individual
+miners to change their behaviour — it requires **mining pool software** to add SOAP
+workshare submission as a background process. The overhead per hash is negligible (one
+additional RPC call per found workshare); the question is whether the aggregate QUAI
+reward across the pool is worth the engineering cost of implementation.
+
+At 0.01% of Bitcoin's hashrate (0.08 EH/s), the workshare revenue in Qi/day already
+dwarfs the GPU inference energy cost for a reference node (see `results/claim6.md`).
+This means the incentive threshold for pool adoption is low — not "enough to change
+miner behaviour" but "enough to justify a pool software update."
+
+Furthermore, the SOAP mechanism has a compounding property: as QUAI appreciates (driven
+by buybacks from BCH/LTC block rewards flowing to the protocol), the QUAI reward per
+workshare increases in USD terms, making the economics progressively more attractive.
+
+**What P7 tests:** not whether Bitcoin miners will adopt SOAP, but whether any ASIC
+participation is growing at all. A positive P7 result (SOAP fraction growing at ≥1 pp/quarter)
+is a falsifiable early signal that the flywheel is turning, even if total adoption remains
+small. A negative result is equally informative — it would suggest the QUAI reward is
+currently insufficient to motivate pool implementation, which is useful data for the
+Quai Network team.
+
+**Merge-mining precedent:** Namecoin has been merge-mined with Bitcoin since 2011.
+Approximately 50–60% of Bitcoin's hashrate currently merge-mines Namecoin, despite NMC
+having negligible USD value. The barrier to merge mining is pool software support, not
+miner incentive — and that barrier was cleared for Namecoin with far less economic
+justification than SOAP offers.

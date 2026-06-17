@@ -622,6 +622,79 @@ class Claim6DualRevenueTest(unittest.TestCase):
         self.assertIn("Break-even", md)
 
 
+class Claim7Test(unittest.TestCase):
+    """Tests for claim7_soap_adoption.py — SOAP adoption rate as leading indicator."""
+
+    def _soap_series(self, n: int = 120, growing: bool = True):
+        """Build synthetic soap_ws and kawpow_ws series with n days of data."""
+        import datetime
+        base = datetime.date(2025, 12, 1)
+        kawpow = {}
+        soap = {}
+        for i in range(n):
+            d = (base + datetime.timedelta(days=i)).isoformat()
+            kawpow[d] = 1_000_000.0
+            if growing:
+                # SOAP fraction grows steeply: from ~0.1% to ~50% of total.
+                # block_difficulty = 10x kawpow = 1e7, kawpow = 1e6.
+                # At day 119: soap = 1000 + 119*10000 = 1.191e6
+                # total = 1e7 + 1e6 + 1.191e6 = 12.191e6
+                # fraction_119 = 1.191e6/12.191e6 = 9.77%
+                # fraction_0 = 1000/11001000 = 0.009%
+                # slope_per_day ~ (0.0977 - 0.00009) / 119 = 0.000820
+                # slope_pct_per_quarter = 0.000820 * 90 * 100 = 7.38 pp/quarter > 1
+                soap[d] = 1_000.0 + i * 10_000.0
+            else:
+                # flat SOAP fraction ~0.05% (below min_latest_fraction)
+                soap[d] = 500.0
+        return kawpow, soap
+
+    def _config(self):
+        return {
+            "claim7": {
+                "min_samples": 90,
+                "min_growth_pct_per_quarter": 1.0,
+                "min_latest_fraction": 0.001,
+            }
+        }
+
+    def test_growing_soap_returns_growing_verdict(self) -> None:
+        from claim7_soap_adoption import analyze
+        kawpow, soap = self._soap_series(growing=True)
+        result = analyze(self._config(), kawpow, soap)
+        self.assertEqual(result["verdict"], "soap_adoption_growing")
+
+    def test_flat_soap_returns_stalled_or_negligible(self) -> None:
+        from claim7_soap_adoption import analyze
+        kawpow, soap = self._soap_series(growing=False)
+        result = analyze(self._config(), kawpow, soap)
+        self.assertIn(result["verdict"], {"soap_adoption_stalled", "soap_adoption_negligible"})
+
+    def test_insufficient_data_returns_insufficient(self) -> None:
+        from claim7_soap_adoption import analyze
+        kawpow, soap = self._soap_series(n=30, growing=True)
+        result = analyze(self._config(), kawpow, soap)
+        self.assertEqual(result["verdict"], "insufficient_data")
+
+    def test_result_contains_required_fields(self) -> None:
+        from claim7_soap_adoption import analyze
+        kawpow, soap = self._soap_series(growing=True)
+        result = analyze(self._config(), kawpow, soap)
+        for field in ("verdict", "soap_fraction_latest", "soap_fraction_baseline",
+                      "slope_pct_per_quarter", "r_squared", "n_days"):
+            self.assertIn(field, result, f"missing field: {field}")
+
+    def test_render_markdown_contains_required_sections(self) -> None:
+        from claim7_soap_adoption import analyze, render_markdown
+        kawpow, soap = self._soap_series(growing=True)
+        result = analyze(self._config(), kawpow, soap)
+        md = render_markdown(result, synthetic=True)
+        self.assertIn("Claim 7", md)
+        self.assertIn("SYNTHETIC", md)
+        self.assertIn("SOAP", md)
+        self.assertIn("growth rate", md.lower())
+
+
 class MeasurementStoreTest(unittest.TestCase):
     def test_store_measurement_idempotent_with_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

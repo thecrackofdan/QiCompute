@@ -213,6 +213,22 @@ def dual_revenue_model(
 # Sensitivity table
 # ---------------------------------------------------------------------------
 
+# Bitcoin network hashrate reference (approximate, as of 2025-2026)
+# 800 EH/s = 800e18 H/s = 800_000_000_000 MH/s
+BITCOIN_HASHRATE_EHS = 800.0  # EH/s
+BITCOIN_HASHRATE_MHS = BITCOIN_HASHRATE_EHS * 1e12  # EH/s -> MH/s
+
+# SOAP adoption scenarios: fraction of Bitcoin's SHA-256 hashrate
+# pointing workshares at Quai
+SOAP_ADOPTION_SCENARIOS = [
+    ("0.01%", 0.0001),
+    ("0.1%",  0.001),
+    ("1%",    0.01),
+    ("5%",    0.05),
+    ("10%",   0.10),
+]
+
+
 def sensitivity_table(
     config: dict[str, Any],
     index: dict[str, Any],
@@ -246,7 +262,56 @@ def sensitivity_table(
                 "workshare_qi_per_day": round(ws_qi, 4),
                 "energy_cost_qi_per_day": round(e_qi, 4),
                 "coverage_fraction": round(cov, 4),
+                "scenario": "gpu_rig",
             })
+    return rows
+
+
+def bitcoin_soap_scenarios(
+    config: dict[str, Any],
+    index: dict[str, Any],
+    difficulty: float,
+) -> list[dict[str, Any]]:
+    """Model the dual-revenue economics at Bitcoin-scale SHA-256 SOAP adoption.
+
+    Each row represents a fraction of Bitcoin's total SHA-256 hashrate
+    submitting workshares to Quai. The GPU inference node is separate
+    (ASIC + GPU split: ASIC handles workshares, GPU handles inference).
+    The GPU energy cost is fixed at the reference rig; the ASIC workshare
+    revenue scales with the adopted hashrate fraction.
+
+    This is the cleanest version of the dual-revenue model: no GPU time-sharing,
+    no probabilistic interleaving. The ASIC mines BTC/BCH and submits Quai
+    workshares; the GPU serves inference uninterrupted.
+    """
+    ref = config.get("reference_gpu", {})
+    rig_watts = float(ref.get("watts", 300.0))
+    claim6_cfg = config.get("claim6", {})
+    workshare_difficulty_factor = float(claim6_cfg.get("workshare_difficulty_factor", 0.1))
+    block_reward_qi = float(claim6_cfg.get("block_reward_qi", 1.0))
+    workshares_per_block_target = float(claim6_cfg.get("workshares_per_block_target", 3.0))
+    joules_per_qi = index["joules_per_qi"]
+
+    # GPU inference energy cost (fixed — ASIC handles workshares separately)
+    gpu_energy_qi_per_day = energy_cost_per_day_qi(rig_watts, joules_per_qi)
+
+    rows = []
+    for label, fraction in SOAP_ADOPTION_SCENARIOS:
+        adopted_hashrate_mhs = BITCOIN_HASHRATE_MHS * fraction
+        ws_day = expected_workshares_per_day(
+            adopted_hashrate_mhs, difficulty, workshare_difficulty_factor
+        )
+        qi_ws = qi_per_workshare(block_reward_qi, workshares_per_block_target)
+        ws_qi_per_day = ws_day * qi_ws
+        # Coverage: ASIC workshare revenue vs GPU inference energy cost
+        cov = workshare_coverage_fraction(ws_qi_per_day, gpu_energy_qi_per_day)
+        rows.append({
+            "btc_hashrate_fraction": label,
+            "adopted_hashrate_ehs": round(BITCOIN_HASHRATE_EHS * fraction, 4),
+            "workshare_qi_per_day": round(ws_qi_per_day, 2),
+            "gpu_energy_cost_qi_per_day": round(gpu_energy_qi_per_day, 4),
+            "coverage_fraction": round(cov, 4),
+        })
     return rows
 
 
@@ -259,6 +324,7 @@ def render_markdown(
     sensitivity: list[dict[str, Any]],
     *,
     synthetic: bool,
+    btc_scenarios: list[dict[str, Any]] | None = None,
 ) -> str:
     lines: list[str] = []
     if synthetic:
@@ -304,6 +370,41 @@ def render_markdown(
             f"{row['coverage_fraction']:.1%} |"
         )
     lines.append("")
+
+    # Bitcoin-scale SOAP adoption scenarios
+    if btc_scenarios:
+        lines.append(
+            "## Bitcoin-scale SOAP adoption: ASIC workshares + GPU inference\n"
+        )
+        lines.append(
+            "The cleanest dual-revenue model: a SHA-256 ASIC mines BTC/BCH and submits "
+            "Quai workshares via Project SOAP; a co-located GPU serves inference "
+            "uninterrupted. No GPU time-sharing required. The table shows workshare "
+            f"revenue vs GPU inference energy cost ({result['rig_watts']} W reference) "
+            f"at each fraction of Bitcoin's ~{BITCOIN_HASHRATE_EHS:.0f} EH/s hashrate.\n"
+        )
+        lines.append(
+            "| BTC hashrate fraction | Adopted hashrate (EH/s) | Workshare Qi/day "
+            "| GPU energy cost Qi/day | ASIC coverage of GPU energy |"
+        )
+        lines.append("| --- | --- | --- | --- | --- |")
+        for row in btc_scenarios:
+            lines.append(
+                f"| {row['btc_hashrate_fraction']} "
+                f"| {row['adopted_hashrate_ehs']:.4f} "
+                f"| {row['workshare_qi_per_day']:,.2f} "
+                f"| {row['gpu_energy_cost_qi_per_day']:.4f} "
+                f"| {row['coverage_fraction']:.1%} |"
+            )
+        lines.append("")
+        lines.append(
+            "> **Interpretation:** at 1% of Bitcoin's hashrate pointing workshares at Quai, "
+            "the ASIC workshare revenue dwarfs the GPU inference energy cost — the GPU "
+            "effectively runs inference for free from an energy perspective. This is not a "
+            "prediction that 1% of Bitcoin's hashrate will adopt SOAP; it is a model of "
+            "what the economics look like *if* they do. Claim 7 tracks the actual SOAP "
+            "adoption rate as a leading indicator of energy anchor strength.\n"
+        )
 
     lines.append(
         "> **Note on workshare difficulty factor:** the default factor of "
@@ -355,6 +456,7 @@ def main() -> int:
 
     result = dual_revenue_model(config, index, latest_difficulty)
     sensitivity = sensitivity_table(config, index, latest_difficulty)
+    btc_scenarios = bitcoin_soap_scenarios(config, index, latest_difficulty)
 
     results_dir = Path(config.get("results_dir", "results"))
     results_dir.mkdir(parents=True, exist_ok=True)
@@ -362,11 +464,14 @@ def main() -> int:
     # Save JSON stats
     stats = {k: v for k, v in result.items()}
     stats["synthetic"] = args.sample
+    stats["btc_soap_scenarios"] = btc_scenarios
     (results_dir / "claim6_stats.json").write_text(
         json.dumps(stats, indent=2), encoding="utf-8"
     )
 
-    markdown = render_markdown(result, sensitivity, synthetic=args.sample)
+    markdown = render_markdown(
+        result, sensitivity, synthetic=args.sample, btc_scenarios=btc_scenarios
+    )
     (results_dir / "claim6.md").write_text(markdown, encoding="utf-8")
     print(markdown)
     print(f"claim6: written to results/claim6.md")

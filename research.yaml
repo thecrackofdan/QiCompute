@@ -153,6 +153,25 @@ soap:
   scrypt_hashrate_regex: "([0-9]+(?:\\.[0-9]+)?)\\s*[Gg][Hh]/s"
   scrypt_hashrate_unit_multiplier: 1000000000     # GH/s -> H/s
 
+claim7:
+  # Claim 7: SOAP adoption rate as energy anchor leading indicator.
+  # Tracks the fraction of Quai's effective difficulty contributed by SOAP
+  # (SHA-256 / Scrypt ASIC) workshares over time, and tests whether it is
+  # growing at a meaningful rate.
+  #
+  # Minimum days of post-SOAP-launch data required for a reliable trend.
+  min_samples: 90
+  # P7: minimum growth rate in SOAP fraction to declare adoption is growing.
+  # Units: percentage points per quarter (90 days).
+  # Candidate prior: 1 pp/quarter (conservative — any measurable growth counts).
+  min_growth_pct_per_quarter: 1.0
+  # P7: minimum latest SOAP fraction to declare adoption is non-negligible.
+  # Candidate prior: 0.001 (0.1% of effective difficulty from ASIC workshares).
+  min_latest_fraction: 0.001
+  # Bitcoin reference hashrate used in Claim 6 BTC-scale scenarios.
+  # Update periodically from https://www.blockchain.com/explorer/charts/hash-rate
+  bitcoin_hashrate_ehs: 800.0
+
 verdict:
   # PRE-REGISTRATION SWITCH. While false, every claim-1 output is stamped
   # "THRESHOLDS DRAFT - not citable". Flip to true only after the bracketed

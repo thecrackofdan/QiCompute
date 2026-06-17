@@ -208,9 +208,31 @@ profitably. The crossover daemon in `tools/crossover-daemon/` is the
 operational complement: it switches between mining and inference based on live
 revenue, while Claim 6 models the case where both run simultaneously.
 
+### 4.7 Claim 7 — SOAP adoption rate as energy anchor leading indicator
+
+Stats: `results/claim7_stats.json` · Narrative: `results/claim7.md`
+
+[Empty until 90+ days of post-SOAP-launch (Dec 2025) workshare data are available.
+Must report: SOAP fraction trend (slope in pp/quarter), R² of the OLS fit, baseline
+and latest SOAP fraction, and the verdict against the pre-registered thresholds in
+`research.yaml → claim7`.]
+
+**Interpretation note:** Claim 7 is a leading indicator, not a peg test. A positive
+result (SOAP fraction growing at ≥1 pp/quarter) is evidence that the energy anchor
+is broadening — more diverse hardware is contributing to Qi's energy backing. It
+does not establish that Bitcoin-scale hashrate will flow to Quai; it tests only whether
+any ASIC participation is measurably growing. The Bitcoin-scale scenarios in
+`results/claim6.md` are a model of consequences at each adoption level; Claim 7 is
+the empirical instrument that tracks whether those scenarios are becoming reality.
+
+**Merge-mining context:** Namecoin has been merge-mined with Bitcoin since 2011, with
+~50–60% of Bitcoin's hashrate participating despite NMC having negligible USD value.
+The barrier to SOAP adoption is pool software support, not miner incentive — a point
+addressed in OBJECTIONS.md (l).
+
 ## 5. Objections and limitations
 
-Incorporated by reference: OBJECTIONS.md (a)–(j). The conclusion section may
+Incorporated by reference: OBJECTIONS.md (a)–(l). The conclusion section may
 not use causal language ("anchors", "is caused by") for claim 1 —
 "tracks"/"fails to track" only — per objection (e).
 

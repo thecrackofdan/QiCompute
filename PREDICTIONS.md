@@ -221,6 +221,46 @@ a 4x hashrate range and 50x difficulty range. The pre-registered threshold must 
 at the reference rig parameters; sensitivity is reported as context, not as a
 pass/fail gate.
 
+## P7 — SOAP adoption rate as energy anchor leading indicator (claim 7)
+
+**Prediction:** The SOAP workshare fraction of Quai's total effective difficulty
+grows monotonically over any 90-day window after SOAP launch (Dec 2025), with a
+minimum growth rate of **≥ [1 percentage point per quarter]** from baseline, and
+a latest fraction of **≥ [0.1%]** of effective difficulty.
+
+**What is being tested:** whether Project SOAP is attracting meaningful ASIC
+participation in Quai workshare submission. This is a leading indicator of energy
+anchor strength — if SHA-256 and Scrypt ASICs are submitting workshares, the
+energy backing of Qi is broadening beyond KawPoW GPUs. It is also the empirical
+complement to Claim 6's Bitcoin-scale scenarios: P7 tracks whether those scenarios
+are becoming reality.
+
+**Why this is a leading indicator:**
+- SOAP adoption precedes the ASIC + GPU split configuration becoming standard.
+- Growing SOAP fraction means more diverse, geographically distributed energy is
+  anchoring Qi — strengthening the peg against regional energy price shocks.
+- At meaningful adoption levels (>1%), the dual-revenue economics of Claim 6
+  become accessible to any operator with co-located ASIC + GPU hardware.
+
+**Failure conditions:**
+- P7 fails if `slope_pct_per_quarter < 1.0` over the full post-SOAP-launch window.
+- P7 fails if `latest_fraction < 0.001` (ASIC participation is negligible).
+- P7 is `insufficient_data` if fewer than 90 days of post-SOAP-launch workshare
+  data are available.
+
+**Data conditions:**
+- Requires `workshare_difficulty_kawpow_ws` and `workshare_difficulty_soap_ws`
+  series from `fetch_data.py` (incremental RPC scan).
+- Requires at least 90 days of data after `2025-12-01` (SOAP launch date).
+- The SOAP vs KawPoW heuristic split (presence of `mixHash` field) is documented
+  in `fetch_data.py`; an explicit algorithm field in the RPC would improve accuracy.
+
+**Bitcoin-scale context:** Claim 6's `results/claim6.md` includes a table of
+dual-revenue economics at 0.01%–10% of Bitcoin's ~800 EH/s SHA-256 hashrate.
+P7 does not predict any specific adoption level — it tests only whether adoption
+is growing at all. The Bitcoin-scale table is a model of consequences, not a
+prediction.
+
 ## Evaluation discipline
 
 - The evaluation window is the **full available history** at freeze time —

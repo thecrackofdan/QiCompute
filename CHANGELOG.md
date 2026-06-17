@@ -109,6 +109,32 @@ All notable changes to QiCompute are documented here. This project follows the s
 - `stabilized_market_price`: dynamic market pricing from `market_pricing.py` with the stability corridor applied, for quote paths.
 - Hardware calibration bridge (`calibrate.py`, `make calibrate`): measures (or accepts) tokens-per-second and watts, derives the recommended `energy_anchor` config values, flags drift beyond 25% against current config, and can append measurements to the evidence registry where the assumption tracker picks them up. Energy parity and billing benchmark assumptions added to `ECONOMIC_ASSUMPTIONS.md`.
 
+### Added (Claim 7, BTC-scale SOAP scenarios, and Claim 6 extension)
+
+- **Claim 7: SOAP adoption rate as energy anchor leading indicator**
+  (`claim7_soap_adoption.py`): tracks the fraction of Quai's total effective
+  difficulty contributed by SOAP (SHA-256/Scrypt ASIC) workshares over time.
+  Computes OLS slope (pp/quarter), R², baseline and latest fraction, and applies
+  pre-registered P7 thresholds from `research.yaml → claim7`. Returns
+  `soap_adoption_growing`, `soap_adoption_stalled`, `soap_adoption_negligible`,
+  or `insufficient_data` (< 90 days post-SOAP-launch). Integrated into
+  `reproduce.py` and `REPORT.md`.
+- `research.yaml` gains a `claim7:` section: `min_samples` (90),
+  `min_growth_pct_per_quarter` (1.0 pp/quarter), `min_latest_fraction` (0.001),
+  and `bitcoin_hashrate_ehs` (800.0) for Claim 6 BTC-scale scenario reference.
+- `PREDICTIONS.md` gains P7 with numeric failure conditions, data conditions,
+  and Bitcoin-scale context note.
+- `OBJECTIONS.md` gains objection (l): "Bitcoin miners will never point hashrate
+  at Quai — the SOAP incentive is too small" — with Namecoin merge-mining
+  precedent and pool-software-support framing.
+- `PAPER.md` gains section 4.7 (Claim 7) with results wiring, interpretation
+  note, and merge-mining context; objections reference updated to (a)–(l).
+- **Claim 6 extended** with `bitcoin_soap_scenarios()`: models dual-revenue
+  economics at 0.01%–10% of Bitcoin's ~800 EH/s SHA-256 hashrate (ASIC + GPU
+  split configuration). Results appear in `results/claim6.md` and
+  `results/claim6_stats.json` under `btc_soap_scenarios`. Includes
+  interpretation note linking to Claim 7 as the empirical complement.
+
 ### Added (Claim 6, dashboard, and code quality)
 
 - **Claim 6: workshare-for-inference dual-revenue model** (`claim6_workshare_inference.py`):

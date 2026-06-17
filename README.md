@@ -6,9 +6,9 @@ An empirical research toolkit that tests whether **Qi** — the energy-denominat
 
 ## What it does
 
-QiCompute pulls live on-chain and market data, runs five falsifiable claims against it, and writes a full report to `results/REPORT.md`. Every number is traceable back to a cached data file; every verdict has a pre-registered failure condition.
+QiCompute pulls live on-chain and market data, runs seven falsifiable claims against it, and writes a full report to `results/REPORT.md`. Every number is traceable back to a cached data file; every verdict has a pre-registered failure condition.
 
-The five claims, in order of dependency:
+The seven claims, in order of dependency:
 
 | # | Claim | Script | What it tests |
 |---|---|---|---|
@@ -17,6 +17,8 @@ The five claims, in order of dependency:
 | 3 | **Joules/token ground truth** | `benchmark.py` | Measured tokens/sec, watts, and joules/token on real hardware, stored in a public-dataset SQLite schema |
 | 4 | **Settlement** | `claim4_settlement.py` | Escrow → settle → refund cycle in micro-Qi, conservation-checked and receipt-emitting |
 | 5 | **K-Quai controller** | `claim5_token_choice.py` | Does the on-chain QUAI↔Qi exchange rate respond to miner token preference as the monetary theory predicts? |
+| 6 | **Dual-revenue model** | `claim6_workshare_inference.py` | Is the workshare subsidy to inference workers economically non-trivial? Models GPU + ASIC split at Bitcoin-scale SOAP adoption. |
+| 7 | **SOAP adoption** | `claim7_soap_adoption.py` | Is the SOAP workshare fraction of Quai's effective difficulty growing? Leading indicator of energy anchor broadening. |
 
 ---
 
@@ -25,13 +27,16 @@ The five claims, in order of dependency:
 ```bash
 pip install -r requirements.txt
 
-# Full pipeline: fetch live data, run all five claims, write results/REPORT.md
+# Full pipeline: fetch live data, run all seven claims, write results/REPORT.md
 python3 reproduce.py
 
 # Offline demo with synthetic data (labeled, not findings)
 python3 reproduce.py --sample
 
-# Run the test suite (33 deterministic tests)
+# Live at-a-glance dashboard (auto-refresh every 60s)
+python3 qi_dashboard.py --watch 60
+
+# Run the test suite (41 deterministic tests)
 python3 -m unittest
 ```
 
@@ -86,6 +91,32 @@ Miners choose QUAI or Qi as their block reward at mining time (`woHeader.lock`).
 
 The thesis does not require miners to prefer Qi. Because QUAI and Qi are convertible at the protocol rate, the total energy expenditure is always reflected in the combined monetary base regardless of miner choice. Claim 5 tests whether the controller mechanism that enforces this is working.
 
+### Claim 6 — Dual-revenue model and the Bitcoin merge-mining flywheel
+
+Project SOAP allows SHA-256 ASICs (Bitcoin Cash / Bitcoin hardware) and Scrypt ASICs (Litecoin / Dogecoin hardware) to submit workshares to Quai blocks and earn QUAI rewards — for the same hash that already secures their primary chain. The BCH/LTC block reward flows to a protocol-controlled buyback address; the miner earns QUAI on top.
+
+This creates the cleanest version of the dual-revenue model: a **SHA-256 ASIC mines BTC/BCH and submits Quai workshares; a co-located GPU serves inference uninterrupted**. No GPU time-sharing. No probabilistic interleaving. The ASIC handles workshare submission; the GPU is free to run inference at full capacity.
+
+`claim6_workshare_inference.py` models the economics of this configuration and includes a **Bitcoin-scale SOAP adoption table** showing dual-revenue outcomes at 0.01%–10% of Bitcoin's ~800 EH/s SHA-256 hashrate:
+
+| BTC hashrate fraction | Adopted hashrate | Inference energy covered by ASIC workshares |
+|---|---|---|
+| 0.01% | 0.08 EH/s | Already significant relative to a single GPU node |
+| 0.1% | 0.8 EH/s | GPU inference effectively free from an energy standpoint |
+| 1% | 8 EH/s | ASIC workshare revenue dwarfs GPU energy cost by orders of magnitude |
+
+This is a model of consequences, not a prediction. Claim 7 tracks whether those scenarios are becoming reality.
+
+### Claim 7 — SOAP adoption as a leading indicator
+
+`claim7_soap_adoption.py` tracks the SOAP workshare fraction of Quai's total effective difficulty over time and tests whether it is growing at a meaningful rate (pre-registered threshold: ≥1 percentage point per quarter). A positive result is direct on-chain evidence that:
+
+1. The energy anchor is broadening — more diverse hardware is contributing to Qi's energy backing.
+2. The merge-mining flywheel is turning — ASIC miners are finding SOAP participation profitable.
+3. The ASIC + GPU split configuration (Claim 6) is becoming a standard node setup.
+
+**Merge-mining precedent:** Namecoin has been merge-mined with Bitcoin since 2011, with ~50–60% of Bitcoin's hashrate participating despite NMC having negligible USD value. The barrier to SOAP adoption is pool software support, not miner incentive — the same barrier that was cleared for Namecoin with far less economic justification.
+
 ---
 
 ## Configuration (`research.yaml`)
@@ -97,6 +128,8 @@ All thresholds, reference rig specs, API endpoints, and SOAP energy factors live
 | `reference_gpu` | KawPoW reference rig (hashrate, watts) for claim-1 cost model |
 | `soap.algo_energy_factors` | J/hash normalisation for SHA-256 and Scrypt workshares |
 | `soap.reference_sha256/scrypt` | ASIC rig specs (populated by `benchmark.py --calibrate-rig --algo`) |
+| `claim6` | Workshare difficulty factor, block reward, coverage threshold |
+| `claim7` | SOAP adoption growth threshold, minimum fraction, BTC hashrate reference |
 | `verdict` | Pre-registration switch (`thresholds_frozen`), liquidity gate, minimum samples |
 | `claim5` | Controller directionality thresholds for P5a/P5b/P5c |
 
@@ -108,6 +141,7 @@ All thresholds, reference rig specs, API endpoints, and SOAP energy factors live
 
 ```
 reproduce.py              # one-command pipeline runner -> results/REPORT.md
+qi_dashboard.py           # live CLI dashboard (--watch N for auto-refresh)
 fetch_data.py             # data fetching and caching
 claim1_peg.py             # peg tracking (multi-algorithm energy model)
 claim2_stability.py       # unit-of-account stability
@@ -115,12 +149,15 @@ benchmark.py              # joules/token measurement + ASIC/GPU rig calibration
 qi_index.py               # live Qi cost of 1M tokens (joules/Qi × joules/token)
 claim4_settlement.py      # micro-Qi escrow/settle/refund
 claim5_token_choice.py    # K-Quai controller directionality
+claim6_workshare_inference.py  # dual-revenue model + BTC-scale SOAP scenarios
+claim7_soap_adoption.py   # SOAP adoption rate as energy anchor leading indicator
 series.py                 # shared OLS regression and alignment utilities
 sample_data.py            # deterministic synthetic fixtures for offline testing
-test_claims.py            # 33 deterministic tests
+test_claims.py            # 41 deterministic tests
 research.yaml             # all configuration and pre-registered thresholds
 PREDICTIONS.md            # falsifiable numeric predictions with failure conditions
-OBJECTIONS.md             # steelmanned case against the thesis (10 objections)
+OBJECTIONS.md             # steelmanned case against the thesis (12 objections)
+PAPER.md                  # academic paper skeleton wired to results/ artifacts
 CHANGELOG.md              # full change history
 data/                     # cached data (JSON + CSV mirrors)
 results/                  # claim outputs, charts, REPORT.md
@@ -142,7 +179,9 @@ Run `benchmark.py --minutes 5 --store --contributor your-handle` on your GPU and
 
 **Protocol coupling is not market coupling.** Quai's protocol ties Qi emission to difficulty by construction — that is mechanics. The claim under test is whether Qi's *market price* tracks energy cost. Claim 1 tests the market layer only.
 
-**SOAP workshares extend the energy anchor.** SHA-256 and Scrypt ASICs submitting workshares to Quai blocks contribute real energy to the network's security without any additional expenditure — the same work that secures BCH or LTC simultaneously anchors Qi's energy peg.
+**SOAP workshares extend the energy anchor.** SHA-256 and Scrypt ASICs submitting workshares to Quai blocks contribute real energy to the network's security without any additional expenditure — the same work that secures BCH or LTC simultaneously anchors Qi's energy peg. Claims 6 and 7 model and track this mechanism.
+
+**The Bitcoin merge-mining flywheel.** If SOAP adoption grows, more of Bitcoin's ~800 EH/s SHA-256 hashrate flows into Quai's energy anchor. At even 1% adoption, the ASIC workshare revenue for a co-located inference node dwarfs its GPU energy cost — making Qi-priced inference economically self-sustaining from the energy side. Claim 7 is the early warning system for whether this flywheel is turning.
 
 ---
 

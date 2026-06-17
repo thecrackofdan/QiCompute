@@ -8,7 +8,7 @@ yet the work is identical regardless of choice:
         The energy-money thesis holds regardless of miner token preference because
         the on-chain K-Quai controller maintains QUAI↔Qi convertibility at the
         protocol-set rate.  Concretely: the Qi-per-QUAI exchange rate (on-chain)
-        should move in the direction predicted by the controller's proportional
+        should move in the direction predicted by the controller's logistic
         regression — rising when miners prefer QUAI (lock=0), falling when miners
         prefer Qi (lock=1).
 
@@ -330,7 +330,7 @@ def build_markdown(
         "are convertible at the protocol rate, the total energy expenditure of the network "
         "(captured by difficulty) is always fully reflected in the combined monetary base. "
         "Miner token choice is a *signal* about relative value expectations, not a threat "
-        "to the energy anchor. The K-Quai controller's proportional update (alpha=0.001) continuously "
+        "to the energy anchor. The K-Quai controller's logistic regression continuously "
         "adjusts the exchange rate to maintain equilibrium, meaning:\n\n"
         "- A sustained preference for QUAI raises the Qi-per-QUAI rate → Qi becomes cheaper "
         "relative to energy cost → inference priced in Qi becomes more competitive.\n"

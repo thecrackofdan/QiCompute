@@ -4,13 +4,6 @@ All notable changes to QiCompute are documented here. This project follows the s
 
 ## [Unreleased]
 
-### Added (K-Quai Controller ## [Unreleased] Energy Model Calibration)
-- **Dynamic `k_Qi` block reward formula**: Replaced the hardcoded `block_reward_qi: 3` with the protocol-authoritative `k_Qi` formula (`reward = (1 / 8e9) * difficulty`). This corrects a ~57x underestimation of the block reward pool and fixes the absolute scale of all level claims (`joules_per_qi`, Qi index). Claim 1 log-returns are mathematically invariant to this constant, but level claims are now accurate.
-- **K-Quai controller mechanics updated**: Corrected the documentation and `claim5` docstrings to reflect that the K-Quai controller uses a proportional update (`alpha = 0.001`), not a logistic regression, and operates on `minerDifficulty` (a 4,000-block EMA), not raw block difficulty.
-- **`fetch_data.py` tracking**: Added parsing for `minerDifficulty` from block headers in preparation for deeper controller modeling.
-
-## [0.2.0] - 2026-06-17
-
 ### Added (TWP as first-class merge-mining algorithm — protocol confirmation)
 
 - **TWP inference confirmed as native Quai merge-mining algorithm**: the Quai team has

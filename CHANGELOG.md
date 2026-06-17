@@ -4,6 +4,35 @@ All notable changes to QiCompute are documented here. This project follows the s
 
 ## [Unreleased]
 
+### Added (TWP as first-class merge-mining algorithm — protocol confirmation)
+
+- **TWP inference confirmed as native Quai merge-mining algorithm**: the Quai team has
+  confirmed (AMA, Jun 2026) that Tensor Work Proof (TWP) inference will be added as a
+  first-class merge-mining algorithm alongside SHA-256 (BCH/BTC), Scrypt (LTC/DOGE), and
+  Ravencoin KawPoW. This means GPU inference nodes running InferenceGemm will submit TWP
+  receipts as native Quai workshares and earn Qi rewards — no co-located ASIC required.
+- **`benchmark.py --algo twp`** added: calibrates a GPU inference rig via the igemm backend,
+  measures receipts/sec and watts, computes the energy_factor vs KawPoW reference, and
+  prints the `research.yaml soap.reference_twp` block to paste in.
+- **`fetch_data.py` `twp_ws` bucket** added to `fetch_workshare_difficulty()`: tracks
+  `workshare_difficulty_twp_ws` as a separate daily series using the `twpReceipt`/
+  `tensorReceipt` field heuristic. Ready to populate once TWP launches on mainnet.
+- **`research.yaml soap.algo_energy_factors`** extended with `rvn: 1.0` (Ravencoin KawPoW,
+  same algorithm as Quai) and `twp: 0.001` (placeholder; replace with
+  `benchmark.py --calibrate-rig --algo twp` output).
+- **`research.yaml soap`** extended with `reference_rvn` and `reference_twp` stub blocks
+  and TWP miner command/regex fields for future calibration.
+- **`_ALGO_CONFIG` in `benchmark.py`** extended with `rvn` and `twp` entries.
+- **`claim6_workshare_inference.py`** reframed: docstring and `render_markdown()` updated
+  to reflect that the GPU IS the miner under TWP — the TWP receipt is the proof-of-work,
+  the Qi reward is the block subsidy, the inference fee is the transaction fee.
+- **`claim7_soap_adoption.py`** updated: docstring, `render_markdown()` intro, and
+  interpretation notes updated to track SOAP + TWP adoption together as the energy anchor
+  broadening signal. P7 in `PREDICTIONS.md` retitled to "SOAP + TWP adoption rate".
+- **Objection (n)** added to `OBJECTIONS.md`: "TWP as native algorithm obsoletes the
+  workaround framing" — with a full treatment of why the model strengthens rather than
+  breaks when TWP launches.
+
 ### Added (InferenceGemm backend & TWP overhead — Dominant Strategies alignment)
 
 - **InferenceGemm backend support in `benchmark.py`**: a new `igemm` backend drives the

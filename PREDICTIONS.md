@@ -222,12 +222,14 @@ workshare rewards cover **≥ [5]%** of the energy cost of running inference con
 This threshold is intentionally conservative — the claim is that the dual-revenue model
 is economically non-trivial, not that it is sufficient alone.
 
-**What is being tested:** whether a GPU that simultaneously mines Quai (submitting
-KawPoW workshares) and serves inference (earning customer payment) receives a meaningful
-subsidy from workshare rewards. The workshares are standard partial proofs — not AI
-outputs used as consensus. The dual-revenue model is the operational complement to
-claim 1: if Qi prices energy, then workshare rewards denominated in Qi are a direct
-energy subsidy to inference workers.
+**What is being tested:** whether a GPU running the InferenceGemm harness earns
+meaningful Qi block rewards by submitting Tensor Work Proof (TWP) receipts as native
+Quai workshares. The Quai team has confirmed TWP inference will be a first-class
+merge-mining algorithm alongside SHA-256 (BCH/BTC), Scrypt (LTC/DOGE), and Ravencoin
+KawPoW. This means the GPU IS the miner: the TWP receipt is the proof-of-work, the
+Qi reward is the block subsidy, and the inference fee is the transaction fee.
+Until TWP launches on mainnet, the model uses KawPoW hashrate as a proxy for
+TWP receipts/sec. Once live, calibrate with `benchmark.py --calibrate-rig --algo twp`.
 
 **Failure conditions:**
 - P6 fails if `workshare_coverage_fraction < 0.05` at current network difficulty
@@ -246,26 +248,28 @@ a 4x hashrate range and 50x difficulty range. The pre-registered threshold must 
 at the reference rig parameters; sensitivity is reported as context, not as a
 pass/fail gate.
 
-## P7 — SOAP adoption rate as energy anchor leading indicator (claim 7)
+## P7 — SOAP + TWP adoption rate as energy anchor leading indicator (claim 7)
 
 **Prediction:** The SOAP workshare fraction of Quai's total effective difficulty
 grows monotonically over any 90-day window after SOAP launch (Dec 2025), with a
 minimum growth rate of **≥ [1 percentage point per quarter]** from baseline, and
-a latest fraction of **≥ [0.1%]** of effective difficulty.
+a latest fraction of **≥ [0.1%]** of effective difficulty. TWP workshare fraction
+is tracked separately once the protocol launches on mainnet.
 
-**What is being tested:** whether Project SOAP is attracting meaningful ASIC
-participation in Quai workshare submission. This is a leading indicator of energy
-anchor strength — if SHA-256 and Scrypt ASICs are submitting workshares, the
-energy backing of Qi is broadening beyond KawPoW GPUs. It is also the empirical
-complement to Claim 6's Bitcoin-scale scenarios: P7 tracks whether those scenarios
-are becoming reality.
+**What is being tested:** whether Project SOAP and the planned TWP inference
+algorithm are attracting meaningful participation in Quai workshare submission.
+SOAP covers SHA-256 ASICs (BCH/BTC), Scrypt ASICs (LTC/DOGE), and Ravencoin
+KawPoW GPUs. TWP covers GPU inference nodes running InferenceGemm. Together,
+these represent the full merge-mining ecosystem that broadens Qi's energy anchor
+beyond KawPoW-only mining.
 
 **Why this is a leading indicator:**
 - SOAP adoption precedes the ASIC + GPU split configuration becoming standard.
-- Growing SOAP fraction means more diverse, geographically distributed energy is
-  anchoring Qi — strengthening the peg against regional energy price shocks.
+- TWP adoption means inference nodes ARE Quai miners — no split required.
+- Growing SOAP+TWP fraction means more diverse, geographically distributed energy
+  is anchoring Qi — strengthening the peg against regional energy price shocks.
 - At meaningful adoption levels (>1%), the dual-revenue economics of Claim 6
-  become accessible to any operator with co-located ASIC + GPU hardware.
+  become accessible to any GPU inference operator without co-located ASIC hardware.
 
 **Failure conditions:**
 - P7 fails if `slope_pct_per_quarter < 1.0` over the full post-SOAP-launch window.

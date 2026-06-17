@@ -1,29 +1,37 @@
 """Claim 7: SOAP adoption rate as a leading indicator of energy anchor strength.
 
 Project SOAP (Subsidized Open-market Acquisition Protocol, launched Dec 2025)
-allows SHA-256 ASICs (Bitcoin Cash/Bitcoin hardware) and Scrypt ASICs
-(Litecoin/Dogecoin hardware) to submit workshares to Quai blocks and earn
-QUAI rewards. The BCH/LTC block reward goes to a protocol-controlled buyback
-address; the ASIC miner earns QUAI for the same hash.
+allows SHA-256 ASICs (Bitcoin Cash/Bitcoin hardware), Scrypt ASICs
+(Litecoin/Dogecoin hardware), and Ravencoin KawPoW GPUs to submit workshares
+to Quai blocks and earn QUAI rewards. The parent chain block reward goes to a
+protocol-controlled buyback address; the miner earns QUAI for the same work.
 
-The thesis: if the SOAP workshare fraction of Quai's effective difficulty grows
-over time, it is direct on-chain evidence that:
+The Quai team has also confirmed that Tensor Work Proof (TWP) inference will
+be added as a first-class merge-mining algorithm. This means GPU inference
+workers (running InferenceGemm) will submit TWP receipts as native workshares
+and earn Qi rewards — making the GPU both a miner and an inference provider
+without any time-sharing or co-located ASIC required.
+
+The thesis: if the combined SOAP+TWP workshare fraction of Quai's effective
+difficulty grows over time, it is direct on-chain evidence that:
   1. The energy anchor is broadening — more diverse, geographically distributed
-     hardware is contributing to Qi's energy backing.
-  2. The merge-mining flywheel is active — ASIC miners are finding it profitable
-     to point at Quai, which means the QUAI reward is non-trivial relative to
-     their primary chain reward.
+     hardware (ASICs, inference GPUs) is contributing to Qi's energy backing.
+  2. The merge-mining flywheel is active — miners are finding it profitable
+     to point at Quai, which means the QUAI/Qi reward is non-trivial relative
+     to their primary chain reward.
   3. The dual-revenue model (Claim 6) is becoming more accessible — as SOAP
-     adoption grows, the ASIC + GPU split becomes a standard node configuration.
+     and TWP adoption grows, the standard inference node IS a Quai miner.
 
 Prediction P7 (pre-registered):
   The SOAP workshare fraction of total effective difficulty grows monotonically
   over any 90-day window after SOAP launch (Dec 2025), with a minimum growth
-  rate of [1 percentage point per quarter] from baseline.
+  rate of [1 percentage point per quarter] from baseline. TWP workshare
+  fraction is tracked separately once the protocol launches.
 
 This claim does NOT assert that Bitcoin's hashrate will flow to Quai. It tests
-whether the SOAP mechanism is attracting any meaningful ASIC participation at
-all, and tracks the growth rate as a leading indicator.
+whether the SOAP/TWP mechanism is attracting any meaningful participation at
+all, and tracks the growth rate as a leading indicator of energy anchor
+broadening.
 """
 from __future__ import annotations
 
@@ -182,12 +190,15 @@ def render_markdown(
         lines.append(
             "> **SYNTHETIC SAMPLE DATA** - pipeline demonstration only, not a finding.\n"
         )
-    lines.append("# Claim 7: SOAP Adoption Rate as Energy Anchor Leading Indicator\n")
+    lines.append("# Claim 7: SOAP + TWP Adoption Rate as Energy Anchor Leading Indicator\n")
     lines.append(
-        "Project SOAP (Dec 2025) allows SHA-256 and Scrypt ASICs to submit workshares "
-        "to Quai blocks, earning QUAI rewards for the same hash that secures BTC/BCH/LTC/DOGE. "
-        "This claim tracks whether ASIC participation is growing — a direct on-chain signal "
-        "that the energy anchor is broadening beyond KawPoW GPUs.\n"
+        "Project SOAP (Dec 2025) allows SHA-256 ASICs (BCH/BTC), Scrypt ASICs (LTC/DOGE), "
+        "and Ravencoin KawPoW GPUs to submit workshares to Quai blocks, earning QUAI rewards "
+        "for the same work. The Quai team has confirmed that **Tensor Work Proof (TWP) inference** "
+        "will also be added as a first-class merge-mining algorithm, meaning GPU inference nodes "
+        "running InferenceGemm will earn Qi rewards as native Quai miners. "
+        "This claim tracks whether SOAP and TWP participation is growing — a direct on-chain "
+        "signal that the energy anchor is broadening beyond KawPoW GPUs.\n"
     )
 
     if growth.get("verdict") == "insufficient_data":
@@ -223,20 +234,23 @@ def render_markdown(
     )
 
     lines.append(
-        "> **Why this matters for Claim 6:** as SOAP adoption grows, the ASIC + GPU "
-        "split configuration (ASIC handles workshares, GPU handles inference) becomes "
-        "more common and more profitable. The Bitcoin-scale scenarios in `claim6.md` "
-        "show what the dual-revenue economics look like at each adoption level. "
-        "Claim 7 is the empirical complement: it tracks whether those scenarios are "
-        "becoming reality.\n"
+        "> **Why this matters for Claim 6:** as SOAP and TWP adoption grows, the "
+        "inference node becomes a native Quai miner. For SOAP: the ASIC + GPU split "
+        "(ASIC handles workshares, GPU handles inference) becomes more common. For TWP: "
+        "the GPU itself submits TWP receipts as workshares — no ASIC needed. "
+        "The Bitcoin-scale scenarios in `claim6.md` show the dual-revenue economics at "
+        "each adoption level. Claim 7 is the empirical complement: it tracks whether "
+        "those scenarios are becoming reality.\n"
     )
 
     lines.append(
         "> **Merge-mining note:** SOAP workshares do not require Bitcoin miners to "
         "change their primary chain. A SHA-256 ASIC mining BTC submits the same hash "
-        "to Quai as a workshare with negligible overhead. The barrier to adoption is "
-        "pool software support and the QUAI reward being worth the implementation cost — "
-        "not any change to Bitcoin's protocol.\n"
+        "to Quai as a workshare with negligible overhead. TWP workshares are even simpler: "
+        "the InferenceGemm harness emits a Tensor Work Receipt as a byproduct of every "
+        "inference run — no separate mining process required. The barrier to adoption is "
+        "pool/harness software support and the Qi reward being worth the implementation "
+        "cost — not any change to Bitcoin's or any other chain's protocol.\n"
     )
 
     return "\n".join(lines)

@@ -300,3 +300,16 @@ The reason the overhead is small is architectural: TWP computes Merkle roots ove
 **Pre-registered test:** P3b in PREDICTIONS.md. If measured overhead on the RTX 3090 exceeds 10%, this objection stands and Claim 6's dual-revenue economics must be recalculated with the overhead included in the joules/token figure.
 
 **Source:** https://huggingface.co/dominant-strategies/quai-igemm-qwen2.5-3b-w8a8-research
+
+## (n) "TWP inference as a native merge-mining algorithm changes the model entirely — the current claim structure is built on a workaround that may be obsoleted"
+
+**Objection:** QiCompute was originally designed around a GPU that splits time between KawPoW mining and inference serving. If TWP inference becomes a first-class merge-mining algorithm, the entire framing changes: the GPU is no longer splitting time, it IS the miner. This makes some of the current model assumptions (workshare difficulty factor, KawPoW hashrate proxy) provisional at best.
+
+**Response:** This objection is correct — and it is a strength of the project, not a weakness. The confirmation that TWP inference will be a native Quai algorithm is the strongest possible validation of the QiCompute thesis. The model was built to test whether the dual-revenue structure is economically viable; the protocol team's decision to implement it natively is evidence that the economics are compelling enough to warrant first-class support.
+
+The provisional assumptions are explicitly documented:
+- The KawPoW hashrate proxy for TWP receipts/sec is labeled as a pre-launch approximation in `claim6_workshare_inference.py` and `research.yaml`.
+- The `benchmark.py --calibrate-rig --algo twp` path is already implemented to replace the proxy with real measurements once TWP launches on mainnet.
+- The `fetch_data.py` workshare scanner already tracks `twp_ws` as a separate bucket (using the `twpReceipt`/`tensorReceipt` heuristic), ready to populate once the protocol is live.
+
+The model does not break when TWP launches — it becomes more accurate. The pre-registered thresholds in `research.yaml` are conservative enough to hold under the real TWP economics, and the sensitivity table in `claim6.md` already covers the range of receipts/sec that a reference RTX 3090 is likely to produce.

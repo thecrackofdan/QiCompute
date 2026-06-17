@@ -1,15 +1,22 @@
 """Claim 6: workshare-for-inference dual-revenue model.
 
-The core insight: an inference worker running on a Quai-connected GPU can
-submit workshares while serving jobs, earning Qi block rewards *on top of*
-customer payment. This script models the dual-revenue economics and answers
-the question: at what point do workshare rewards alone cover the energy cost
-of running inference?
+The core insight: a GPU running the Dominant Strategies InferenceGemm harness
+submits Tensor Work Proof (TWP) receipts as native Quai workshares, earning
+Qi block rewards *on top of* customer payment. This is not a workaround —
+the Quai team has confirmed that TWP inference will be a first-class merge-
+mining algorithm alongside SHA-256 (BCH/BTC), Scrypt (LTC/DOGE), and
+Ravencoin KawPoW.
+
+This means the GPU IS the miner. There is no time-sharing, no probabilistic
+interleaving, no co-located ASIC required. The Tensor Work Receipt from each
+inference run is the proof-of-work. The Qi reward is the block subsidy. The
+inference fee is the transaction fee. The energy cost is priced in Qi by
+construction.
 
 Two revenue streams for an inference node:
   1. Customer payment  — Qi per job, priced at the joule-derived rate (qi_index)
-  2. Workshare rewards — Qi per block, proportional to the node's hashrate
-                         relative to total network difficulty
+  2. Workshare rewards — Qi per block, proportional to TWP receipts/sec
+                         relative to total network TWP difficulty
 
 The dual-revenue break-even is the point where workshare rewards >= energy cost
 of running inference, making customer payment pure margin.
@@ -21,9 +28,10 @@ Prediction P6 (pre-registered):
   that the dual-revenue model is economically non-trivial, not that it is
   sufficient alone.
 
-This claim does NOT require proof-of-useful-work or AI workloads replacing
-mining. The inference worker is a Quai miner who also serves jobs; the
-workshares are standard KawPoW partial proofs, not AI outputs.
+Note: until TWP is live on Quai mainnet, the model uses KawPoW hashrate as
+a proxy for TWP receipts/sec. Once the protocol launches, the reference rig
+should be calibrated with `benchmark.py --calibrate-rig --algo twp` and the
+research.yaml soap.reference_twp block updated accordingly.
 """
 from __future__ import annotations
 
@@ -333,10 +341,12 @@ def render_markdown(
         )
     lines.append("# Claim 6: Workshare-for-Inference Dual-Revenue Model\n")
     lines.append(
-        "An inference worker running on a Quai-connected GPU submits workshares "
-        "while serving jobs, earning Qi block rewards **on top of** customer payment. "
-        "This models the dual-revenue economics and the break-even point where "
-        "workshare rewards alone cover the energy cost of running inference.\n"
+        "A GPU running the InferenceGemm harness submits **Tensor Work Proof (TWP) receipts "
+        "as native Quai workshares**, earning Qi block rewards on top of customer payment. "
+        "TWP inference is a confirmed first-class merge-mining algorithm on Quai alongside "
+        "SHA-256 (BCH/BTC), Scrypt (LTC/DOGE), and Ravencoin KawPoW. "
+        "The GPU IS the miner: the TWP receipt is the proof-of-work, the Qi reward is the "
+        "block subsidy, and the inference fee is the transaction fee.\n"
     )
     lines.append(f"**Reference rig:** {result['rig_name']} "
                  f"({result['rig_hashrate_mhs']} MH/s, {result['rig_watts']} W)\n")

@@ -319,27 +319,28 @@ def fetch_exchange_rate(config: dict[str, Any], data_dir: Path) -> str:
 def fetch_workshare_difficulty(config: dict[str, Any], data_dir: Path) -> str:
     """Sample block headers to build daily per-algorithm workshare difficulty series.
 
-    Since Project SOAP (Dec 2025), Quai blocks include workshares from three
+    Since Project SOAP (Dec 2025), Quai blocks include workshares from four
     algorithm families:
       - KawPoW (GPU) workshares below block difficulty threshold
       - SHA-256 (Bitcoin/BCH ASICs) workshares via AuxPoW
-      - Scrypt (Litecoin/Dogecoin ASICs) workshares via AuxPoW
+      - Scrypt (Litecoin/Dogecoin / Ravencoin KawPoW) workshares via AuxPoW
+      - TWP (Tensor Work Proof) inference workshares — planned native algorithm
 
     Each workshare has a ``difficulty`` field (hex) that represents the work
-    done by that hardware class. We aggregate these into three daily series:
-      workshare_difficulty_sha256   : sum of SHA-256 workshare difficulties
-      workshare_difficulty_scrypt   : sum of Scrypt workshare difficulties
-      workshare_difficulty_kawpow_ws: sum of KawPoW workshare difficulties
+    done by that hardware class. We aggregate these into daily series:
+      workshare_difficulty_kawpow_ws: sum of KawPoW GPU workshare difficulties
+      workshare_difficulty_soap_ws  : sum of SOAP/ASIC workshare difficulties
+      workshare_difficulty_twp_ws   : sum of TWP inference workshare difficulties
 
     Algorithm identification: the current RPC response does not expose a
     top-level algorithm field on workshares. The ``lock`` field (0x0/0x1)
     encodes miner token election, not algorithm. The algorithm is embedded
     in the raw ``data`` blob (AuxPoW header for SHA-256/Scrypt, KawPoW header
-    for GPU workshares). We use a heuristic: workshares with a ``mixHash``
-    field are KawPoW; those without (or with an auxPoW marker in ``data``)
-    are SOAP workshares. Until the RPC exposes an explicit algo tag, we
-    report two buckets: ``kawpow_ws`` (has mixHash) and ``soap_ws`` (no
-    mixHash), and note the limitation in the output.
+    for GPU workshares, TWP receipt for inference workshares). We use a
+    heuristic: workshares with a ``mixHash`` field are KawPoW; those with a
+    ``twpReceipt`` or ``tensorReceipt`` field are TWP; the remainder are SOAP
+    workshares. Until the RPC exposes an explicit algo tag, these buckets
+    are best-effort and the limitation is documented in the output.
 
     The series extends incrementally on repeated runs (same pattern as
     fetch_difficulty_rpc_scan).
@@ -352,7 +353,7 @@ def fetch_workshare_difficulty(config: dict[str, Any], data_dir: Path) -> str:
     head_number = int(str(dig(head, "result")), 16)
 
     # Load existing caches for each algo bucket
-    algo_buckets = ["kawpow_ws", "soap_ws"]
+    algo_buckets = ["kawpow_ws", "soap_ws", "twp_ws"]
     existing: dict[str, dict[str, float]] = {}
     for algo in algo_buckets:
         cached = read_cache(data_dir, f"workshare_difficulty_{algo}")
@@ -363,6 +364,7 @@ def fetch_workshare_difficulty(config: dict[str, Any], data_dir: Path) -> str:
 
     daily_kawpow: dict[str, float] = dict(existing["kawpow_ws"])
     daily_soap: dict[str, float] = dict(existing["soap_ws"])
+    daily_twp: dict[str, float] = dict(existing["twp_ws"])
 
     sampled = 0
     for number in range(head_number, 0, -step):
@@ -383,37 +385,48 @@ def fetch_workshare_difficulty(config: dict[str, Any], data_dir: Path) -> str:
         workshares = result.get("workshares") or []
         kw_diff_sum = 0.0
         soap_diff_sum = 0.0
+        twp_diff_sum = 0.0
         for ws in workshares:
             raw_diff = ws.get("difficulty", "0x0")
             ws_diff = int(str(raw_diff), 16) if str(raw_diff).startswith("0x") else int(raw_diff)
-            # Heuristic: KawPoW workshares have a mixHash field; SOAP workshares do not
-            if ws.get("mixHash") is not None:
+            # Heuristic classification:
+            # - TWP inference workshares: have a twpReceipt or tensorReceipt field
+            # - KawPoW GPU workshares: have a mixHash field (no TWP receipt)
+            # - SOAP ASIC workshares: neither mixHash nor TWP receipt (AuxPoW)
+            if ws.get("twpReceipt") is not None or ws.get("tensorReceipt") is not None:
+                twp_diff_sum += ws_diff
+            elif ws.get("mixHash") is not None:
                 kw_diff_sum += ws_diff
             else:
                 soap_diff_sum += ws_diff
 
         daily_kawpow[date] = kw_diff_sum
         daily_soap[date] = soap_diff_sum
+        daily_twp[date] = twp_diff_sum
         resume_dates.add(date)
         sampled += 1
         if sampled >= 400:
             break
 
-    if not daily_kawpow and not daily_soap:
+    if not daily_kawpow and not daily_soap and not daily_twp:
         raise ValueError("workshare_difficulty: rpc scan produced no samples")
 
     source = (
         f"{url} (rpc_scan workshares, step={step}; "
-        "algo split: kawpow_ws=has-mixHash, soap_ws=no-mixHash; "
-        "SHA-256 vs Scrypt distinction requires AuxPoW data parsing - pending RPC upgrade)"
+        "algo split: kawpow_ws=has-mixHash, soap_ws=no-mixHash-or-twpReceipt, "
+        "twp_ws=has-twpReceipt/tensorReceipt; "
+        "SHA-256 vs Scrypt distinction requires AuxPoW data parsing - pending RPC upgrade; "
+        "TWP field names are provisional - pending protocol finalisation)"
     )
     write_cache(data_dir, "workshare_difficulty_kawpow_ws", daily_kawpow, source)
     write_cache(data_dir, "workshare_difficulty_soap_ws", daily_soap, source)
+    write_cache(data_dir, "workshare_difficulty_twp_ws", daily_twp, source)
     n_kw = len(daily_kawpow)
     n_soap = len(daily_soap)
+    n_twp = len(daily_twp)
     return (
-        f"workshare_difficulty: {n_kw} days kawpow_ws, {n_soap} days soap_ws "
-        f"({sampled} new blocks sampled)"
+        f"workshare_difficulty: {n_kw} days kawpow_ws, {n_soap} days soap_ws, "
+        f"{n_twp} days twp_ws ({sampled} new blocks sampled)"
     )
 
 

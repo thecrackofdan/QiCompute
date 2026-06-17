@@ -315,6 +315,30 @@ _ALGO_CONFIG: dict[str, dict[str, Any]] = {
         "yaml_block": "soap.reference_scrypt",
         "hashrate_label": "hashrate_hps",
     },
+    # Ravencoin KawPoW: same algorithm as Quai, energy_factor = 1.0 by definition.
+    # Useful to confirm the reference rig numbers match when pointed at RVN stratum.
+    "rvn": {
+        "command_key": ("soap", "rvn_miner_command"),
+        "regex_key": ("soap", "rvn_hashrate_regex"),
+        "multiplier_key": ("soap", "rvn_hashrate_unit_multiplier"),
+        "default_regex": r"([0-9]+(?:\.[0-9]+)?)\s*[Mm][Hh]/s",
+        "default_multiplier": 1_000_000,  # MH/s -> H/s
+        "yaml_block": "soap.reference_rvn",
+        "hashrate_label": "hashrate_hps",
+    },
+    # TWP inference: the GPU runs InferenceGemm and emits Tensor Work Receipts.
+    # 'hashrate' here is receipts/sec (tok/s / tokens_per_receipt).
+    # Calibration uses the igemm backend directly (no external miner command needed).
+    # energy_factor = (watts / receipts_per_sec) / (ref_gpu_watts / ref_gpu_kawpow_hps)
+    "twp": {
+        "command_key": ("soap", "twp_miner_command"),  # empty list -> igemm backend path
+        "regex_key": ("soap", "twp_hashrate_regex"),
+        "multiplier_key": ("soap", "twp_hashrate_unit_multiplier"),
+        "default_regex": r"([0-9]+(?:\.[0-9]+)?)\s*receipts?/s",
+        "default_multiplier": 1,
+        "yaml_block": "soap.reference_twp",
+        "hashrate_label": "hashrate_hps",
+    },
 }
 
 
@@ -337,7 +361,9 @@ def run_rig_calibration(
     """Measure this rig's hashrate and watts for the given algorithm.
 
     algo: 'kawpow' (default, GPU KawPoW) | 'sha256' (ASIC SHA-256) | 'scrypt' (ASIC Scrypt)
+          'rvn' (Ravencoin KawPoW, energy_factor=1.0) | 'twp' (TWP inference receipts/sec)
 
+    For 'twp', the igemm backend is used directly (no external miner command needed).
     Returns a dict with hashrate_hps, watts, measured, and algo.
     Also prints the research.yaml block to paste in.
     """
@@ -347,6 +373,44 @@ def run_rig_calibration(
         return {"hashrate_hps": 0, "watts": 0.0, "measured": False, "algo": algo}
 
     command = [str(part) for part in _get_nested(config, algo_cfg["command_key"], [])]
+
+    # TWP: no external miner command — use the igemm backend to measure receipts/sec
+    if algo == "twp" and not command:
+        bench_cfg = config.get("benchmark", {})
+        igemm_url = str(bench_cfg.get("igemm_url", "http://localhost:8000"))
+        igemm_model = str(bench_cfg.get("igemm_model", ""))
+        print(f"calibrate-rig (twp): measuring InferenceGemm receipts/sec for {minutes:.1f} minutes...")
+        print(f"  endpoint: {igemm_url}  model: {igemm_model or '(from config)'}")
+        sampler = WattSampler(telemetry)
+        sampler.start()
+        result = _run_igemm_phase(igemm_url, igemm_model, int(minutes * 60))
+        watts = sampler.stop()
+        receipts_per_sec = result.get("receipts_per_sec", 0.0)
+        if receipts_per_sec <= 0:
+            print("calibrate-rig (twp): igemm backend returned no receipts — is the server running?")
+            return {"hashrate_hps": 0, "watts": watts, "measured": False, "algo": algo}
+        # Compute energy_factor vs KawPoW reference
+        ref_gpu = config.get("reference_gpu", {})
+        ref_hps = float(ref_gpu.get("hashrate_hps", 0) or 0)
+        ref_watts = float(ref_gpu.get("watts", 300) or 300)
+        ref_j_per_hash = ref_watts / ref_hps if ref_hps > 0 else None
+        twp_j_per_receipt = watts / receipts_per_sec if receipts_per_sec > 0 else None
+        energy_factor = (twp_j_per_receipt / ref_j_per_hash) if (ref_j_per_hash and twp_j_per_receipt) else None
+        print(f"\ncalibrate-rig (twp) results:")
+        print(f"  receipts/sec : {receipts_per_sec:.3f}")
+        print(f"  watts        : {watts:.1f} W")
+        print(f"  J/receipt    : {twp_j_per_receipt:.4f}" if twp_j_per_receipt else "  J/receipt    : N/A")
+        print(f"  energy_factor vs KawPoW ref: {energy_factor:.4f}" if energy_factor else "  energy_factor: N/A (set reference_gpu first)")
+        print(f"\nPaste into research.yaml soap section:")
+        print(f"  reference_twp:")
+        print(f"    name: \"{igemm_model}\"")
+        print(f"    hashrate_hps: {int(receipts_per_sec)}   # receipts/sec")
+        print(f"    watts: {watts:.1f}")
+        if energy_factor:
+            print(f"  algo_energy_factors:")
+            print(f"    twp: {energy_factor:.6f}   # measured J/receipt / J/KawPoW-hash")
+        return {"hashrate_hps": int(receipts_per_sec), "watts": watts, "measured": True, "algo": algo}
+
     if not command:
         section, key = algo_cfg["command_key"]
         print(f"calibrate-rig: no {section}.{key} configured in research.yaml")
@@ -396,7 +460,7 @@ def main() -> int:
         "--algo",
         default="kawpow",
         choices=list(_ALGO_CONFIG),
-        help="Algorithm to calibrate (kawpow=GPU default, sha256=ASIC SHA-256, scrypt=ASIC Scrypt)",
+        help="Algorithm to calibrate: kawpow (GPU KawPoW), sha256 (ASIC SHA-256), scrypt (ASIC Scrypt), rvn (Ravencoin KawPoW, energy_factor=1.0), twp (TWP inference receipts/sec via igemm backend)",
     )
     parser.add_argument("--store", action="store_true", help="Append the inference measurement to measurements.db (claim 3 dataset)")
     parser.add_argument("--measurements-db", default="measurements.db")

@@ -316,6 +316,107 @@ def fetch_exchange_rate(config: dict[str, Any], data_dir: Path) -> str:
     return f"exchange_rate_qi_per_quai: {len(series)} daily points ({sampled} new via rpc)"
 
 
+def fetch_workshare_difficulty(config: dict[str, Any], data_dir: Path) -> str:
+    """Sample block headers to build daily per-algorithm workshare difficulty series.
+
+    Since Project SOAP (Dec 2025), Quai blocks include workshares from three
+    algorithm families:
+      - KawPoW (GPU) workshares below block difficulty threshold
+      - SHA-256 (Bitcoin/BCH ASICs) workshares via AuxPoW
+      - Scrypt (Litecoin/Dogecoin ASICs) workshares via AuxPoW
+
+    Each workshare has a ``difficulty`` field (hex) that represents the work
+    done by that hardware class. We aggregate these into three daily series:
+      workshare_difficulty_sha256   : sum of SHA-256 workshare difficulties
+      workshare_difficulty_scrypt   : sum of Scrypt workshare difficulties
+      workshare_difficulty_kawpow_ws: sum of KawPoW workshare difficulties
+
+    Algorithm identification: the current RPC response does not expose a
+    top-level algorithm field on workshares. The ``lock`` field (0x0/0x1)
+    encodes miner token election, not algorithm. The algorithm is embedded
+    in the raw ``data`` blob (AuxPoW header for SHA-256/Scrypt, KawPoW header
+    for GPU workshares). We use a heuristic: workshares with a ``mixHash``
+    field are KawPoW; those without (or with an auxPoW marker in ``data``)
+    are SOAP workshares. Until the RPC exposes an explicit algo tag, we
+    report two buckets: ``kawpow_ws`` (has mixHash) and ``soap_ws`` (no
+    mixHash), and note the limitation in the output.
+
+    The series extends incrementally on repeated runs (same pattern as
+    fetch_difficulty_rpc_scan).
+    """
+    diff_cfg = config["difficulty"]
+    url = diff_cfg["rpc_url"]
+    step = max(int(diff_cfg.get("rpc_block_step", 3000)), 1)
+
+    head = http_post_json(url, {"jsonrpc": "2.0", "id": 1, "method": "quai_blockNumber", "params": []})
+    head_number = int(str(dig(head, "result")), 16)
+
+    # Load existing caches for each algo bucket
+    algo_buckets = ["kawpow_ws", "soap_ws"]
+    existing: dict[str, dict[str, float]] = {}
+    for algo in algo_buckets:
+        cached = read_cache(data_dir, f"workshare_difficulty_{algo}")
+        existing[algo] = dict(cached["series"]) if cached else {}
+
+    # Use kawpow_ws as the resume anchor (all buckets share the same scan)
+    resume_dates = set(existing["kawpow_ws"].keys())
+
+    daily_kawpow: dict[str, float] = dict(existing["kawpow_ws"])
+    daily_soap: dict[str, float] = dict(existing["soap_ws"])
+
+    sampled = 0
+    for number in range(head_number, 0, -step):
+        block = http_post_json(
+            url,
+            {"jsonrpc": "2.0", "id": 1, "method": "quai_getBlockByNumber", "params": [hex(number), True]},
+        )
+        result = block.get("result") or {}
+        wo = result.get("woHeader") or {}
+        raw_timestamp = wo.get("timestamp")
+        if raw_timestamp is None:
+            continue
+        timestamp = int(str(raw_timestamp), 16) if str(raw_timestamp).startswith("0x") else int(raw_timestamp)
+        date = datetime.fromtimestamp(timestamp, tz=timezone.utc).date().isoformat()
+        if date in resume_dates:
+            break  # cache already covers from here back
+
+        workshares = result.get("workshares") or []
+        kw_diff_sum = 0.0
+        soap_diff_sum = 0.0
+        for ws in workshares:
+            raw_diff = ws.get("difficulty", "0x0")
+            ws_diff = int(str(raw_diff), 16) if str(raw_diff).startswith("0x") else int(raw_diff)
+            # Heuristic: KawPoW workshares have a mixHash field; SOAP workshares do not
+            if ws.get("mixHash") is not None:
+                kw_diff_sum += ws_diff
+            else:
+                soap_diff_sum += ws_diff
+
+        daily_kawpow[date] = kw_diff_sum
+        daily_soap[date] = soap_diff_sum
+        resume_dates.add(date)
+        sampled += 1
+        if sampled >= 400:
+            break
+
+    if not daily_kawpow and not daily_soap:
+        raise ValueError("workshare_difficulty: rpc scan produced no samples")
+
+    source = (
+        f"{url} (rpc_scan workshares, step={step}; "
+        "algo split: kawpow_ws=has-mixHash, soap_ws=no-mixHash; "
+        "SHA-256 vs Scrypt distinction requires AuxPoW data parsing - pending RPC upgrade)"
+    )
+    write_cache(data_dir, "workshare_difficulty_kawpow_ws", daily_kawpow, source)
+    write_cache(data_dir, "workshare_difficulty_soap_ws", daily_soap, source)
+    n_kw = len(daily_kawpow)
+    n_soap = len(daily_soap)
+    return (
+        f"workshare_difficulty: {n_kw} days kawpow_ws, {n_soap} days soap_ws "
+        f"({sampled} new blocks sampled)"
+    )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Fetch and cache claim data")
     parser.add_argument("--config", default="research.yaml")
@@ -332,6 +433,9 @@ def main() -> int:
         ("electricity_usd_per_kwh", lambda: fetch_electricity(config, data_dir)),
         ("token_choice_qi_fraction", lambda: fetch_token_choice(config, data_dir)),
         ("exchange_rate_qi_per_quai", lambda: fetch_exchange_rate(config, data_dir)),
+        # workshare_difficulty writes two cache files (kawpow_ws + soap_ws) in one pass;
+        # registered under the kawpow_ws name so the cache-skip logic can check it.
+        ("workshare_difficulty_kawpow_ws", lambda: fetch_workshare_difficulty(config, data_dir)),
     ]
     # Difficulty in rpc_scan mode always runs so it can append new blocks to
     # the existing cache (the scan resumes from the last cached date). In
@@ -339,9 +443,13 @@ def main() -> int:
     # the cache skip like every other dataset to avoid redundant network calls.
     diff_mode = str(config.get("difficulty", {}).get("mode", "both"))
     difficulty_always_runs = diff_mode in {"rpc_scan", "both"}
-    # token_choice and exchange_rate use the same incremental RPC scan pattern
-    # as difficulty rpc_scan, so they always run to extend history.
-    rpc_always_runs = {"token_choice_qi_fraction", "exchange_rate_qi_per_quai"}
+    # token_choice, exchange_rate, and workshare_difficulty use the same incremental
+    # RPC scan pattern as difficulty rpc_scan, so they always run to extend history.
+    rpc_always_runs = {
+        "token_choice_qi_fraction",
+        "exchange_rate_qi_per_quai",
+        "workshare_difficulty_kawpow_ws",
+    }
     failures = 0
     for name, job in jobs:
         if not args.force and read_cache(data_dir, name):

@@ -197,3 +197,42 @@ and the controller responds by making Qi more attractive until equilibrium is re
 consistently moved the exchange rate in the *wrong* direction (P5a fails), or if the
 market-implied rate (QUAI_USD / QI_USD) diverged persistently from the on-chain rate
 (P5c fails). Those are the testable failure modes, and claim 5 is designed to catch them.
+
+## (j) SOAP workshares make the energy model incomplete — SHA-256 and Scrypt energy is unaccounted for
+
+**Objection:** Since Project SOAP (Dec 2025), SHA-256 ASICs (Bitcoin Cash hardware) and
+Scrypt ASICs (Litecoin/Dogecoin hardware) can submit workshares to Quai blocks and earn
+QUAI rewards. These ASICs expend real energy, but the claim-1 cost model only uses KawPoW
+difficulty — so the modeled cost of producing one Qi is an undercount of the true network
+energy expenditure. A peg that understates the energy input is not a real energy peg.
+
+**Treatment here:** The claim-1 cost model is extended to account for SOAP workshare
+energy via an energy-normalised effective difficulty (see `claim1_peg.py`):
+
+    total_effective_difficulty = kawpow_difficulty
+                               + sum(ws_difficulty[algo] * energy_factor[algo])
+
+where `energy_factor[algo]` converts each algorithm's difficulty into KawPoW-equivalent
+energy units (J per hash differs by algorithm). Default factors are derived from published
+ASIC specs and stored in `research.yaml` under `soap.algo_energy_factors`; they can be
+replaced with measured values via `python3 benchmark.py --calibrate-rig --algo sha256`.
+
+**Why the returns verdict is still valid during the transition:** the returns-based
+verdict (claim 1) is invariant to the absolute energy scale — constant multipliers cancel
+in log-returns. The multi-algorithm extension only affects *level* claims (joules/Qi,
+price-to-cost ratio). The returns verdict is effectively "Qi versus difficulty"; adding
+workshare difficulty to the effective difficulty series does not change the qualitative
+result, only the level.
+
+**What remains an open risk:** the current RPC response does not expose an explicit
+algorithm field on workshares — the SHA-256 vs Scrypt distinction requires parsing the
+raw `data` blob (AuxPoW header). Until the RPC is upgraded, `fetch_data.py` splits
+workshares into two buckets by heuristic (KawPoW workshares have a `mixHash` field;
+SOAP workshares do not). The `soap_ws` bucket is treated as SHA-256 by default. This
+is noted in every output that uses workshare data, and the limitation is tracked in
+the `fetch_workshare_difficulty` docstring.
+
+**Merge-mining and ASIC coverage:** the workshare mechanism means the same hardware
+that secures Bitcoin Cash or Litecoin also contributes to Quai's energy anchor — without
+any additional energy expenditure. This is a strength of the thesis, not a weakness: the
+energy peg is anchored to a broader, more diverse hardware base than KawPoW alone.

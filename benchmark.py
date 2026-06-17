@@ -1,7 +1,9 @@
 """Claim 3 measurement: joules/token on this rig, plus reference-rig calibration.
 
     python3 benchmark.py --minutes 5 --store          # measure inference, store to measurements.db
-    python3 benchmark.py --calibrate-rig --minutes 5  # measure mining hashrate+watts for research.yaml
+    python3 benchmark.py --calibrate-rig --minutes 5  # measure KawPoW (GPU) hashrate+watts
+    python3 benchmark.py --calibrate-rig --algo sha256 --minutes 5  # measure SHA-256 ASIC rig
+    python3 benchmark.py --calibrate-rig --algo scrypt --minutes 5  # measure Scrypt ASIC rig
 
 MEASUREMENT BOUNDARY (claim 3 methodology - report this with any number):
 joules/token here is MARGINAL GPU BOARD DRAW divided by token throughput.
@@ -18,9 +20,18 @@ These choices can swing joules/token 2-5x; rows with different boundaries
 must not be pooled (PREDICTIONS.md P3). The boundary string is stored in
 each row's notes so the public dataset stays comparable.
 
---calibrate-rig runs the configured Quai miner instead, parses live hashrate
-from its stdout, samples watts, and prints the reference_gpu block to paste
-into research.yaml - the rig behind claim 1's modeled cost of production.
+--calibrate-rig runs the configured miner instead, parses live hashrate from
+its stdout, samples watts, and prints the reference block to paste into
+research.yaml. Use --algo to specify the hardware class:
+
+  --algo kawpow  (default) KawPoW GPU miner -> reference_gpu block
+  --algo sha256            SHA-256 ASIC miner -> soap.reference_sha256 block
+  --algo scrypt            Scrypt ASIC miner -> soap.reference_scrypt block
+
+The soap.reference_sha256 and soap.reference_scrypt blocks feed the
+multi-algorithm energy model in claim1_peg.py (effective_difficulty).
+The energy_factor for each algo is derived from the measured J/hash relative
+to the KawPoW reference rig.
 
 This script measures physics only (tokens/sec, watts, joules/token,
 hashes/sec). Qi-denominated derivations live in qi_index.py; this script
@@ -208,14 +219,81 @@ def run_inference_phase(bench_cfg: dict[str, Any], minutes: float, telemetry: GP
     }
 
 
-def run_rig_calibration(bench_cfg: dict[str, Any], minutes: float, telemetry: GPUTelemetry) -> dict[str, Any]:
-    """Measure this rig's Quai hashrate and watts: the reference_gpu for claim 1."""
-    command = [str(part) for part in bench_cfg.get("miner_command", [])]
+# ---------------------------------------------------------------------------
+# Per-algorithm calibration config keys in research.yaml
+# kawpow: benchmark.miner_command / benchmark.hashrate_regex (existing)
+# sha256: soap.sha256_miner_command / soap.sha256_hashrate_regex
+# scrypt: soap.scrypt_miner_command / soap.scrypt_hashrate_regex
+# ---------------------------------------------------------------------------
+_ALGO_CONFIG: dict[str, dict[str, Any]] = {
+    "kawpow": {
+        "command_key": ("benchmark", "miner_command"),
+        "regex_key": ("benchmark", "hashrate_regex"),
+        "multiplier_key": ("benchmark", "hashrate_unit_multiplier"),
+        "default_regex": r"([0-9]+(?:\.[0-9]+)?)\s*[Mm][Hh]/s",
+        "default_multiplier": 1_000_000,
+        "yaml_block": "reference_gpu",
+        "hashrate_label": "hashrate_hps",
+    },
+    "sha256": {
+        "command_key": ("soap", "sha256_miner_command"),
+        "regex_key": ("soap", "sha256_hashrate_regex"),
+        "multiplier_key": ("soap", "sha256_hashrate_unit_multiplier"),
+        "default_regex": r"([0-9]+(?:\.[0-9]+)?)\s*[Tt][Hh]/s",
+        "default_multiplier": 1_000_000_000_000,  # TH/s -> H/s
+        "yaml_block": "soap.reference_sha256",
+        "hashrate_label": "hashrate_hps",
+    },
+    "scrypt": {
+        "command_key": ("soap", "scrypt_miner_command"),
+        "regex_key": ("soap", "scrypt_hashrate_regex"),
+        "multiplier_key": ("soap", "scrypt_hashrate_unit_multiplier"),
+        "default_regex": r"([0-9]+(?:\.[0-9]+)?)\s*[Gg][Hh]/s",
+        "default_multiplier": 1_000_000_000,  # GH/s -> H/s
+        "yaml_block": "soap.reference_scrypt",
+        "hashrate_label": "hashrate_hps",
+    },
+}
+
+
+def _get_nested(config: dict[str, Any], keys: tuple[str, ...], default: Any = None) -> Any:
+    """Safely retrieve a nested config value by key path tuple."""
+    current: Any = config
+    for key in keys:
+        if not isinstance(current, dict):
+            return default
+        current = current.get(key, default)
+    return current
+
+
+def run_rig_calibration(
+    config: dict[str, Any],
+    minutes: float,
+    telemetry: GPUTelemetry,
+    algo: str = "kawpow",
+) -> dict[str, Any]:
+    """Measure this rig's hashrate and watts for the given algorithm.
+
+    algo: 'kawpow' (default, GPU KawPoW) | 'sha256' (ASIC SHA-256) | 'scrypt' (ASIC Scrypt)
+
+    Returns a dict with hashrate_hps, watts, measured, and algo.
+    Also prints the research.yaml block to paste in.
+    """
+    algo_cfg = _ALGO_CONFIG.get(algo)
+    if algo_cfg is None:
+        print(f"calibrate-rig: unknown --algo '{algo}'; choose from: {', '.join(_ALGO_CONFIG)}")
+        return {"hashrate_hps": 0, "watts": 0.0, "measured": False, "algo": algo}
+
+    command = [str(part) for part in _get_nested(config, algo_cfg["command_key"], [])]
     if not command:
-        print("calibrate-rig: no benchmark.miner_command configured in research.yaml")
-        return {"hashrate_hps": 0, "watts": 0.0, "measured": False}
-    pattern = re.compile(str(bench_cfg.get("hashrate_regex", r"([0-9]+(?:\.[0-9]+)?)\s*[Mm][Hh]/s")))
-    multiplier = int(bench_cfg.get("hashrate_unit_multiplier", 1_000_000))
+        section, key = algo_cfg["command_key"]
+        print(f"calibrate-rig: no {section}.{key} configured in research.yaml")
+        return {"hashrate_hps": 0, "watts": 0.0, "measured": False, "algo": algo}
+
+    pattern = re.compile(
+        str(_get_nested(config, algo_cfg["regex_key"], algo_cfg["default_regex"]))
+    )
+    multiplier = int(_get_nested(config, algo_cfg["multiplier_key"], algo_cfg["default_multiplier"]))
     readings: list[float] = []
 
     process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
@@ -231,7 +309,7 @@ def run_rig_calibration(bench_cfg: dict[str, Any], minutes: float, telemetry: GP
     reader.start()
     sampler = WattSampler(telemetry)
     sampler.start()
-    print(f"calibrate-rig: running {' '.join(command)} for {minutes:.1f} minutes...")
+    print(f"calibrate-rig ({algo}): running {' '.join(command)} for {minutes:.1f} minutes...")
     time.sleep(minutes * 60)
     process.terminate()
     try:
@@ -240,17 +318,24 @@ def run_rig_calibration(bench_cfg: dict[str, Any], minutes: float, telemetry: GP
         process.kill()
     watts = sampler.stop()
     if not readings:
-        print("calibrate-rig: no hashrate lines matched benchmark.hashrate_regex")
-        return {"hashrate_hps": 0, "watts": watts, "measured": False}
+        section, key = algo_cfg["regex_key"]
+        print(f"calibrate-rig: no hashrate lines matched {section}.{key}")
+        return {"hashrate_hps": 0, "watts": watts, "measured": False, "algo": algo}
     hashrate = sum(readings[-20:]) / len(readings[-20:])
-    return {"hashrate_hps": int(hashrate), "watts": watts, "measured": True}
+    return {"hashrate_hps": int(hashrate), "watts": watts, "measured": True, "algo": algo}
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Claim 3 joules/token measurement and reference-rig calibration")
     parser.add_argument("--config", default="research.yaml")
     parser.add_argument("--minutes", type=float, default=5.0, help="Minutes of measurement")
-    parser.add_argument("--calibrate-rig", action="store_true", help="Measure Quai mining hashrate+watts instead of inference")
+    parser.add_argument("--calibrate-rig", action="store_true", help="Measure mining hashrate+watts instead of inference")
+    parser.add_argument(
+        "--algo",
+        default="kawpow",
+        choices=list(_ALGO_CONFIG),
+        help="Algorithm to calibrate (kawpow=GPU default, sha256=ASIC SHA-256, scrypt=ASIC Scrypt)",
+    )
     parser.add_argument("--store", action="store_true", help="Append the inference measurement to measurements.db (claim 3 dataset)")
     parser.add_argument("--measurements-db", default="measurements.db")
     parser.add_argument("--contributor", default="", help="Handle to credit in the public dataset")
@@ -264,13 +349,34 @@ def main() -> int:
     )
 
     if args.calibrate_rig:
-        rig = run_rig_calibration(bench_cfg, args.minutes, telemetry)
+        rig = run_rig_calibration(config, args.minutes, telemetry, algo=args.algo)
         if rig["measured"]:
-            print("\nMeasured reference rig - paste into research.yaml:")
-            print("reference_gpu:")
-            print(f"  name: \"{gpu_metadata(str(bench_cfg.get('nvidia_smi_path', 'nvidia-smi'))).get('gpu_name') or 'measured-gpu'}\"")
-            print(f"  hashrate_hps: {rig['hashrate_hps']}")
-            print(f"  watts: {int(round(rig['watts']))}")
+            algo_cfg = _ALGO_CONFIG[args.algo]
+            yaml_block = algo_cfg["yaml_block"]
+            print(f"\nMeasured {args.algo} reference rig - paste into research.yaml under '{yaml_block}':")
+            if args.algo == "kawpow":
+                gpu_name = gpu_metadata(str(bench_cfg.get("nvidia_smi_path", "nvidia-smi"))).get("gpu_name") or "measured-gpu"
+                print(f"reference_gpu:")
+                print(f"  name: \"{gpu_name}\"")
+                print(f"  hashrate_hps: {rig['hashrate_hps']}")
+                print(f"  watts: {int(round(rig['watts']))}")
+            else:
+                # SHA-256 or Scrypt ASIC: print soap sub-block
+                # Also compute energy_factor relative to KawPoW reference
+                kw_ref = config.get("reference_gpu", {})
+                kw_hps = float(kw_ref.get("hashrate_hps", 45_000_000))
+                kw_watts = float(kw_ref.get("watts", 300))
+                kw_j_per_hash = kw_watts / kw_hps if kw_hps > 0 else 0.0
+                asic_j_per_hash = rig["watts"] / rig["hashrate_hps"] if rig["hashrate_hps"] > 0 else 0.0
+                energy_factor = asic_j_per_hash / kw_j_per_hash if kw_j_per_hash > 0 else 0.0
+                print(f"soap:")
+                print(f"  reference_{args.algo}:")
+                print(f"    name: \"measured-{args.algo}-asic\"")
+                print(f"    hashrate_hps: {rig['hashrate_hps']}")
+                print(f"    watts: {int(round(rig['watts']))}")
+                print(f"  algo_energy_factors:")
+                print(f"    {args.algo}: {energy_factor:.6e}  # measured J/hash / KawPoW J/hash")
+                print(f"    # Update this in soap.algo_energy_factors to override the default estimate.")
         return 0
 
     inference = run_inference_phase(bench_cfg, args.minutes, telemetry)

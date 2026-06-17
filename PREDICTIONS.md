@@ -75,6 +75,16 @@ constants matter only for *level* claims (joules/Qi, the price-to-cost
 ratio, the index), which claim 1 reports with a $0.04–$0.20/kWh range and
 which carry no pass/fail condition here.
 
+**Multi-algorithm note (SOAP):** Since Project SOAP (Dec 2025), SHA-256
+(BCH/BTC) and Scrypt (LTC/DOGE) ASICs submit workshares to Quai blocks.
+The cost model in claim 1 is extended to account for this additional energy
+via an energy-normalised effective difficulty (see `claim1_peg.py`). The
+returns-based verdict is invariant to this extension (workshare difficulty
+also cancels in log-returns); the extension only affects level claims. When
+workshare difficulty data is available, the output notes which algorithms
+contributed. When unavailable, the single-algorithm KawPoW baseline is used
+and the output notes that the energy anchor is an undercount.
+
 **Data conditions:** the evaluability preconditions above. Below either
 threshold the output is `insufficient_data` / `below_liquidity_threshold`,
 reported as such.

@@ -86,6 +86,48 @@ claim5:
   # Divide raw hex value by this to get Qi-per-QUAI.
   exchange_rate_scale: 1.0e18
 
+soap:
+  # Project SOAP (Subsidized Open-market Acquisition Protocol) - launched Dec 2025.
+  # Allows SHA-256 (BCH/BTC) and Scrypt (LTC/DOGE) ASICs to submit workshares
+  # to Quai blocks, earning QUAI rewards while the parent-chain block reward
+  # (BCH/LTC/DOGE) is converted to QUAI buybacks by the protocol.
+  #
+  # Algorithm energy normalisation factors (J/hash relative to KawPoW).
+  # These are used in claim1_peg.py effective_difficulty() to convert
+  # workshare difficulty from each algorithm into KawPoW-equivalent energy.
+  #
+  # Default values are derived from published ASIC specs (see claim1_peg.py).
+  # Run `python3 benchmark.py --calibrate-rig --algo sha256` on your ASIC
+  # to measure and replace these with hardware-specific values.
+  algo_energy_factors:
+    kawpow: 1.0                 # reference (RTX 3090, ~6.67e-9 J/hash)
+    sha256: 2.62e-6             # Antminer S21 estimate (~1.75e-14 J/hash)
+    scrypt: 3.15e-2             # Antminer L9 estimate (~2.10e-10 J/hash)
+    soap_ws: 2.62e-6            # default: treat unclassified SOAP workshares as SHA-256
+
+  # Reference ASIC rigs for level claims (joules/Qi from ASIC perspective).
+  # Populated by: python3 benchmark.py --calibrate-rig --algo sha256
+  #               python3 benchmark.py --calibrate-rig --algo scrypt
+  reference_sha256:
+    name: ""                    # e.g. "Antminer S21"
+    hashrate_hps: 0             # H/s (e.g. 200000000000000 for 200 TH/s)
+    watts: 0                    # board draw in watts
+
+  reference_scrypt:
+    name: ""                    # e.g. "Antminer L9"
+    hashrate_hps: 0             # H/s (e.g. 16000000000 for 16 GH/s)
+    watts: 0                    # board draw in watts
+
+  # Miner commands for ASIC calibration (benchmark.py --calibrate-rig --algo sha256/scrypt).
+  # Leave empty if you don't have an ASIC rig to calibrate.
+  sha256_miner_command: []      # e.g. ["cgminer", "--url", "stratum+tcp://...", ...]
+  sha256_hashrate_regex: "([0-9]+(?:\\.[0-9]+)?)\\s*[Tt][Hh]/s"
+  sha256_hashrate_unit_multiplier: 1000000000000  # TH/s -> H/s
+
+  scrypt_miner_command: []      # e.g. ["cgminer", "--scrypt", "--url", ...]
+  scrypt_hashrate_regex: "([0-9]+(?:\\.[0-9]+)?)\\s*[Gg][Hh]/s"
+  scrypt_hashrate_unit_multiplier: 1000000000     # GH/s -> H/s
+
 verdict:
   # PRE-REGISTRATION SWITCH. While false, every claim-1 output is stamped
   # "THRESHOLDS DRAFT - not citable". Flip to true only after the bracketed

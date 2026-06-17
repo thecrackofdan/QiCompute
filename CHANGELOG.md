@@ -4,6 +4,43 @@ All notable changes to QiCompute are documented here. This project follows the s
 
 ## [Unreleased]
 
+### Added (SOAP multi-algorithm energy model)
+
+- **Multi-algorithm energy model in claim 1** (`claim1_peg.py`): the cost model now accounts
+  for SHA-256 (BCH/BTC) and Scrypt (LTC/DOGE) ASIC workshares submitted via Project SOAP
+  (launched Dec 2025). An energy-normalised effective difficulty is computed:
+  `total_effective_difficulty = kawpow_difficulty + Σ(ws_difficulty[algo] × energy_factor[algo])`.
+  When workshare data is available, the output notes which algorithms contributed and reports
+  the workshare energy fraction. When unavailable, the single-algorithm KawPoW baseline is
+  used and the output notes the undercount.
+- `fetch_data.py` gains `fetch_workshare_difficulty()`: an incremental RPC scan that samples
+  the `workshares` field of each block header, splitting into `workshare_difficulty_kawpow_ws`
+  (KawPoW sub-threshold workshares, identified by presence of `mixHash`) and
+  `workshare_difficulty_soap_ws` (SOAP/ASIC workshares). Both series extend incrementally
+  on repeated runs. The algorithm split is heuristic pending an RPC upgrade that exposes
+  an explicit algorithm field; this limitation is documented in the function docstring.
+- `sample_data.py` gains deterministic synthetic fixtures for both workshare series:
+  `workshare_difficulty_kawpow_ws` (proportional to block difficulty with sinusoidal noise)
+  and `workshare_difficulty_soap_ws` (zero before day 45, then a logistic adoption curve
+  reaching Bitcoin-scale SHA-256 difficulty), so the multi-algo pipeline can be exercised
+  offline.
+- `research.yaml` gains a `soap:` section with:
+  - `algo_energy_factors`: default J/hash normalisation factors for kawpow, sha256, scrypt,
+    and soap_ws (derived from published ASIC specs; replaceable with measured values).
+  - `reference_sha256` and `reference_scrypt`: stub blocks for ASIC rig calibration output.
+  - `sha256_miner_command`, `scrypt_miner_command`, and associated regex/multiplier fields
+    for `benchmark.py --calibrate-rig --algo sha256/scrypt`.
+- `benchmark.py` gains `--algo` argument for `--calibrate-rig`: supports `kawpow` (default,
+  existing behavior), `sha256` (SHA-256 ASIC), and `scrypt` (Scrypt ASIC). For ASIC rigs,
+  prints the `soap.reference_sha256` / `soap.reference_scrypt` block and computes the
+  `energy_factor` relative to the KawPoW reference rig automatically.
+- `PREDICTIONS.md` P1 gains a **Multi-algorithm note (SOAP)** explaining that the
+  returns-based verdict is invariant to the extension (workshare difficulty also cancels
+  in log-returns) while level claims are improved by the more complete energy accounting.
+- `OBJECTIONS.md` gains objection (j): "SOAP workshares make the energy model incomplete"
+  — with a full treatment of the heuristic algorithm split, the level-vs-returns invariance,
+  and why merge-mining is a strength of the thesis (broader, more diverse energy anchor).
+
 ### Added (claim 5 — miner token choice & directionality)
 
 - **Claim 5** (`claim5_token_choice.py`): empirically tests the K-Quai controller's

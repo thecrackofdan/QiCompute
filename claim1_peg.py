@@ -23,9 +23,32 @@ NO-CONCLUSION GATES, applied before any verdict:
   still printed for inspection but no conclusion is drawn either way)
 Thin data is never smoothed into a conclusion.
 
-Cost model: difficulty (hashes/block) / block_reward (Qi/block) = hashes/Qi;
-divided by the reference GPU's hashrate gives seconds of work per Qi; times
-watts gives joules per Qi; times $/kWh gives modeled USD cost per Qi.
+Cost model (single-algorithm baseline):
+  difficulty (hashes/block) / block_reward (Qi/block) = hashes/Qi;
+  divided by the reference GPU's hashrate gives seconds of work per Qi;
+  times watts gives joules per Qi; times $/kWh gives modeled USD cost per Qi.
+
+Multi-algorithm extension (SOAP / workshares):
+  Since Project SOAP (Dec 2025), SHA-256 and Scrypt ASICs submit workshares
+  that are included in KawPoW blocks (up to 9 per block, soft target 3).
+  Each workshare represents real energy expenditure from a different hardware
+  class and contributes to block weight via PoEM entropy. The total network
+  energy per Qi is therefore an undercount if only KawPoW difficulty is used.
+
+  When workshare data is available (fetch_data.py collects daily avg workshare
+  count and per-algorithm difficulty from the RPC), the cost model is extended:
+    total_effective_difficulty = kawpow_difficulty
+                               + sum(ws_difficulty[algo] * ws_count[algo]
+                                     * algo_energy_factor[algo])
+  where algo_energy_factor normalises each algorithm's difficulty to the
+  energy equivalent of KawPoW difficulty (J per hash differs by algorithm).
+  This gives a multi-algorithm effective difficulty that feeds the same
+  joules_per_qi formula.
+
+  NOTE: The returns-based verdict remains invariant to the absolute energy
+  scale ($/kWh, watts, hashrate all cancel in log-returns). The multi-
+  algorithm extension only affects LEVEL claims (joules/Qi, price-to-cost
+  ratio) and the completeness of the energy anchor story.
 
 WHAT THE COST-MODEL CONSTANTS CAN AND CANNOT AFFECT (honesty note): the
 $/kWh, reference hashrate, and watts are constant multipliers on the cost
@@ -51,6 +74,64 @@ from fetch_data import load_research_config, read_cache
 from series import align_by_date, log_returns, ols, pearson
 
 
+# ---------------------------------------------------------------------------
+# Algorithm energy normalisation factors (J per hash, relative to KawPoW).
+# These are used to convert workshare difficulty from SHA-256 / Scrypt into
+# an energy-equivalent KawPoW difficulty for the multi-algorithm cost model.
+#
+# Derivation (approximate, from published ASIC specs):
+#   KawPoW reference: RTX 3090, ~45 MH/s at 300 W -> 6.67e-9 J/hash
+#   SHA-256 reference: Antminer S21, ~200 TH/s at 3500 W -> 1.75e-14 J/hash
+#   Scrypt reference: Antminer L9, ~16 GH/s at 3360 W -> 2.10e-10 J/hash
+#
+# energy_factor[algo] = J_per_hash[algo] / J_per_hash[kawpow]
+# So SHA-256 difficulty contributes much less energy per hash than KawPoW,
+# but SHA-256 difficulty numbers are astronomically larger (Bitcoin-scale),
+# so the product (difficulty * energy_factor) gives the energy-equivalent.
+#
+# These factors are stored in research.yaml under soap.algo_energy_factors
+# and can be updated as better hardware benchmarks become available.
+# The default values below are used when not present in config.
+_DEFAULT_ALGO_ENERGY_FACTORS: dict[str, float] = {
+    "kawpow": 1.0,
+    "sha256": 1.75e-14 / 6.67e-9,   # ~2.62e-6
+    "scrypt": 2.10e-10 / 6.67e-9,   # ~0.0315
+}
+
+
+def algo_energy_factors(config: dict[str, Any]) -> dict[str, float]:
+    """Return per-algorithm energy normalisation factors from config or defaults."""
+    soap_cfg = config.get("soap", {})
+    user_factors = soap_cfg.get("algo_energy_factors", {})
+    return {**_DEFAULT_ALGO_ENERGY_FACTORS, **user_factors}
+
+
+def effective_difficulty(
+    kawpow_difficulty: float,
+    workshare_difficulty: dict[str, float] | None,
+    factors: dict[str, float],
+) -> float:
+    """Compute total energy-equivalent difficulty across all algorithms.
+
+    kawpow_difficulty  : daily KawPoW block difficulty (hashes/block)
+    workshare_difficulty: dict mapping algo name -> daily avg workshare
+                          difficulty contribution for that algo.
+                          Keys: 'sha256', 'scrypt', 'kawpow_ws'
+                          (KawPoW workshares below block threshold).
+                          None or empty -> single-algorithm baseline.
+    factors            : energy normalisation factors from algo_energy_factors()
+
+    Returns the effective difficulty to use in joules_per_qi(), expressed in
+    KawPoW-equivalent hashes/block.
+    """
+    total = kawpow_difficulty
+    if workshare_difficulty:
+        for algo, ws_diff in workshare_difficulty.items():
+            factor = factors.get(algo, 1.0)
+            total += ws_diff * factor
+    return total
+
+
 def joules_per_qi(*, difficulty: float, block_reward_qi: float, hashrate_hps: float, watts: float) -> float:
     if block_reward_qi <= 0 or hashrate_hps <= 0:
         return 0.0
@@ -66,19 +147,32 @@ def modeled_cost_usd_per_qi(*, difficulty: float, block_reward_qi: float, hashra
     return joules / 3_600_000.0 * usd_per_kwh
 
 
-def cost_series(difficulty_series: dict[str, float], config: dict[str, Any]) -> dict[str, float]:
+def cost_series(
+    difficulty_series: dict[str, float],
+    config: dict[str, Any],
+    workshare_difficulty_series: dict[str, dict[str, float]] | None = None,
+) -> dict[str, float]:
+    """Build the daily modeled USD cost of producing one Qi.
+
+    If workshare_difficulty_series is provided (keyed by date, values are
+    per-algo difficulty dicts), the multi-algorithm effective difficulty is
+    used. Otherwise falls back to the single-algorithm KawPoW baseline.
+    """
     gpu = config["reference_gpu"]
     network = config["network"]
-    return {
-        date: modeled_cost_usd_per_qi(
-            difficulty=difficulty,
+    factors = algo_energy_factors(config)
+    result = {}
+    for date, kawpow_diff in difficulty_series.items():
+        ws_diff = workshare_difficulty_series.get(date) if workshare_difficulty_series else None
+        eff_diff = effective_difficulty(kawpow_diff, ws_diff, factors)
+        result[date] = modeled_cost_usd_per_qi(
+            difficulty=eff_diff,
             block_reward_qi=float(Decimal(str(network["block_reward_qi"]))),
             hashrate_hps=float(gpu["hashrate_hps"]),
             watts=float(gpu["watts"]),
             usd_per_kwh=float(Decimal(str(network["usd_per_kwh"]))),
         )
-        for date, difficulty in difficulty_series.items()
-    }
+    return result
 
 
 def cost_level_sensitivity(
@@ -134,8 +228,9 @@ def analyze(
     config: dict[str, Any],
     qi_volume_usd: dict[str, float] | None = None,
     eth_usd: dict[str, float] | None = None,
+    workshare_difficulty_series: dict[str, dict[str, float]] | None = None,
 ) -> dict[str, Any]:
-    cost_usd = cost_series(difficulty, config)
+    cost_usd = cost_series(difficulty, config, workshare_difficulty_series)
     eth: list[float] | None = None
     if eth_usd:
         dates, (qi, btc, cost, eth) = align_by_date(qi_usd, btc_usd, cost_usd, eth_usd)
@@ -152,6 +247,14 @@ def analyze(
     if eth is not None:
         null_regressions["ETH"] = ols(log_returns(eth), qi_returns)
 
+    # Summarise which algorithms contributed to the energy model this run
+    ws_algos_used: list[str] = []
+    if workshare_difficulty_series:
+        all_algos: set[str] = set()
+        for ws_dict in workshare_difficulty_series.values():
+            all_algos.update(ws_dict.keys())
+        ws_algos_used = sorted(all_algos)
+
     result: dict[str, Any] = {
         "aligned_days": n,
         "date_range": [dates[0], dates[-1]] if dates else [],
@@ -165,6 +268,19 @@ def analyze(
         "thresholds_frozen": bool(config.get("verdict", {}).get("thresholds_frozen", False)),
         "liquidity": liquidity_stats(qi_volume_usd),
         "cost_level_sensitivity": cost_level_sensitivity(qi, cost, config),
+        "multi_algo_energy": {
+            "enabled": bool(workshare_difficulty_series),
+            "algorithms": ws_algos_used,
+            "note": (
+                "Multi-algorithm effective difficulty used (KawPoW + workshare contributions). "
+                f"Algorithms: {', '.join(ws_algos_used)}. "
+                "Returns verdict is invariant to this; level claims (joules/Qi, price/cost) are affected."
+            ) if ws_algos_used else (
+                "Single-algorithm KawPoW baseline used. "
+                "Workshare difficulty data not available; run fetch_data.py to collect it. "
+                "The energy anchor is an undercount until SOAP workshare data is included."
+            ),
+        },
     }
     if eth is not None:
         result["returns_regression_qi_on_eth"] = null_regressions["ETH"]
@@ -297,6 +413,14 @@ def render_markdown(result: dict[str, Any], *, synthetic: bool) -> str:
         ]
         lines += [f"| {kwh} | {ratio}x |" for kwh, ratio in ratios.items()]
         lines += [""]
+    multi_algo = result.get("multi_algo_energy", {})
+    if multi_algo:
+        lines += [
+            "## Multi-algorithm energy model (SOAP / workshares)",
+            "",
+            multi_algo.get("note", ""),
+            "",
+        ]
     liquidity = result.get("liquidity", {})
     if liquidity.get("available"):
         lines += [
@@ -348,9 +472,37 @@ def render_chart(result: dict[str, Any], path: str, *, synthetic: bool) -> bool:
     return True
 
 
-def load_inputs(config: dict[str, Any], *, sample: bool) -> dict[str, dict[str, float]] | None:
+def load_workshare_difficulty_series(
+    data_dir: Path,
+) -> dict[str, dict[str, float]] | None:
+    """Load per-algo workshare difficulty from cached JSON files.
+
+    Returns a dict keyed by date -> {algo: difficulty_contribution} or None
+    if no workshare data is available.
+    """
+    # Each algo's workshare difficulty is stored as a separate cache file:
+    #   workshare_difficulty_sha256.json, workshare_difficulty_scrypt.json,
+    #   workshare_difficulty_kawpow_ws.json
+    algo_map = {
+        "sha256": "workshare_difficulty_sha256",
+        "scrypt": "workshare_difficulty_scrypt",
+        "kawpow_ws": "workshare_difficulty_kawpow_ws",
+    }
+    combined: dict[str, dict[str, float]] = {}
+    found_any = False
+    for algo, cache_name in algo_map.items():
+        cached = read_cache(data_dir, cache_name)
+        if cached is None:
+            continue
+        found_any = True
+        for date, value in cached["series"].items():
+            combined.setdefault(date, {})[algo] = float(value)
+    return combined if found_any else None
+
+
+def load_inputs(config: dict[str, Any], *, sample: bool) -> dict[str, Any] | None:
     data_dir = Path("data/sample" if sample else config.get("data_dir", "data"))
-    out = {}
+    out: dict[str, Any] = {}
     for name in ("qi_usd", "btc_usd", "difficulty"):
         cached = read_cache(data_dir, name)
         if cached is None:
@@ -366,6 +518,13 @@ def load_inputs(config: dict[str, Any], *, sample: bool) -> dict[str, dict[str, 
             out[optional] = {date: float(value) for date, value in cached["series"].items()}
         elif optional == "eth_usd":
             print("note: no eth_usd cache; running with BTC as the only null hypothesis")
+    # Multi-algorithm workshare difficulty (optional, SOAP data)
+    ws_diff = load_workshare_difficulty_series(data_dir)
+    if ws_diff:
+        out["workshare_difficulty_series"] = ws_diff
+        print(f"note: workshare difficulty loaded for {len(ws_diff)} days; multi-algorithm energy model active")
+    else:
+        print("note: no workshare difficulty cache; using single-algorithm KawPoW baseline")
     return out
 
 
@@ -385,6 +544,7 @@ def main() -> int:
         config=config,
         qi_volume_usd=inputs.get("qi_volume_usd"),
         eth_usd=inputs.get("eth_usd"),
+        workshare_difficulty_series=inputs.get("workshare_difficulty_series"),
     )
     results_dir = Path(config.get("results_dir", "results"))
     results_dir.mkdir(parents=True, exist_ok=True)
